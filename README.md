@@ -4,6 +4,11 @@ A desktop tool for managing versioned renders and media in VFX and post-producti
 
 In a typical compositing or grading workflow, artists iterate through numbered versions of their renders (`hero_comp_v001`, `hero_comp_v002`, `hero_comp_v003`...) while downstream tools like DaVinci Resolve or Premiere sometimes read from a single "latest" folder or file. LVM helps keeping track - it lets you pick which version is live, copies or links the files into the target location, and keeps a full history of what was promoted and when.
 
+
+<img width="1919" height="989" alt="Screenshot 2026-02-16 232233" src="https://github.com/user-attachments/assets/03e9952e-198c-48e4-a645-3ec862697565" /><img width="1153" height="786" alt="Screenshot 2026-02-16 232045" src="https://github.com/user-attachments/assets/f1d7146e-161b-4538-8a00-500153c13636" />
+<img width="815" height="801" alt="Screenshot 2026-02-16 232057" src="https://github.com/user-attachments/assets/c532c403-0f57-487a-85cc-61183f83cbc0" />
+<img width="1418" height="1158" alt="Screenshot 2026-02-16 232548" src="https://github.com/user-attachments/assets/5c312f5e-e832-4adf-bc24-ea480da9649d" />
+
 ## What It Does
 
 **Discover versioned content automatically.** Point LVM at a directory tree and it walks through it looking for version-numbered folders and image sequences. It understands common VFX naming conventions, frame numbering (`.1001.exr`, `_1001.exr`), and a wide range of media formats (EXR, DPX, TIFF, MOV, MXF, and more).
