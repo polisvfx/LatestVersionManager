@@ -33,6 +33,7 @@ LVM works as both a **GUI application** and a **command-line tool**.
 ```bash
 python app.py
 ```
+Theres also a launch-script for each OS (start_lvm.bat/.sh/.command)
 
 The GUI provides a full project management interface - add sources, browse versions, promote with a progress bar, view history, configure settings, and monitor directories for changes.
 
