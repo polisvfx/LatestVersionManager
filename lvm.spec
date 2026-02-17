@@ -13,6 +13,11 @@ from pathlib import Path
 
 block_cipher = None
 
+# Read version from the package — CI may have patched this before running PyInstaller
+_ns = {}
+exec(Path('src/lvm/__init__.py').read_text(), _ns)
+APP_VERSION = _ns.get('__version__', '0.0.0')
+
 # Collect all PySide6 plugins needed for the app
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
@@ -122,8 +127,8 @@ if sys.platform == 'darwin':
         info_plist={
             'CFBundleName': 'Latest Version Manager',
             'CFBundleDisplayName': 'Latest Version Manager',
-            'CFBundleVersion': '0.1.0',
-            'CFBundleShortVersionString': '0.1.0',
+            'CFBundleVersion': APP_VERSION,
+            'CFBundleShortVersionString': APP_VERSION,
             'NSHighResolutionCapable': True,
             'LSMinimumSystemVersion': '11.0',
             # Needed so macOS doesn't sandbox file access

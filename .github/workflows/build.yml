@@ -78,6 +78,18 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # ── Inject release version into package ─────────────────────────────
+      # When triggered by a published release (tag e.g. v1.2.3), patch
+      # __init__.py so PyInstaller and the running app both report that version.
+      - name: Inject release version
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"   # strip leading 'v' (v1.2.3 → 1.2.3)
+          sed -i "s/__version__ = \".*\"/__version__ = \"$VERSION\"/" src/lvm/__init__.py
+          echo "Version set to: $VERSION"
+
       # ── Build with PyInstaller ───────────────────────────────────────────
       - name: Build with PyInstaller
         run: pyinstaller lvm.spec

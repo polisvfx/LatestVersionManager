@@ -40,7 +40,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 APP_NAME = "Latest Version Manager"
-APP_VERSION = "1.0"
+from src.lvm import __version__ as APP_VERSION
 
 LOGO_PATH = Path(__file__).parent / "resources" / "mp_logo.svg"
 
@@ -1938,6 +1938,8 @@ class AboutDialog(QDialog):
             '<a href="https://marispolis.com" style="color:#5b9bd5;">marispolis.com</a><br>'
             '<a href="mailto:mp@marispolis.com" style="color:#5b9bd5;">mp@marispolis.com</a><br><br>'
             '<a href="https://www.linkedin.com/in/maris-polis-2bb404191/" style="color:#5b9bd5;">LinkedIn</a>'
+            '&nbsp;&nbsp;|&nbsp;&nbsp;'
+            '<a href="https://github.com/polisvfx/LatestVersionManager" style="color:#5b9bd5;">GitHub</a>'
             '</p>'
         )
         info.setOpenExternalLinks(True)
