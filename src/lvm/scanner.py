@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import VersionInfo, WatchedSource
+from .task_tokens import derive_source_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +26,32 @@ class VersionScanner:
         re.compile(r"[._](\d{3,8})\.\w+$"),        # name.1001.exr or name_1001.exr
     ]
 
-    def __init__(self, watched_source: WatchedSource):
+    def __init__(self, watched_source: WatchedSource, task_tokens: list[str] = None):
         self.source = watched_source
         self._version_regex = self._compile_version_pattern(watched_source.version_pattern)
+        self._task_tokens = task_tokens or []
+        self._expected_basename = self._compute_expected_basename()
+
+    def _compute_expected_basename(self) -> str:
+        """Compute the expected basename from the source's sample_filename.
+
+        Returns empty string if no sample_filename is set (disables filtering).
+        """
+        sample = self.source.sample_filename
+        if not sample:
+            return ""
+        tokens = derive_source_tokens(sample, self._task_tokens)
+        return tokens["source_basename"]
+
+    def _matches_basename(self, entry_name: str) -> bool:
+        """Check if an entry's basename matches the expected basename.
+
+        If no expected basename is set, always returns True (no filtering).
+        """
+        if not self._expected_basename:
+            return True
+        tokens = derive_source_tokens(entry_name, self._task_tokens)
+        return tokens["source_basename"] == self._expected_basename
 
     @staticmethod
     def _compile_version_pattern(pattern: str) -> re.Pattern:
@@ -63,8 +87,12 @@ class VersionScanner:
             version_info = None
 
             if entry.is_dir():
+                if not self._matches_basename(entry.name):
+                    continue
                 version_info = self._scan_version_folder(entry)
             elif entry.is_file():
+                if not self._matches_basename(entry.name):
+                    continue
                 version_info = self._scan_version_file(entry)
 
             if version_info:

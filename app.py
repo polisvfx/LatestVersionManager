@@ -1173,6 +1173,8 @@ class DiscoveryDialog(QDialog):
         self._worker = None
         self._config = config
         self._results = []  # store DiscoveryResults for add-to-project
+        self._ignored_paths: set[str] = set()          # ignored source directory paths
+        self._ignored_versions: set[tuple[str, int]] = set()  # (path, version_number)
 
         layout = QVBoxLayout(self)
 
@@ -1212,6 +1214,8 @@ class DiscoveryDialog(QDialog):
         self.result_tree.setRootIsDecorated(True)
         self.result_tree.setAlternatingRowColors(True)
         self.result_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.result_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.result_tree.customContextMenuRequested.connect(self._tree_context_menu)
         header = self.result_tree.header()
         header.setStretchLastSection(True)
         header.resizeSection(0, 300)
@@ -1228,6 +1232,11 @@ class DiscoveryDialog(QDialog):
         self.hide_existing_cb.setToolTip("Hide sources whose directory is already in the project")
         self.hide_existing_cb.toggled.connect(self._rebuild_tree)
         filter_row.addWidget(self.hide_existing_cb)
+        self.show_ignored_cb = QCheckBox("Show ignored")
+        self.show_ignored_cb.setChecked(False)
+        self.show_ignored_cb.setToolTip("Show items you've marked as ignored")
+        self.show_ignored_cb.toggled.connect(self._rebuild_tree)
+        filter_row.addWidget(self.show_ignored_cb)
         filter_row.addStretch()
         layout.addLayout(filter_row)
 
@@ -1339,7 +1348,7 @@ class DiscoveryDialog(QDialog):
         self._rebuild_tree()
 
     def _rebuild_tree(self):
-        """Rebuild the results tree, respecting the hide-existing filter."""
+        """Rebuild the results tree, respecting filters (existing, ignored)."""
         self.result_tree.clear()
 
         if not self._results:
@@ -1356,14 +1365,20 @@ class DiscoveryDialog(QDialog):
 
         existing_dirs = self._get_existing_source_dirs()
         hide_existing = self.hide_existing_cb.isChecked()
+        show_ignored = self.show_ignored_cb.isChecked()
 
         shown = 0
         hidden = 0
 
         for i, result in enumerate(self._results):
             is_existing = self._is_existing(result.path, existing_dirs)
+            is_ignored = result.path in self._ignored_paths
 
             if is_existing and hide_existing:
+                hidden += 1
+                continue
+
+            if is_ignored and not show_ignored:
                 hidden += 1
                 continue
 
@@ -1372,9 +1387,11 @@ class DiscoveryDialog(QDialog):
             except ValueError:
                 display_path = result.path
 
-            # Mark existing sources with a suffix
+            # Mark existing/ignored sources with a suffix
             if is_existing:
                 display_path += "  (already added)"
+            elif is_ignored:
+                display_path += "  (ignored)"
 
             parent_item = QTreeWidgetItem([
                 display_path,
@@ -1397,24 +1414,53 @@ class DiscoveryDialog(QDialog):
                     parent_item.setFont(col, italic_font)
                 parent_item.setFlags(parent_item.flags() & ~Qt.ItemIsSelectable)
 
-            for v in result.versions_found:
+            # Style ignored sources: gray, italic, strikethrough, non-selectable
+            if is_ignored:
+                gray = QColor("#888888")
+                strike_font = QFont()
+                strike_font.setStrikeOut(True)
+                strike_font.setItalic(True)
+                for col in range(6):
+                    parent_item.setForeground(col, gray)
+                    parent_item.setFont(col, strike_font)
+                parent_item.setFlags(parent_item.flags() & ~Qt.ItemIsSelectable)
+
+            for vi_idx, v in enumerate(result.versions_found):
+                version_key = (result.path, v.version_number)
+                is_version_ignored = version_key in self._ignored_versions
+
+                # Skip ignored versions if "Show ignored" is not checked
+                if is_version_ignored and not show_ignored:
+                    continue
+
+                label = f"  {v.version_string}"
+                if is_version_ignored:
+                    label += "  (ignored)"
+
                 child = QTreeWidgetItem([
-                    f"  {v.version_string}",
+                    label,
                     str(v.file_count),
                     v.total_size_human,
                     v.frame_range or "",
                     v.start_timecode or "",
                     "",
                 ])
+                # Store version index for context menu mapping
+                child.setData(0, Qt.UserRole, vi_idx)
                 # Make children non-selectable
                 child.setFlags(child.flags() & ~Qt.ItemIsSelectable)
-                if is_existing:
+
+                # Style: gray/italic for existing or ignored parent, strikethrough for ignored version
+                if is_existing or is_ignored or is_version_ignored:
                     gray = QColor("#888888")
-                    italic_font = QFont()
-                    italic_font.setItalic(True)
+                    style_font = QFont()
+                    style_font.setItalic(True)
+                    if is_version_ignored:
+                        style_font.setStrikeOut(True)
                     for col in range(6):
                         child.setForeground(col, gray)
-                        child.setFont(col, italic_font)
+                        child.setFont(col, style_font)
+
                 parent_item.addChild(child)
 
             self.result_tree.addTopLevelItem(parent_item)
@@ -1423,7 +1469,10 @@ class DiscoveryDialog(QDialog):
         total_versions = sum(len(r.versions_found) for r in self._results)
         status = f"Found {len(self._results)} location(s) with {total_versions} version(s)."
         if hidden:
-            status += f" ({hidden} already added, hidden.)"
+            status += f" ({hidden} hidden.)"
+        ignored_count = len(self._ignored_paths) + len(self._ignored_versions)
+        if ignored_count:
+            status += f" {ignored_count} item(s) ignored."
         if shown:
             status += " Select locations and click 'Add Selected to Project'."
         self.status_label.setText(status)
@@ -1432,6 +1481,84 @@ class DiscoveryDialog(QDialog):
         self._worker = None
         self.scan_btn.setEnabled(True)
         self.status_label.setText(f"Error: {msg}")
+
+    # --- Ignore / context menu ---
+
+    def _tree_context_menu(self, pos):
+        """Show context menu for ignoring sources or versions."""
+        item = self.result_tree.itemAt(pos)
+        if not item:
+            return
+
+        menu = QMenu(self)
+        is_top_level = item.parent() is None
+
+        if is_top_level:
+            idx = item.data(0, Qt.UserRole)
+            if idx is not None and idx < len(self._results):
+                result = self._results[idx]
+                result_path = result.path
+
+                if result_path in self._ignored_paths:
+                    menu.addAction("Unignore this source",
+                        lambda p=result_path: self._unignore_source(p))
+                else:
+                    menu.addAction("Ignore this source",
+                        lambda p=result_path: self._ignore_source(p))
+
+                if self._config is not None:
+                    menu.addSeparator()
+                    menu.addAction("Add to project blacklist",
+                        lambda r=result: self._add_to_blacklist(r))
+        else:
+            parent_item = item.parent()
+            parent_idx = parent_item.data(0, Qt.UserRole)
+            if parent_idx is not None and parent_idx < len(self._results):
+                result = self._results[parent_idx]
+                vi_idx = item.data(0, Qt.UserRole)
+                if vi_idx is not None and vi_idx < len(result.versions_found):
+                    version = result.versions_found[vi_idx]
+                    key = (result.path, version.version_number)
+
+                    if key in self._ignored_versions:
+                        menu.addAction(f"Unignore {version.version_string}",
+                            lambda k=key: self._unignore_version(k))
+                    else:
+                        menu.addAction(f"Ignore {version.version_string}",
+                            lambda k=key: self._ignore_version(k))
+
+        if menu.actions():
+            menu.exec(self.result_tree.viewport().mapToGlobal(pos))
+
+    def _ignore_source(self, path: str):
+        self._ignored_paths.add(path)
+        self._rebuild_tree()
+
+    def _unignore_source(self, path: str):
+        self._ignored_paths.discard(path)
+        self._rebuild_tree()
+
+    def _ignore_version(self, key: tuple):
+        self._ignored_versions.add(key)
+        self._rebuild_tree()
+
+    def _unignore_version(self, key: tuple):
+        self._ignored_versions.discard(key)
+        self._rebuild_tree()
+
+    def _add_to_blacklist(self, result):
+        """Add a keyword to the project's name_blacklist (persistent)."""
+        keyword, ok = QInputDialog.getText(
+            self, "Add to Blacklist",
+            "Enter keyword to blacklist:",
+            text=result.name,
+        )
+        if ok and keyword.strip():
+            keyword = keyword.strip()
+            if keyword not in self._config.name_blacklist:
+                self._config.name_blacklist.append(keyword)
+            self._ignored_paths.add(result.path)
+            self._rebuild_tree()
 
     def _add_selected(self):
         if not self._config:
@@ -2627,7 +2754,7 @@ class MainWindow(QMainWindow):
         tc_mode = self.config.timecode_mode
 
         for source in self.config.watched_sources:
-            self._scanners[source.name] = VersionScanner(source)
+            self._scanners[source.name] = VersionScanner(source, self.config.task_tokens)
             versions = self._scanners[source.name].scan()
             # "always" mode: populate timecodes eagerly during scan
             if tc_mode == "always":

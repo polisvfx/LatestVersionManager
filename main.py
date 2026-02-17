@@ -141,7 +141,7 @@ def cmd_scan(args):
         print(f"  Source: {source.source_dir}")
         print(f"  Pattern: {source.version_pattern}")
 
-        scanner = VersionScanner(source)
+        scanner = VersionScanner(source, config.task_tokens)
         versions = scanner.scan()
 
         if not versions:
@@ -206,7 +206,7 @@ def cmd_promote(args):
         sys.exit(1)
 
     # Find the requested version
-    scanner = VersionScanner(source)
+    scanner = VersionScanner(source, config.task_tokens)
     versions = scanner.scan()
     if config.timecode_mode != "never":
         populate_timecodes(versions)
@@ -301,7 +301,7 @@ def cmd_promote_all(args):
             skipped.append(f"{source.name} (no latest target)")
             continue
 
-        scanner = VersionScanner(source)
+        scanner = VersionScanner(source, config.task_tokens)
         versions = scanner.scan()
         if not versions:
             skipped.append(f"{source.name} (no versions found)")
