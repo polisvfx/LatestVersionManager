@@ -185,3 +185,4 @@ cython_debug/
 .claude/
 tests/
 CLAUDE.md
+nul

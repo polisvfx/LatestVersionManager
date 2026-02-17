@@ -14,6 +14,9 @@ on:
     types: [published]
   workflow_dispatch:
 
+permissions:
+  contents: write   # Required to upload files to GitHub Releases
+
 jobs:
   build:
     name: Build on ${{ matrix.os }}
