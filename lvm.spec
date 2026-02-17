@@ -56,7 +56,9 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Exclude things we definitely don't need to keep size down
+        # Only exclude heavy third-party packages we definitely don't need.
+        # Do NOT exclude stdlib modules — many are pulled in transitively
+        # (e.g. urllib is required by pathlib, email by logging, etc.)
         'tkinter',
         'matplotlib',
         'numpy',
@@ -67,18 +69,6 @@ a = Analysis(
         'jupyter',
         'notebook',
         'pytest',
-        'unittest',
-        'xmlrpc',
-        'email',
-        'html',
-        'http',
-        'urllib',
-        'ftplib',
-        'imaplib',
-        'smtplib',
-        'telnetlib',
-        'nntplib',
-        'poplib',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
