@@ -87,7 +87,7 @@ jobs:
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"   # strip leading 'v' (v1.2.3 → 1.2.3)
-          sed -i "s/__version__ = \".*\"/__version__ = \"$VERSION\"/" src/lvm/__init__.py
+          perl -i -pe "s/__version__ = \".*\"/__version__ = \"$VERSION\"/" src/lvm/__init__.py
           echo "Version set to: $VERSION"
 
       # ── Build with PyInstaller ───────────────────────────────────────────
@@ -142,11 +142,22 @@ jobs:
           path: dist/${{ matrix.artifact_name }}.zip
           retention-days: 7
 
-      # ── Attach to GitHub Release (only when a release is published) ──────
-      - name: Upload to GitHub Release
-        if: github.event_name == 'release'
+  # ── Attach all artifacts to GitHub Release (only when a release is published) ──
+  # Runs after all matrix builds finish, so only one job touches the release.
+  publish:
+    name: Publish to GitHub Release
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Upload all artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.artifact_name }}.zip
+          files: dist/**/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
