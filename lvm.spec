@@ -101,8 +101,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # Windows: embed an icon if one exists as .ico
-    # icon='resources/mp_logo.ico',  # Uncomment after converting SVG → ICO
+    # Windows: embed the app icon
+    icon='resources/mp_logo.ico',
 )
 
 # ── COLLECT (gather all files into dist folder) ───────────────────────────────
@@ -122,7 +122,7 @@ if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
         name='LatestVersionManager.app',
-        # icon='resources/mp_logo.icns',  # Uncomment after converting SVG → ICNS
+        icon='resources/mp_logo.icns',
         bundle_identifier='com.polisvfx.lvm',
         info_plist={
             'CFBundleName': 'Latest Version Manager',
