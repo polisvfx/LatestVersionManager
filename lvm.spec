@@ -29,6 +29,8 @@ a = Analysis(
     datas=[
         # Bundle the SVG resource
         ('resources/mp_logo.svg', 'resources'),
+        # Bundle the pre-rendered PNG (used by the app on all platforms at runtime)
+        ('resources/mp_logo_256.png', 'resources'),
         # Bundle the src package explicitly (it's a namespace package)
         ('src/lvm/*.py', 'src/lvm'),
     ],
@@ -85,6 +87,16 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # ── EXE ───────────────────────────────────────────────────────────────────────
+# Icon embedding:
+#   Windows — .ico is embedded directly in the PE header (shown in Explorer)
+#   macOS   — icon is set on the .app BUNDLE below, not on the raw EXE
+#   Linux   — PyInstaller cannot embed icons in ELF binaries; the Qt window
+#              icon is set at runtime from the bundled mp_logo_256.png
+if sys.platform == 'win32':
+    _exe_icon = 'resources/mp_logo.ico'
+else:
+    _exe_icon = None   # macOS uses BUNDLE; Linux has no PE icon concept
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -101,8 +113,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # Windows: embed the app icon
-    icon='resources/mp_logo.ico',
+    icon=_exe_icon,
 )
 
 # ── COLLECT (gather all files into dist folder) ───────────────────────────────
