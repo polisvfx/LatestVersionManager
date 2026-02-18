@@ -854,12 +854,14 @@ class LatestPathDialog(QDialog):
     template has been configured. Provides a live preview of the resolved path.
     """
 
-    def __init__(self, config: ProjectConfig, source: WatchedSource = None, parent=None):
+    def __init__(self, config: ProjectConfig, source: WatchedSource = None,
+                 discovery_results: list = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Set Latest Path")
         self.setMinimumWidth(600)
         self._config = config
         self._source = source  # optional: specific source for preview
+        self._discovery_results = discovery_results or []  # DiscoveryResults for preview
 
         layout = QVBoxLayout(self)
 
@@ -964,11 +966,25 @@ class LatestPathDialog(QDialog):
         config = self._config
         previews = []
 
-        # If a specific source was given, show it first
+        # If a specific source was given, show it first; also include
+        # discovery results so the preview is meaningful before sources are
+        # actually added to the project.
         sources = []
         if self._source:
             sources.append(self._source)
         sources.extend(s for s in config.watched_sources if s != self._source)
+        # Build lightweight preview sources from discovery results
+        if self._discovery_results:
+            naming_rule = config.default_naming_rule or "parent:0"
+            for dr in self._discovery_results:
+                name = compute_source_name(dr, naming_rule, config.task_tokens)
+                preview_src = WatchedSource(
+                    name=name,
+                    source_dir=dr.path,
+                    sample_filename=dr.sample_filename or "",
+                )
+                if preview_src not in sources:
+                    sources.append(preview_src)
         sources = sources[:4]
 
         if sources:
@@ -1614,7 +1630,7 @@ class DiscoveryDialog(QDialog):
 
         # If no latest path template is set, prompt the user to define one
         if not self._config.latest_path_template:
-            path_dlg = LatestPathDialog(self._config, parent=self)
+            path_dlg = LatestPathDialog(self._config, discovery_results=selected_results, parent=self)
             if path_dlg.exec() == QDialog.Accepted:
                 self._config.latest_path_template = path_dlg.get_template()
                 self._config.default_file_rename_template = path_dlg.get_rename_template()
