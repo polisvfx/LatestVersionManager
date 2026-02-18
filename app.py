@@ -1646,12 +1646,21 @@ class DiscoveryDialog(QDialog):
                     self._config.task_tokens,
                 )
                 tpl = self._config.latest_path_template
+                tpl = tpl.replace("{project_root}", self._config.effective_project_root)
+                tpl = tpl.replace("{group_root}", _resolve_group_root(self._config, source.group))
                 tpl = tpl.replace("{source_name}", tokens["source_name"])
                 tpl = tpl.replace("{source_basename}", tokens["source_basename"])
                 tpl = tpl.replace("{source_fullname}", tokens["source_fullname"])
                 tpl = tpl.replace("{source_filename}", tokens["source_filename"])
                 tpl = tpl.replace("{source_dir}", source.source_dir)
-                source.latest_target = tpl
+                tpl = _expand_group_token(tpl, source.group)
+                # Relative paths resolve from the source directory
+                resolved = Path(tpl)
+                if not resolved.is_absolute() and source.source_dir:
+                    resolved = Path(source.source_dir) / resolved
+                elif not resolved.is_absolute() and self._config.project_dir:
+                    resolved = Path(self._config.project_dir) / resolved
+                source.latest_target = str(resolved.resolve())
                 # Don't mark as override — it came from the project default template
 
             self._config.watched_sources.append(source)
