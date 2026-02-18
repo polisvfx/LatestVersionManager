@@ -42,20 +42,41 @@ logger = logging.getLogger(__name__)
 APP_NAME = "Latest Version Manager"
 from src.lvm import __version__ as APP_VERSION
 
-LOGO_PATH = Path(__file__).parent / "resources" / "mp_logo.svg"
+# When frozen by PyInstaller, data files live under sys._MEIPASS.
+# When running from source, they live next to this file.
+_BASE_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
+LOGO_PATH = _BASE_DIR / "resources" / "mp_logo.svg"
 
 
 def _load_app_icon() -> QIcon:
-    """Load the SVG logo as a QIcon with multiple sizes."""
+    """Load the app icon, preferring the pre-rendered PNG for reliability.
+
+    Falls back to SVG rendering if no PNG is available (e.g. dev environment
+    before icons have been generated).  Using a rasterised PNG avoids the
+    QSvgRenderer initialisation overhead on every launch and is more robust
+    inside a frozen bundle.
+    """
+    # Prefer a pre-rendered 256×256 PNG (bundled by PyInstaller on all platforms)
+    png_path = _BASE_DIR / "resources" / "mp_logo_256.png"
+    if png_path.exists():
+        icon = QIcon()
+        for size in (16, 32, 48, 64, 128, 256):
+            pixmap = QPixmap(str(png_path))
+            if not pixmap.isNull():
+                icon.addPixmap(pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        return icon
+
+    # Fallback: render from SVG (works in dev, requires QtSvg)
     icon = QIcon()
-    for size in (16, 32, 48, 64, 128, 256):
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.transparent)
+    if LOGO_PATH.exists():
         renderer = QSvgRenderer(str(LOGO_PATH))
-        painter = QPainter(pixmap)
-        renderer.render(painter)
-        painter.end()
-        icon.addPixmap(pixmap)
+        for size in (16, 32, 48, 64, 128, 256):
+            pixmap = QPixmap(size, size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            icon.addPixmap(pixmap)
     return icon
 
 

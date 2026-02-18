@@ -21,6 +21,7 @@ ROOT = HERE.parent
 SVG_PATH = ROOT / "resources" / "mp_logo.svg"
 ICO_PATH = ROOT / "resources" / "mp_logo.ico"
 ICNS_PATH = ROOT / "resources" / "mp_logo.icns"
+PNG_PATH = ROOT / "resources" / "mp_logo_256.png"
 
 
 def render_svg(renderer: QSvgRenderer, size: int) -> QImage:
@@ -216,6 +217,12 @@ def main():
     icns_data = build_icns(icns_images)
     ICNS_PATH.write_bytes(icns_data)
     print(f"Written: {ICNS_PATH}  ({len(icns_data):,} bytes)")
+
+    # Generate PNG (256×256) — used by the app at runtime on all platforms
+    # and as the Linux executable icon source
+    png_data = _image_to_png(images[256])
+    PNG_PATH.write_bytes(png_data)
+    print(f"Written: {PNG_PATH}  ({len(png_data):,} bytes)")
 
     print("Done.")
 
