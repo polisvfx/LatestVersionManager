@@ -32,20 +32,41 @@ In a typical compositing or grading workflow, artists iterate through numbered v
 
 **Filter with whitelists and blacklists.** Control which folders get picked up during discovery by including or excluding keywords - handy for ignoring WIP renders, test outputs, or denoise passes you don't want in the pipeline.
 
+## Installation
+
+### Pre-built binaries
+
+Download the latest release for your platform from the [Releases](../../releases) page. Builds are available for Windows, macOS, and Linux — just extract the zip and run the `LatestVersionManager` executable. No Python installation required.
+
+### From source
+
+Requires **Python 3.12+**.
+
+```bash
+pip install -r requirements.txt
+```
+
+Dependencies: PySide6 (Qt6 GUI), watchdog (file system monitoring), fileseq (frame sequence handling).
+
 ## How to Use It
 
 LVM works as both a **GUI application** and a **command-line tool**.
 
 ### GUI
 
+Use the launch script for your OS: `start_lvm.bat` (Windows), `start_lvm.sh` (Linux), or `start_lvm.command` (macOS).
+
+Optionally, you can also run it directly as a Python script:
+
 ```bash
 python app.py
 ```
-Theres also a launch-script for each OS (start_lvm.bat/.sh/.command)
 
 The GUI provides a full project management interface - add sources, browse versions, promote with a progress bar, view history, configure settings, and monitor directories for changes.
 
 ### CLI
+
+You can also run LVM from the command line via Python:
 
 ```bash
 # Set up a new project
@@ -75,16 +96,6 @@ python main.py history myproject.json hero_comp
 # Verify file integrity across all sources
 python main.py verify myproject.json
 ```
-
-## Installation
-
-Requires **Python 3.12+**.
-
-```bash
-pip install -r requirements.txt
-```
-
-Dependencies: PySide6 (Qt6 GUI), watchdog (file system monitoring), fileseq (frame sequence handling).
 
 ## Link Modes
 
