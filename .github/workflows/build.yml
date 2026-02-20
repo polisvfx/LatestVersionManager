@@ -90,35 +90,132 @@ jobs:
           perl -i -pe "s/__version__ = \".*\"/__version__ = \"$VERSION\"/" src/lvm/__init__.py
           echo "Version set to: $VERSION"
 
+      # ── macOS: Import signing certificate ──────────────────────────────
+      # Decodes the Developer ID certificate from a GitHub secret and imports
+      # it into a temporary keychain so codesign can use it.
+      # If no certificate is configured, the build falls back to ad-hoc signing.
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KEYCHAIN_PWD: ${{ secrets.KEYCHAIN_PWD }}
+        run: |
+          # Decode the .p12 certificate from the base64 secret
+          echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
+
+          # Create a temporary keychain
+          security create-keychain -p "$KEYCHAIN_PWD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PWD" build.keychain
+
+          # Import the certificate
+          security import certificate.p12 \
+            -k build.keychain \
+            -P "$MACOS_CERTIFICATE_PWD" \
+            -T /usr/bin/codesign
+
+          # Allow codesign to access the keychain without prompting
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PWD" build.keychain
+
+          # Clean up the certificate file
+          rm certificate.p12
+
       # ── Build with PyInstaller ───────────────────────────────────────────
       - name: Build with PyInstaller
         run: pyinstaller lvm.spec
 
-      # ── Linux: Build AppImage (optional, more portable than raw folder) ──
-      # Commented out by default — uncomment to also produce an AppImage
-      # - name: Build AppImage
-      #   if: runner.os == 'Linux'
-      #   run: |
-      #     wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-      #     chmod +x appimagetool-x86_64.AppImage
-      #     # (Requires setting up AppDir structure first)
+      # ── macOS: Code-sign the .app bundle ───────────────────────────────
+      # Signs all binaries inside the .app bundle so macOS Gatekeeper
+      # does not show "unidentified developer" warnings.
+      # Uses Developer ID cert if available, otherwise falls back to ad-hoc
+      # signing (which still removes the quarantine-triggered crash dialogs).
+      - name: Sign macOS app bundle
+        if: runner.os == 'macOS'
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          APP_PATH="dist/LatestVersionManager.app"
+          ENTITLEMENTS="resources/entitlements.plist"
 
-      # ── macOS: create DMG (optional, nicer than zip for macOS) ──────────
-      # Commented out by default — uncomment to produce a .dmg installer
-      # - name: Create DMG
-      #   if: runner.os == 'macOS'
-      #   run: |
-      #     brew install create-dmg
-      #     create-dmg \
-      #       --volname "Latest Version Manager" \
-      #       --window-pos 200 120 \
-      #       --window-size 600 400 \
-      #       --icon-size 100 \
-      #       --icon "LatestVersionManager.app" 175 190 \
-      #       --hide-extension "LatestVersionManager.app" \
-      #       --app-drop-link 425 190 \
-      #       "LatestVersionManager.dmg" \
-      #       "dist/LatestVersionManager.app"
+          if [ -n "$MACOS_SIGNING_IDENTITY" ]; then
+            IDENTITY="$MACOS_SIGNING_IDENTITY"
+            echo "Signing with Developer ID: $IDENTITY"
+          else
+            IDENTITY="-"
+            echo "No signing identity configured — using ad-hoc signing"
+          fi
+
+          # Sign all nested frameworks, dylibs, and .so files first (deep sign)
+          find "$APP_PATH" -type f \( -name "*.dylib" -o -name "*.so" -o -name "*.framework" \) -exec \
+            codesign --force --sign "$IDENTITY" --entitlements "$ENTITLEMENTS" --timestamp --options runtime {} \;
+
+          # Sign the main executable
+          codesign --force --sign "$IDENTITY" \
+            --entitlements "$ENTITLEMENTS" \
+            --timestamp \
+            --options runtime \
+            --deep \
+            "$APP_PATH"
+
+          # Verify the signature
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          echo "Code signing complete."
+
+      # ── macOS: Notarize the app ────────────────────────────────────────
+      # Submits the signed app to Apple's notarization service so Gatekeeper
+      # fully trusts it on first launch. Only runs when secrets are configured.
+      - name: Notarize macOS app
+        if: runner.os == 'macOS' && env.MACOS_NOTARIZE_APPLE_ID != ''
+        env:
+          MACOS_NOTARIZE_APPLE_ID: ${{ secrets.MACOS_NOTARIZE_APPLE_ID }}
+          MACOS_NOTARIZE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_PASSWORD }}
+          MACOS_NOTARIZE_TEAM_ID: ${{ secrets.MACOS_NOTARIZE_TEAM_ID }}
+        run: |
+          APP_PATH="dist/LatestVersionManager.app"
+
+          # Create a zip for notarization submission
+          ditto -c -k --keepParent "$APP_PATH" dist/notarize-payload.zip
+
+          # Submit for notarization and wait for result
+          xcrun notarytool submit dist/notarize-payload.zip \
+            --apple-id "$MACOS_NOTARIZE_APPLE_ID" \
+            --password "$MACOS_NOTARIZE_PASSWORD" \
+            --team-id "$MACOS_NOTARIZE_TEAM_ID" \
+            --wait
+
+          # Staple the notarization ticket to the app
+          xcrun stapler staple "$APP_PATH"
+
+          # Clean up
+          rm dist/notarize-payload.zip
+          echo "Notarization complete."
+
+      # ── macOS: Create DMG ──────────────────────────────────────────────
+      # A DMG preserves the code signature and is the standard distribution
+      # format for macOS. Zip files strip extended attributes and can
+      # re-trigger Gatekeeper warnings.
+      - name: Create macOS DMG
+        if: runner.os == 'macOS'
+        run: |
+          brew install create-dmg
+
+          # create-dmg returns exit code 2 if it skips the background image
+          # (which we don't provide), but still creates the DMG successfully
+          create-dmg \
+            --volname "Latest Version Manager" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "LatestVersionManager.app" 175 190 \
+            --hide-extension "LatestVersionManager.app" \
+            --app-drop-link 425 190 \
+            "dist/${{ matrix.artifact_name }}.dmg" \
+            "dist/LatestVersionManager.app" \
+          || test $? -eq 2
+
+          echo "DMG created successfully."
 
       # ── Package output ───────────────────────────────────────────────────
       - name: Package output (Windows)
@@ -128,18 +225,27 @@ jobs:
           Compress-Archive -Path dist\LatestVersionManager\* `
             -DestinationPath dist\${{ matrix.artifact_name }}.zip
 
-      - name: Package output (macOS / Linux)
-        if: runner.os != 'Windows'
+      - name: Package output (Linux)
+        if: runner.os == 'Linux'
         run: |
           cd dist
           zip -r ${{ matrix.artifact_name }}.zip LatestVersionManager/
 
       # ── Upload artifact (for every build — kept 7 days) ─────────────────
-      - name: Upload build artifact
+      - name: Upload build artifact (Windows / Linux)
+        if: runner.os != 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}.zip
+          retention-days: 7
+
+      - name: Upload build artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}.dmg
           retention-days: 7
 
   # ── Attach all artifacts to GitHub Release (only when a release is published) ──
@@ -159,6 +265,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: dist/**/*.zip
+          files: |
+            dist/**/*.zip
+            dist/**/*.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

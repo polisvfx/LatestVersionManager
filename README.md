@@ -78,6 +78,32 @@ python main.py verify myproject.json
 
 ## Installation
 
+### Pre-built Binaries
+
+Download the latest release for your platform from the [Releases](../../releases) page:
+
+| Platform | Download | Notes |
+|---|---|---|
+| **Windows** | `LatestVersionManager-windows.zip` | Extract and run `LatestVersionManager.exe` |
+| **macOS** | `LatestVersionManager-macos.dmg` | Mount the DMG and drag to Applications |
+| **Linux** | `LatestVersionManager-linux.zip` | Extract and run `./LatestVersionManager` |
+
+#### macOS: "Cannot verify" warning
+
+When opening the app for the first time on macOS, you may see:
+
+> *"Apple could not verify LatestVersionManager.app is free of malware that may harm your Mac or compromise your privacy."*
+
+This happens because the app is not notarized with an Apple Developer certificate. To fix this, open Terminal and run:
+
+```bash
+xattr -cr /Applications/LatestVersionManager.app
+```
+
+Then open the app normally. You only need to do this once.
+
+### From Source
+
 Requires **Python 3.12+**.
 
 ```bash
