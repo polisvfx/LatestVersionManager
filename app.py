@@ -2283,6 +2283,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(discover_action)
 
         manage_groups_action = QAction("&Manage Groups...", self)
+        manage_groups_action.setShortcut(QKeySequence("Ctrl+G"))
         manage_groups_action.triggered.connect(self._open_manage_groups)
         tools_menu.addAction(manage_groups_action)
 
@@ -2303,8 +2304,16 @@ class MainWindow(QMainWindow):
         source_menu.addAction(add_source_action)
 
         refresh_action = QAction("&Refresh All", self)
+        refresh_action.setShortcut(QKeySequence("Ctrl+R"))
         refresh_action.triggered.connect(self._refresh_all)
         source_menu.addAction(refresh_action)
+
+        source_menu.addSeparator()
+
+        promote_all_action = QAction("&Promote All to Latest", self)
+        promote_all_action.setShortcut(QKeySequence("Ctrl+Alt+Up"))
+        promote_all_action.triggered.connect(self._promote_all_or_selected)
+        source_menu.addAction(promote_all_action)
 
         help_menu = menubar.addMenu("&Help")
 
