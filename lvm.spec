@@ -58,6 +58,7 @@ a = Analysis(
         'src.lvm.elevation',
         'src.lvm.task_tokens',
         'src.lvm.timecode',
+        'src.lvm.updater',
     ],
     hookspath=[],
     hooksconfig={},
