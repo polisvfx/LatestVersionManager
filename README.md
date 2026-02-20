@@ -52,6 +52,12 @@ When opening the app for the first time on macOS, you may see:
  
 This happens because the app is not notarized with an Apple Developer certificate. To fix this, open Terminal and run:
 
+```bash
+xattr -cr /Applications/LatestVersionManager.app
+```
+ 
+Then open the app normally. You only need to do this once.
+
 ### From source
 
 Requires **Python 3.12+**.
