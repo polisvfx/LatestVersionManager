@@ -111,8 +111,8 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
+    codesign_identity=None,       # Signing is handled post-build in CI
+    entitlements_file='resources/entitlements.plist' if sys.platform == 'darwin' else None,
     icon=_exe_icon,
 )
 

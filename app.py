@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QColorDialog, QInputDialog, QStyledItemDelegate, QStyle,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData
-from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap
+from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
 from PySide6.QtSvg import QSvgRenderer
 
 from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEntry, make_relative, DEFAULT_FILE_EXTENSIONS
@@ -854,12 +854,14 @@ class LatestPathDialog(QDialog):
     template has been configured. Provides a live preview of the resolved path.
     """
 
-    def __init__(self, config: ProjectConfig, source: WatchedSource = None, parent=None):
+    def __init__(self, config: ProjectConfig, source: WatchedSource = None,
+                 discovery_results: list = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Set Latest Path")
         self.setMinimumWidth(600)
         self._config = config
         self._source = source  # optional: specific source for preview
+        self._discovery_results = discovery_results or []  # DiscoveryResults for preview
 
         layout = QVBoxLayout(self)
 
@@ -964,11 +966,25 @@ class LatestPathDialog(QDialog):
         config = self._config
         previews = []
 
-        # If a specific source was given, show it first
+        # If a specific source was given, show it first; also include
+        # discovery results so the preview is meaningful before sources are
+        # actually added to the project.
         sources = []
         if self._source:
             sources.append(self._source)
         sources.extend(s for s in config.watched_sources if s != self._source)
+        # Build lightweight preview sources from discovery results
+        if self._discovery_results:
+            naming_rule = config.default_naming_rule or "parent:0"
+            for dr in self._discovery_results:
+                name = compute_source_name(dr, naming_rule, config.task_tokens)
+                preview_src = WatchedSource(
+                    name=name,
+                    source_dir=dr.path,
+                    sample_filename=dr.sample_filename or "",
+                )
+                if preview_src not in sources:
+                    sources.append(preview_src)
         sources = sources[:4]
 
         if sources:
@@ -1614,7 +1630,7 @@ class DiscoveryDialog(QDialog):
 
         # If no latest path template is set, prompt the user to define one
         if not self._config.latest_path_template:
-            path_dlg = LatestPathDialog(self._config, parent=self)
+            path_dlg = LatestPathDialog(self._config, discovery_results=selected_results, parent=self)
             if path_dlg.exec() == QDialog.Accepted:
                 self._config.latest_path_template = path_dlg.get_template()
                 self._config.default_file_rename_template = path_dlg.get_rename_template()
@@ -1646,12 +1662,21 @@ class DiscoveryDialog(QDialog):
                     self._config.task_tokens,
                 )
                 tpl = self._config.latest_path_template
+                tpl = tpl.replace("{project_root}", self._config.effective_project_root)
+                tpl = tpl.replace("{group_root}", _resolve_group_root(self._config, source.group))
                 tpl = tpl.replace("{source_name}", tokens["source_name"])
                 tpl = tpl.replace("{source_basename}", tokens["source_basename"])
                 tpl = tpl.replace("{source_fullname}", tokens["source_fullname"])
                 tpl = tpl.replace("{source_filename}", tokens["source_filename"])
                 tpl = tpl.replace("{source_dir}", source.source_dir)
-                source.latest_target = tpl
+                tpl = _expand_group_token(tpl, source.group)
+                # Relative paths resolve from the source directory
+                resolved = Path(tpl)
+                if not resolved.is_absolute() and source.source_dir:
+                    resolved = Path(source.source_dir) / resolved
+                elif not resolved.is_absolute() and self._config.project_dir:
+                    resolved = Path(self._config.project_dir) / resolved
+                source.latest_target = str(resolved.resolve())
                 # Don't mark as override — it came from the project default template
 
             self._config.watched_sources.append(source)
@@ -2237,24 +2262,29 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu("&File")
 
         new_action = QAction("&New Project...", self)
+        new_action.setShortcut(QKeySequence.StandardKey.New)
         new_action.triggered.connect(self._new_project)
         file_menu.addAction(new_action)
 
         open_action = QAction("&Open Project...", self)
+        open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._open_project)
         file_menu.addAction(open_action)
 
         save_action = QAction("&Save Project", self)
+        save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.triggered.connect(self._save_project)
         file_menu.addAction(save_action)
 
         save_as_action = QAction("Save Project &As...", self)
+        save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.triggered.connect(self._save_project_as)
         file_menu.addAction(save_as_action)
 
         file_menu.addSeparator()
 
         settings_action = QAction("Project &Settings...", self)
+        settings_action.setShortcut(QKeySequence("Ctrl+P"))
         settings_action.triggered.connect(self._open_project_settings)
         file_menu.addAction(settings_action)
 
@@ -2266,16 +2296,19 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         quit_action = QAction("&Quit", self)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
         tools_menu = menubar.addMenu("&Tools")
 
         discover_action = QAction("&Discover Versions...", self)
+        discover_action.setShortcut(QKeySequence("Ctrl+D"))
         discover_action.triggered.connect(self._open_discover)
         tools_menu.addAction(discover_action)
 
         manage_groups_action = QAction("&Manage Groups...", self)
+        manage_groups_action.setShortcut(QKeySequence("Ctrl+G"))
         manage_groups_action.triggered.connect(self._open_manage_groups)
         tools_menu.addAction(manage_groups_action)
 
@@ -2296,8 +2329,16 @@ class MainWindow(QMainWindow):
         source_menu.addAction(add_source_action)
 
         refresh_action = QAction("&Refresh All", self)
+        refresh_action.setShortcut(QKeySequence("Ctrl+R"))
         refresh_action.triggered.connect(self._refresh_all)
         source_menu.addAction(refresh_action)
+
+        source_menu.addSeparator()
+
+        promote_all_action = QAction("&Promote All to Latest", self)
+        promote_all_action.setShortcut(QKeySequence("Ctrl+Alt+Up"))
+        promote_all_action.triggered.connect(self._promote_all_or_selected)
+        source_menu.addAction(promote_all_action)
 
         help_menu = menubar.addMenu("&Help")
 
