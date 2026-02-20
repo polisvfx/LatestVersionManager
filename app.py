@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QColorDialog, QInputDialog, QStyledItemDelegate, QStyle,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData
-from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap
+from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
 from PySide6.QtSvg import QSvgRenderer
 
 from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEntry, make_relative, DEFAULT_FILE_EXTENSIONS
@@ -2237,24 +2237,29 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu("&File")
 
         new_action = QAction("&New Project...", self)
+        new_action.setShortcut(QKeySequence.StandardKey.New)
         new_action.triggered.connect(self._new_project)
         file_menu.addAction(new_action)
 
         open_action = QAction("&Open Project...", self)
+        open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._open_project)
         file_menu.addAction(open_action)
 
         save_action = QAction("&Save Project", self)
+        save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.triggered.connect(self._save_project)
         file_menu.addAction(save_action)
 
         save_as_action = QAction("Save Project &As...", self)
+        save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.triggered.connect(self._save_project_as)
         file_menu.addAction(save_as_action)
 
         file_menu.addSeparator()
 
         settings_action = QAction("Project &Settings...", self)
+        settings_action.setShortcut(QKeySequence("Ctrl+P"))
         settings_action.triggered.connect(self._open_project_settings)
         file_menu.addAction(settings_action)
 
@@ -2266,12 +2271,14 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         quit_action = QAction("&Quit", self)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
         tools_menu = menubar.addMenu("&Tools")
 
         discover_action = QAction("&Discover Versions...", self)
+        discover_action.setShortcut(QKeySequence("Ctrl+D"))
         discover_action.triggered.connect(self._open_discover)
         tools_menu.addAction(discover_action)
 
