@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QDialogButtonBox, QHeaderView, QMenu,
     QToolBar, QSizePolicy, QFrame, QAbstractItemView,
     QColorDialog, QInputDialog, QStyledItemDelegate, QStyle,
+    QTextEdit,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData
 from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
@@ -2064,8 +2065,11 @@ class UpdateDialog(QDialog):
         self._check_worker = None
         if release_info is None:
             self._status_label.setText(
+                f"<span style='color:#4caf50;'>&#10004;</span> "
                 f"You are running the latest version (v{APP_VERSION})."
             )
+            self._close_btn.setText("OK")
+            self._close_btn.setFocus()
             return
 
         self._release_info = release_info
