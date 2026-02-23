@@ -299,8 +299,8 @@ set "EXE_NAME={executable_path.name}"
 echo Waiting for Latest Version Manager to close...
 :waitloop
 timeout /t 1 /nobreak >NUL
-tasklist /FI "PID eq %PID%" 2>NUL | find /I "%PID%" >NUL
-if not errorlevel 1 goto waitloop
+tasklist /FI "PID eq %PID%" 2>NUL | findstr /B /C:"INFO:" >NUL
+if errorlevel 1 goto waitloop
 
 echo Backing up current installation...
 if exist "%BACKUP_DIR%" rmdir /S /Q "%BACKUP_DIR%"
