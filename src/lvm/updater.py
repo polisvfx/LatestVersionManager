@@ -286,49 +286,66 @@ def _create_windows_updater(
         dir=tempfile.gettempdir(), delete=False,
     )
     backup_dir = install_dir.parent / f"{install_dir.name}_backup"
+    log_file = tempfile.gettempdir().replace("\\", "\\\\") + "\\\\lvm_update.log"
     script.write(f"""@echo off
 setlocal
 title Updating Latest Version Manager...
 
+set "LOG={log_file}"
 set "PID={pid}"
 set "INSTALL_DIR={install_dir}"
 set "UPDATE_DIR={extracted_dir}"
 set "BACKUP_DIR={backup_dir}"
 set "EXE_NAME={executable_path.name}"
 
+echo [%date% %time%] Update started > "%LOG%"
+echo PID=%PID% >> "%LOG%"
+echo INSTALL_DIR=%INSTALL_DIR% >> "%LOG%"
+echo UPDATE_DIR=%UPDATE_DIR% >> "%LOG%"
+echo BACKUP_DIR=%BACKUP_DIR% >> "%LOG%"
+echo EXE_NAME=%EXE_NAME% >> "%LOG%"
+
 echo Waiting for Latest Version Manager to close...
+echo [%date% %time%] Waiting for PID %PID% to exit... >> "%LOG%"
 :waitloop
 timeout /t 1 /nobreak >NUL
 tasklist /FI "PID eq %PID%" /NH >"%TEMP%\\lvm_pidcheck.tmp" 2>&1
 find /I "%EXE_NAME%" "%TEMP%\\lvm_pidcheck.tmp" >NUL 2>NUL
 if not errorlevel 1 goto waitloop
 del "%TEMP%\\lvm_pidcheck.tmp" 2>NUL
+echo [%date% %time%] Process exited. >> "%LOG%"
 
 echo Backing up current installation...
 if exist "%BACKUP_DIR%" rmdir /S /Q "%BACKUP_DIR%"
 rename "%INSTALL_DIR%" "{install_dir.name}_backup"
 if errorlevel 1 (
+    echo [%date% %time%] ERROR: rename failed >> "%LOG%"
     echo ERROR: Could not rename current installation.
     echo Please close any programs using files in %INSTALL_DIR% and try again.
     pause
     exit /b 1
 )
+echo [%date% %time%] Backup created. >> "%LOG%"
 
 echo Installing update...
 move "%UPDATE_DIR%" "%INSTALL_DIR%"
 if errorlevel 1 (
+    echo [%date% %time%] ERROR: move failed >> "%LOG%"
     echo ERROR: Could not install update. Restoring backup...
     rename "%BACKUP_DIR%" "{install_dir.name}"
     pause
     exit /b 1
 )
+echo [%date% %time%] Files moved. >> "%LOG%"
 
 echo Cleaning up...
 rmdir /S /Q "%BACKUP_DIR%" 2>NUL
 
 echo Starting Latest Version Manager...
+echo [%date% %time%] Starting %INSTALL_DIR%\\%EXE_NAME% >> "%LOG%"
 start "" "%INSTALL_DIR%\\%EXE_NAME%"
 
+echo [%date% %time%] Update complete. >> "%LOG%"
 echo Update complete.
 timeout /t 2 /nobreak >NUL
 del "%~f0"
