@@ -360,36 +360,57 @@ def _create_unix_updater(
         dir=tempfile.gettempdir(), delete=False,
     )
     backup_dir = install_dir.parent / f"{install_dir.name}_backup"
+    log_file = Path(tempfile.gettempdir()) / "lvm_update.log"
     script.write(f"""#!/bin/bash
 PID={pid}
 INSTALL_DIR="{install_dir}"
 UPDATE_DIR="{extracted_dir}"
 BACKUP_DIR="{backup_dir}"
 EXE_NAME="{executable_path.name}"
+LOG="{log_file}"
+
+log() {{ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG"; }}
+
+log "Update started"
+log "PID=$PID"
+log "INSTALL_DIR=$INSTALL_DIR"
+log "UPDATE_DIR=$UPDATE_DIR"
+log "EXE_NAME=$EXE_NAME"
 
 echo "Waiting for Latest Version Manager to close..."
+log "Waiting for PID $PID to exit..."
 while kill -0 "$PID" 2>/dev/null; do sleep 1; done
+sleep 2
+log "Process exited."
 
-echo "Backing up current installation..."
+echo "Creating backup..."
 rm -rf "$BACKUP_DIR"
-mv "$INSTALL_DIR" "$BACKUP_DIR"
+cp -a "$INSTALL_DIR" "$BACKUP_DIR" 2>>"$LOG"
+log "Backup copied."
 
 echo "Installing update..."
-mv "$UPDATE_DIR" "$INSTALL_DIR"
-if [ $? -ne 0 ]; then
-    echo "ERROR: Could not install update. Restoring backup..."
-    mv "$BACKUP_DIR" "$INSTALL_DIR"
+rsync -a --delete "$UPDATE_DIR/" "$INSTALL_DIR/" 2>>"$LOG"
+RC=$?
+log "rsync exit code: $RC"
+if [ $RC -ne 0 ]; then
+    log "ERROR: rsync failed with code $RC"
+    echo "ERROR: Could not install update. Restoring from backup..."
+    rsync -a --delete "$BACKUP_DIR/" "$INSTALL_DIR/" 2>/dev/null
     exit 1
 fi
+log "Files installed."
 
-chmod +x "$INSTALL_DIR/$EXE_NAME"
+chmod -R +x "$INSTALL_DIR/$EXE_NAME" 2>/dev/null
+find "$INSTALL_DIR" -name "*.so" -o -name "*.dylib" | xargs chmod +x 2>/dev/null
 
 echo "Cleaning up..."
 rm -rf "$BACKUP_DIR"
 
 echo "Starting Latest Version Manager..."
+log "Starting $INSTALL_DIR/$EXE_NAME"
 "$INSTALL_DIR/$EXE_NAME" &
 
+log "Update complete."
 rm -- "$0"
 """)
     script.close()
