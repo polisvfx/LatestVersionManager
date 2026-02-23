@@ -262,11 +262,7 @@ jobs:
           path: dist/
 
       - name: Upload all artifacts to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            dist/**/*.zip
-            dist/**/*.dmg
+        run: gh release upload "${{ github.ref_name }}" dist/**/*.zip dist/**/*.dmg --clobber
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
