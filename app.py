@@ -2064,8 +2064,11 @@ class UpdateDialog(QDialog):
         self._check_worker = None
         if release_info is None:
             self._status_label.setText(
+                f"<span style='color:#4caf50;'>&#10004;</span> "
                 f"You are running the latest version (v{APP_VERSION})."
             )
+            self._close_btn.setText("OK")
+            self._close_btn.setFocus()
             return
 
         self._release_info = release_info
