@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QDialogButtonBox, QHeaderView, QMenu,
     QToolBar, QSizePolicy, QFrame, QAbstractItemView,
     QColorDialog, QInputDialog, QStyledItemDelegate, QStyle,
+    QTextEdit,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData
 from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
