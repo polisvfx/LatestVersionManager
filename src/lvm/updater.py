@@ -315,36 +315,23 @@ if not errorlevel 1 goto waitloop
 del "%TEMP%\\lvm_pidcheck.tmp" 2>NUL
 echo [%date% %time%] Process exited. >> "%LOG%"
 
-echo Backing up current installation...
+echo Creating backup...
 if exist "%BACKUP_DIR%" rmdir /S /Q "%BACKUP_DIR%"
-set "RETRY=0"
-:renameloop
-rename "%INSTALL_DIR%" "{install_dir.name}_backup" 2>NUL
-if not errorlevel 1 goto renamedone
-set /a RETRY+=1
-if %RETRY% GEQ 10 (
-    echo [%date% %time%] ERROR: rename failed after %RETRY% attempts >> "%LOG%"
-    echo ERROR: Could not rename current installation.
-    echo Please close any programs using files in %INSTALL_DIR% and try again.
-    pause
-    exit /b 1
-)
-echo [%date% %time%] Rename attempt %RETRY% failed, retrying... >> "%LOG%"
-timeout /t 2 /nobreak >NUL
-goto renameloop
-:renamedone
-echo [%date% %time%] Backup created after %RETRY% retries. >> "%LOG%"
+robocopy "%INSTALL_DIR%" "%BACKUP_DIR%" /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS >NUL 2>NUL
+echo [%date% %time%] Backup copied. >> "%LOG%"
 
 echo Installing update...
-move "%UPDATE_DIR%" "%INSTALL_DIR%"
-if errorlevel 1 (
-    echo [%date% %time%] ERROR: move failed >> "%LOG%"
-    echo ERROR: Could not install update. Restoring backup...
-    rename "%BACKUP_DIR%" "{install_dir.name}"
+robocopy "%UPDATE_DIR%" "%INSTALL_DIR%" /MIR /R:5 /W:2 /NFL /NDL /NJH /NJS >> "%LOG%" 2>&1
+set "RC=%ERRORLEVEL%"
+echo [%date% %time%] robocopy exit code: %RC% >> "%LOG%"
+if %RC% GEQ 8 (
+    echo [%date% %time%] ERROR: robocopy failed with code %RC% >> "%LOG%"
+    echo ERROR: Could not install update. Restoring from backup...
+    robocopy "%BACKUP_DIR%" "%INSTALL_DIR%" /MIR /R:3 /W:1 /NFL /NDL /NJH /NJS >NUL 2>NUL
     pause
     exit /b 1
 )
-echo [%date% %time%] Files moved. >> "%LOG%"
+echo [%date% %time%] Files installed. >> "%LOG%"
 
 echo Cleaning up...
 rmdir /S /Q "%BACKUP_DIR%" 2>NUL
