@@ -317,15 +317,23 @@ echo [%date% %time%] Process exited. >> "%LOG%"
 
 echo Backing up current installation...
 if exist "%BACKUP_DIR%" rmdir /S /Q "%BACKUP_DIR%"
-rename "%INSTALL_DIR%" "{install_dir.name}_backup"
-if errorlevel 1 (
-    echo [%date% %time%] ERROR: rename failed >> "%LOG%"
+set "RETRY=0"
+:renameloop
+rename "%INSTALL_DIR%" "{install_dir.name}_backup" 2>NUL
+if not errorlevel 1 goto renamedone
+set /a RETRY+=1
+if %RETRY% GEQ 10 (
+    echo [%date% %time%] ERROR: rename failed after %RETRY% attempts >> "%LOG%"
     echo ERROR: Could not rename current installation.
     echo Please close any programs using files in %INSTALL_DIR% and try again.
     pause
     exit /b 1
 )
-echo [%date% %time%] Backup created. >> "%LOG%"
+echo [%date% %time%] Rename attempt %RETRY% failed, retrying... >> "%LOG%"
+timeout /t 2 /nobreak >NUL
+goto renameloop
+:renamedone
+echo [%date% %time%] Backup created after %RETRY% retries. >> "%LOG%"
 
 echo Installing update...
 move "%UPDATE_DIR%" "%INSTALL_DIR%"
