@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import VersionInfo, WatchedSource
-from .task_tokens import derive_source_tokens
+from .task_tokens import derive_source_tokens, parse_date_to_sortable, format_date_display
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,9 @@ class VersionScanner:
 
     def __init__(self, watched_source: WatchedSource, task_tokens: list[str] = None):
         self.source = watched_source
-        self._version_regex = self._compile_version_pattern(watched_source.version_pattern)
+        self._date_format = getattr(watched_source, "date_format", "")
+        self._version_regex = self._compile_version_pattern(
+            watched_source.version_pattern, self._date_format)
         self._task_tokens = task_tokens or []
         self._expected_basename = self._compute_expected_basename()
 
@@ -40,7 +42,7 @@ class VersionScanner:
         sample = self.source.sample_filename
         if not sample:
             return ""
-        tokens = derive_source_tokens(sample, self._task_tokens)
+        tokens = derive_source_tokens(sample, self._task_tokens, self._date_format)
         return tokens["source_basename"]
 
     def _matches_basename(self, entry_name: str) -> bool:
@@ -50,21 +52,28 @@ class VersionScanner:
         """
         if not self._expected_basename:
             return True
-        tokens = derive_source_tokens(entry_name, self._task_tokens)
+        tokens = derive_source_tokens(entry_name, self._task_tokens, self._date_format)
         return tokens["source_basename"] == self._expected_basename
 
     @staticmethod
-    def _compile_version_pattern(pattern: str) -> re.Pattern:
+    def _compile_version_pattern(pattern: str, date_format: str = "") -> re.Pattern:
         """
         Compile the version pattern into a regex.
 
-        Supports two formats:
-        - Raw regex with a capture group:  r"_v(\\d+)"
-        - Template style:  "hero_comp_v{version}"
-          which gets converted to:  hero_comp_v(\\d+)
+        Supports three token types:
+        - {version}: matches \\d+ (version number)
+        - {date}: matches \\d{6} or \\d{8} (date string)
+        - Raw regex: used directly
         """
-        if "{version}" in pattern:
-            regex_str = re.escape(pattern).replace(r"\{version\}", r"(\d+)")
+        if "{version}" in pattern or "{date}" in pattern:
+            regex_str = re.escape(pattern)
+            if r"\{version\}" in regex_str:
+                regex_str = regex_str.replace(r"\{version\}", r"(\d+)")
+            if r"\{date\}" in regex_str:
+                if date_format in ("DDMMYYYY", "YYYYMMDD"):
+                    regex_str = regex_str.replace(r"\{date\}", r"(\d{8})")
+                else:
+                    regex_str = regex_str.replace(r"\{date\}", r"(\d{6})")
             return re.compile(regex_str)
         else:
             return re.compile(pattern)
@@ -98,20 +107,52 @@ class VersionScanner:
             if version_info:
                 versions.append(version_info)
 
-        versions.sort(key=lambda v: v.version_number)
+        versions.sort(key=lambda v: (v.date_sortable, v.version_number))
         return versions
 
-    def _extract_version(self, name: str) -> Optional[tuple[str, int]]:
+    def _extract_version(self, name: str) -> Optional[tuple[str, int, Optional[str], int]]:
         """
-        Extract version string and number from a name.
-        Returns (version_string, version_number) or None.
+        Extract version and/or date info from a name.
+
+        Returns (version_string, version_number, date_string, date_sortable) or None.
+        - date_string: raw date digits from filename, or None
+        - date_sortable: YYYYMMDD int for sorting (0 when no date)
         """
         match = self._version_regex.search(name)
         if not match:
             return None
-        version_num = int(match.group(1))
-        version_str = f"v{version_num:03d}"
-        return version_str, version_num
+
+        pattern = self.source.version_pattern
+        has_version = "{version}" in pattern
+        has_date = "{date}" in pattern
+
+        groups = match.groups()
+
+        if has_version and has_date:
+            # Both tokens: determine capture group order from template positions
+            date_pos = pattern.index("{date}")
+            ver_pos = pattern.index("{version}")
+            if date_pos < ver_pos:
+                date_str, ver_str = groups[0], groups[1]
+            else:
+                ver_str, date_str = groups[0], groups[1]
+            version_num = int(ver_str)
+            version_string = f"v{version_num:03d}"
+            date_sortable = parse_date_to_sortable(date_str, self._date_format)
+            return version_string, version_num, date_str, date_sortable
+
+        elif has_date and not has_version:
+            # Date-only: date IS the version
+            date_str = groups[0]
+            date_sortable = parse_date_to_sortable(date_str, self._date_format)
+            display = format_date_display(date_str, self._date_format)
+            return display, 0, date_str, date_sortable
+
+        else:
+            # Version-only or raw regex (existing behavior)
+            version_num = int(match.group(1))
+            version_string = f"v{version_num:03d}"
+            return version_string, version_num, None, 0
 
     def _scan_version_folder(self, folder: Path) -> Optional[VersionInfo]:
         """Scan a version folder for file sequences or single files."""
@@ -119,7 +160,7 @@ class VersionScanner:
         if result is None:
             return None
 
-        version_str, version_num = result
+        version_str, version_num, date_str, date_sortable = result
 
         # Collect files matching our extensions using os.scandir
         files = self._collect_files(folder)
@@ -139,6 +180,8 @@ class VersionScanner:
             file_count=len(files),
             total_size_bytes=total_size,
             start_timecode=None,  # Lazy: extracted on demand via timecode module
+            date_string=date_str,
+            date_sortable=date_sortable,
         )
 
     def _scan_version_file(self, filepath: Path) -> Optional[VersionInfo]:
@@ -150,7 +193,7 @@ class VersionScanner:
         if result is None:
             return None
 
-        version_str, version_num = result
+        version_str, version_num, date_str, date_sortable = result
 
         return VersionInfo(
             version_string=version_str,
@@ -161,6 +204,8 @@ class VersionScanner:
             file_count=1,
             total_size_bytes=filepath.stat().st_size,
             start_timecode=None,  # Lazy: extracted on demand via timecode module
+            date_string=date_str,
+            date_sortable=date_sortable,
         )
 
     def _collect_files(self, folder: Path) -> list[Path]:

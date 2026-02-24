@@ -371,6 +371,16 @@ class SourceDialog(QDialog):
         pattern_row.addWidget(self.pattern_edit, 1)
         layout.addRow("Version Pattern:", pattern_row)
 
+        # Date format
+        self.override_date_format_check = QCheckBox("Override")
+        self.date_format_combo = QComboBox()
+        self.date_format_combo.addItems(["(none)", "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"])
+        self.override_date_format_check.toggled.connect(lambda on: self.date_format_combo.setEnabled(on))
+        date_row = QHBoxLayout()
+        date_row.addWidget(self.override_date_format_check)
+        date_row.addWidget(self.date_format_combo, 1)
+        layout.addRow("Date Format:", date_row)
+
         # File extensions
         self.override_ext_check = QCheckBox("Override")
         self.extensions_edit = QLineEdit()
@@ -411,12 +421,17 @@ class SourceDialog(QDialog):
             self.override_ext_check.setChecked(source.override_file_extensions)
             self.extensions_edit.setText(" ".join(source.file_extensions))
 
+            self.override_date_format_check.setChecked(source.override_date_format)
+            if source.date_format:
+                self.date_format_combo.setCurrentText(source.date_format)
+
             self.override_link_mode_check.setChecked(source.override_link_mode)
             self.link_mode_combo.setCurrentText(source.link_mode)
         else:
             # New source — start with defaults, overrides off
             self.override_latest_check.setChecked(False)
             self.override_pattern_check.setChecked(False)
+            self.override_date_format_check.setChecked(False)
             self.override_ext_check.setChecked(False)
             self.override_link_mode_check.setChecked(False)
 
@@ -429,6 +444,7 @@ class SourceDialog(QDialog):
                               project_config.default_version_pattern if project_config else "_v{version}")
         self._toggle_override(self.override_ext_check.isChecked(),
                               self.extensions_edit, None, default_ext_str)
+        self.date_format_combo.setEnabled(self.override_date_format_check.isChecked())
         self.link_mode_combo.setEnabled(self.override_link_mode_check.isChecked())
 
     def _get_default_latest(self) -> str:
@@ -458,6 +474,8 @@ class SourceDialog(QDialog):
         exts = exts_text.split() if exts_text else list(DEFAULT_FILE_EXTENSIONS)
 
         pc = self._project_config
+        date_fmt_text = self.date_format_combo.currentText()
+        date_fmt = "" if date_fmt_text == "(none)" else date_fmt_text
         return WatchedSource(
             name=self.name_edit.text().strip() or "Untitled",
             source_dir=self.source_dir_edit.text().strip(),
@@ -465,7 +483,9 @@ class SourceDialog(QDialog):
             file_extensions=exts,
             latest_target=self.target_dir_edit.text().strip(),
             link_mode=self.link_mode_combo.currentText(),
+            date_format=date_fmt,
             override_version_pattern=self.override_pattern_check.isChecked(),
+            override_date_format=self.override_date_format_check.isChecked(),
             override_file_extensions=self.override_ext_check.isChecked(),
             override_latest_target=self.override_latest_check.isChecked(),
             override_link_mode=self.override_link_mode_check.isChecked(),
@@ -685,6 +705,13 @@ class ProjectSettingsDialog(QDialog):
         self.pattern_edit = QLineEdit(config.default_version_pattern)
         layout.addRow("Default Version Pattern:", self.pattern_edit)
 
+        # Default date format
+        self.date_format_combo = QComboBox()
+        self.date_format_combo.addItems(["(none)", "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"])
+        if config.default_date_format:
+            self.date_format_combo.setCurrentText(config.default_date_format)
+        layout.addRow("Default Date Format:", self.date_format_combo)
+
         # Default file extensions
         self.extensions_edit = QLineEdit(" ".join(config.default_file_extensions))
         layout.addRow("Default File Extensions:", self.extensions_edit)
@@ -872,6 +899,9 @@ class ProjectSettingsDialog(QDialog):
         config.latest_path_template = self.latest_template_edit.text().strip()
         config.default_file_rename_template = self.rename_template_edit.text().strip() or "{source_basename}_latest"
         config.default_version_pattern = self.pattern_edit.text().strip() or "_v{version}"
+
+        date_fmt_text = self.date_format_combo.currentText()
+        config.default_date_format = "" if date_fmt_text == "(none)" else date_fmt_text
 
         exts = self.extensions_edit.text().strip().split()
         config.default_file_extensions = exts if exts else list(DEFAULT_FILE_EXTENSIONS)
@@ -1693,15 +1723,18 @@ class DiscoveryDialog(QDialog):
                 self._config.task_tokens,
             )
 
+            suggested_date_fmt = getattr(result, "suggested_date_format", "")
             source = WatchedSource(
                 name=source_name,
                 source_dir=result.path,
                 version_pattern=result.suggested_pattern or self._config.default_version_pattern,
                 file_extensions=result.suggested_extensions or list(self._config.default_file_extensions),
                 sample_filename=result.sample_filename or "",
+                date_format=suggested_date_fmt or self._config.default_date_format,
                 # Override pattern and extensions since they come from discovery
                 override_version_pattern=bool(result.suggested_pattern),
                 override_file_extensions=bool(result.suggested_extensions),
+                override_date_format=bool(suggested_date_fmt),
             )
 
             # Compute latest_target from project template if available
@@ -2485,7 +2518,7 @@ class MainWindow(QMainWindow):
         ver_layout = QVBoxLayout(ver_group)
 
         self.version_tree = VersionTreeWidget()
-        self.version_tree.setHeaderLabels(["Version", "Files", "Size", "Frame Range", "Timecode", "Path"])
+        self.version_tree.setHeaderLabels(["Version", "Date", "Files", "Size", "Frame Range", "Timecode", "Path"])
         self.version_tree.setRootIsDecorated(False)
         self.version_tree.setAlternatingRowColors(True)
         self.version_tree.setSortingEnabled(True)
@@ -2493,10 +2526,11 @@ class MainWindow(QMainWindow):
         header = self.version_tree.header()
         header.setStretchLastSection(True)
         header.resizeSection(0, 80)
-        header.resizeSection(1, 60)
-        header.resizeSection(2, 80)
-        header.resizeSection(3, 160)
-        header.resizeSection(4, 110)
+        header.resizeSection(1, 70)
+        header.resizeSection(2, 60)
+        header.resizeSection(3, 80)
+        header.resizeSection(4, 160)
+        header.resizeSection(5, 110)
         ver_layout.addWidget(self.version_tree)
 
         # Promote controls
@@ -3485,7 +3519,8 @@ class MainWindow(QMainWindow):
 
         # Merge manual versions
         manual = self._manual_versions.get(source.name, [])
-        versions = sorted(scanned_versions + manual, key=lambda v: v.version_number)
+        versions = sorted(scanned_versions + manual,
+                          key=lambda v: (getattr(v, "date_sortable", 0), v.version_number))
         # Track which source_paths are manual for UI indicators
         manual_paths = {v.source_path for v in manual}
 
@@ -3566,8 +3601,16 @@ class MainWindow(QMainWindow):
             is_manual = v.source_path in manual_paths
             version_label = f"{v.version_string} [manual]" if is_manual else v.version_string
 
+            # Date display from VersionInfo (empty dash if no date)
+            date_display = ""
+            if getattr(v, "date_string", None):
+                from src.lvm.task_tokens import format_date_display
+                date_fmt = getattr(source, "date_format", "")
+                date_display = format_date_display(v.date_string, date_fmt) if date_fmt else v.date_string
+
             item = QTreeWidgetItem([
                 version_label,
+                date_display or "\u2014",
                 str(v.file_count),
                 v.total_size_human,
                 v.frame_range or "\u2014",
@@ -3579,7 +3622,7 @@ class MainWindow(QMainWindow):
             if is_manual:
                 # Cyan tint for manually imported versions
                 manual_color = QColor("#66cccc")
-                for col in range(6):
+                for col in range(7):
                     item.setForeground(col, manual_color)
 
             if v.version_string == current_ver:
@@ -3599,14 +3642,14 @@ class MainWindow(QMainWindow):
                     suffix = " [manual]" if is_manual else ""
                     item.setText(0, f"{v.version_string}{suffix}* \u25c0")
                     color = QColor("#7abbe0")
-                for col in range(6):
+                for col in range(7):
                     item.setForeground(col, color)
 
             # Highlight timecode changes vs current promoted version
             if (current_tc and v.start_timecode
                     and v.start_timecode != current_tc
                     and v.version_string != current_ver):
-                item.setForeground(4, QColor("#ff9944"))
+                item.setForeground(5, QColor("#ff9944"))
 
             self.version_tree.addTopLevelItem(item)
 

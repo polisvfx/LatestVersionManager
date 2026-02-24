@@ -60,6 +60,8 @@ class VersionInfo:
     file_count: int = 0
     total_size_bytes: int = 0
     start_timecode: Optional[str] = None  # e.g. "01:00:00:00"
+    date_string: Optional[str] = None     # raw date from filename, e.g. "260224"
+    date_sortable: int = 0                # YYYYMMDD integer for sorting (0 = no date)
 
     @property
     def total_size_human(self) -> str:
@@ -145,8 +147,10 @@ class WatchedSource:
     link_mode: str = "copy"  # "copy", "symlink", or "hardlink"
     sample_filename: str = ""  # Representative filename for token derivation
     group: str = ""  # Group name (must match a key in ProjectConfig.groups)
+    date_format: str = ""  # "", "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"
     # Override flags — when False, the source inherits the project-wide default
     override_version_pattern: bool = False
+    override_date_format: bool = False
     override_file_extensions: bool = False
     override_latest_target: bool = False
     override_file_rename: bool = False
@@ -178,9 +182,13 @@ class WatchedSource:
             d["sample_filename"] = self.sample_filename
         if self.group:
             d["group"] = self.group
+        if self.date_format:
+            d["date_format"] = self.date_format
         # Only serialize override flags when True (compact JSON)
         if self.override_version_pattern:
             d["override_version_pattern"] = True
+        if self.override_date_format:
+            d["override_date_format"] = True
         if self.override_file_extensions:
             d["override_file_extensions"] = True
         if self.override_latest_target:
@@ -214,7 +222,9 @@ class WatchedSource:
             link_mode=link_mode,
             sample_filename=data.get("sample_filename", ""),
             group=data.get("group", ""),
+            date_format=data.get("date_format", ""),
             override_version_pattern=data.get("override_version_pattern", False),
+            override_date_format=data.get("override_date_format", False),
             override_file_extensions=data.get("override_file_extensions", False),
             override_latest_target=data.get("override_latest_target", False),
             override_file_rename=data.get("override_file_rename", False),
@@ -235,6 +245,7 @@ class ProjectConfig:
     default_file_extensions: list = field(default_factory=lambda: list(DEFAULT_FILE_EXTENSIONS))
     default_file_rename_template: str = "{source_basename}_latest"  # tokens: {source_name}, {source_basename}
     default_link_mode: str = "copy"  # "copy", "symlink", or "hardlink"
+    default_date_format: str = ""  # "", "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"
     # Discovery filters
     name_whitelist: list = field(default_factory=list)
     name_blacklist: list = field(default_factory=list)
@@ -280,6 +291,8 @@ class ProjectConfig:
             d["default_file_rename_template"] = self.default_file_rename_template
         if self.default_link_mode != "copy":
             d["default_link_mode"] = self.default_link_mode
+        if self.default_date_format:
+            d["default_date_format"] = self.default_date_format
         if self.name_whitelist:
             d["name_whitelist"] = self.name_whitelist
         if self.name_blacklist:
@@ -313,6 +326,7 @@ class ProjectConfig:
             default_file_rename_template=data.get("default_file_rename_template", "{source_basename}_latest"),
             default_link_mode=data.get("default_link_mode",
                                         "symlink" if data.get("default_use_symlinks", False) else "copy"),
+            default_date_format=data.get("default_date_format", ""),
             name_whitelist=data.get("name_whitelist", []),
             name_blacklist=data.get("name_blacklist", []),
             groups=data.get("groups", {}),
@@ -334,3 +348,4 @@ class DiscoveryResult:
     suggested_pattern: str = ""
     suggested_extensions: list = field(default_factory=list)
     sample_filename: str = ""  # representative filename from first version
+    suggested_date_format: str = ""  # detected date format, e.g. "DDMMYY"

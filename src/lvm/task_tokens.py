@@ -28,6 +28,135 @@ VERSION_RE = re.compile(r"[._\-]v(\d+)", re.IGNORECASE)
 # Frame number + extension at end of filename: name.1001.exr, name_1001.exr
 FRAME_EXT_RE = re.compile(r"[._](\d{3,8})\.\w+$")
 
+# Date patterns in filenames: 6-digit (DDMMYY/YYMMDD) or 8-digit (DDMMYYYY/YYYYMMDD)
+# Bounded by dividers or string start/end to avoid matching frame numbers or reel IDs
+DATE_RE = re.compile(r"(?:^|(?<=[._\-]))(\d{6}|\d{8})(?=[._\-]|$)")
+
+# Valid date format identifiers
+VALID_DATE_FORMATS = ("DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD")
+
+
+def validate_date_string(digits: str, date_format: str) -> bool:
+    """Check if a digit string forms a plausible date for the given format.
+
+    Performs basic range checks on day (1-31), month (1-12), and year components.
+
+    Args:
+        digits: Raw digit string, e.g. "260224" or "20240226".
+        date_format: One of "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD".
+
+    Returns:
+        True if the digits form a plausible date.
+    """
+    try:
+        if date_format == "DDMMYY" and len(digits) == 6:
+            dd, mm = int(digits[:2]), int(digits[2:4])
+        elif date_format == "YYMMDD" and len(digits) == 6:
+            mm, dd = int(digits[2:4]), int(digits[4:6])
+        elif date_format == "DDMMYYYY" and len(digits) == 8:
+            dd, mm, yyyy = int(digits[:2]), int(digits[2:4]), int(digits[4:8])
+            if yyyy < 1900 or yyyy > 2099:
+                return False
+        elif date_format == "YYYYMMDD" and len(digits) == 8:
+            yyyy, mm, dd = int(digits[:4]), int(digits[4:6]), int(digits[6:8])
+            if yyyy < 1900 or yyyy > 2099:
+                return False
+        else:
+            return False
+    except (ValueError, IndexError):
+        return False
+
+    return 1 <= dd <= 31 and 1 <= mm <= 12
+
+
+def parse_date_to_sortable(date_str: str, date_format: str) -> int:
+    """Convert a date string to a YYYYMMDD integer for chronological sorting.
+
+    Args:
+        date_str: Raw date digits, e.g. "260224" or "20240226".
+        date_format: One of "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD".
+
+    Returns:
+        Integer in YYYYMMDD format, e.g. 20240226.  Returns 0 on failure.
+    """
+    if not validate_date_string(date_str, date_format):
+        return 0
+
+    if date_format == "DDMMYY":
+        dd, mm, yy = date_str[:2], date_str[2:4], date_str[4:6]
+        yyyy = f"20{yy}" if int(yy) < 70 else f"19{yy}"
+        return int(f"{yyyy}{mm}{dd}")
+    elif date_format == "YYMMDD":
+        yy, mm, dd = date_str[:2], date_str[2:4], date_str[4:6]
+        yyyy = f"20{yy}" if int(yy) < 70 else f"19{yy}"
+        return int(f"{yyyy}{mm}{dd}")
+    elif date_format == "DDMMYYYY":
+        dd, mm, yyyy = date_str[:2], date_str[2:4], date_str[4:8]
+        return int(f"{yyyy}{mm}{dd}")
+    elif date_format == "YYYYMMDD":
+        return int(date_str)
+    return 0
+
+
+def format_date_display(date_str: str, date_format: str) -> str:
+    """Format a raw date string into a human-readable display string.
+
+    Args:
+        date_str: Raw date digits, e.g. "260224".
+        date_format: One of "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD".
+
+    Returns:
+        Formatted string like "26-02-24" or the raw string on failure.
+    """
+    if date_format == "DDMMYY" and len(date_str) == 6:
+        return f"{date_str[:2]}-{date_str[2:4]}-{date_str[4:6]}"
+    elif date_format == "YYMMDD" and len(date_str) == 6:
+        return f"{date_str[4:6]}-{date_str[2:4]}-{date_str[:2]}"
+    elif date_format == "DDMMYYYY" and len(date_str) == 8:
+        return f"{date_str[:2]}-{date_str[2:4]}-{date_str[4:8]}"
+    elif date_format == "YYYYMMDD" and len(date_str) == 8:
+        return f"{date_str[6:8]}-{date_str[4:6]}-{date_str[:4]}"
+    return date_str
+
+
+def strip_date(name: str, date_format: str = "") -> str:
+    """Remove a validated date pattern from a name string.
+
+    Only strips when date_format is set and matched digits validate as a date.
+    This prevents false positives on camera reel IDs or other numeric sequences.
+
+    Example: '260224_shotname' with DDMMYY -> 'shotname'
+    Example: 'shotname_260224' with DDMMYY -> 'shotname'
+
+    Args:
+        name: The string to strip date from.
+        date_format: Date format identifier. Empty string disables stripping.
+
+    Returns:
+        Name with date removed (or unchanged if no valid date found).
+    """
+    if not date_format:
+        return name
+
+    for m in DATE_RE.finditer(name):
+        digits = m.group(1)
+        if validate_date_string(digits, date_format):
+            # Remove the matched date and clean up dividers
+            start = m.start(1)
+            end = m.end(1)
+            # Also consume an adjacent divider
+            if start > 0 and name[start - 1] in DIVIDERS:
+                start -= 1
+            elif end < len(name) and name[end] in DIVIDERS:
+                end += 1
+            result = name[:start] + name[end:]
+            # Clean up double dividers and leading/trailing dividers
+            result = re.sub(r"[_.\-]{2,}", lambda mv: mv.group()[0], result)
+            result = result.strip(DIVIDERS)
+            return result
+
+    return name
+
 
 # Module-level cache for compiled task patterns (avoids recompilation)
 _task_pattern_cache: dict[str, re.Pattern] = {}
@@ -186,6 +315,7 @@ def strip_frame_and_ext(filename: str) -> str:
 def derive_source_tokens(
     source_path_or_name: str,
     task_patterns: list[str] = None,
+    date_format: str = "",
 ) -> dict[str, str]:
     """Compute all source name tokens from a filename or path.
 
@@ -200,6 +330,7 @@ def derive_source_tokens(
     Args:
         source_path_or_name: A filename or full path. Only the filename part is used.
         task_patterns: List of task token patterns for basename derivation.
+        date_format: Date format for stripping dates from basename. Empty disables.
 
     Returns:
         Dict with keys: source_filename, source_fullname, source_name, source_basename.
@@ -216,8 +347,11 @@ def derive_source_tokens(
     # source_name: strip version from fullname
     source_name = strip_version(fullname)
 
-    # source_basename: strip task tokens from source_name
-    source_basename = strip_task_tokens(source_name, task_patterns)
+    # Strip date before task tokens so date doesn't affect basename
+    name_no_date = strip_date(source_name, date_format)
+
+    # source_basename: strip task tokens from source_name (with date removed)
+    source_basename = strip_task_tokens(name_no_date, task_patterns)
 
     # Guard: if basename is empty, fall back to source_name
     if not source_basename:

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Pre-compiled module-level regex patterns (avoid re-compiling per call)
 _VERSION_RE = re.compile(r"[._\-]v\d+", re.IGNORECASE)
+_DATE_RE = re.compile(r"(?:^|(?<=[._\-]))(\d{6}|\d{8})(?=[._\-]|$)")
 _DOUBLE_DIVIDER_RE = re.compile(r"([_.\-]){2,}")
 _FRAME_EXT_RE = re.compile(r"([._])(\d{3,8})\.(\w+)$")
 
@@ -225,8 +226,15 @@ class Promoter:
         """
         template = self.source.file_rename_template
         if not template:
-            # Fallback: just strip version using pre-compiled regex
+            # Fallback: strip version (and date if configured) using pre-compiled regex
             result = _VERSION_RE.sub("", filename, count=1)
+            date_fmt = getattr(self.source, "date_format", "")
+            if date_fmt:
+                from .task_tokens import strip_date
+                # Strip date from the stem only (preserve extension)
+                p = Path(result)
+                stem = strip_date(p.stem, date_fmt)
+                result = stem + p.suffix if p.suffix else stem
             result = _DOUBLE_DIVIDER_RE.sub(r"\1", result)
             return result
 
@@ -247,7 +255,9 @@ class Promoter:
         # Derive source tokens (cached after first call)
         if self._rename_tokens is None:
             token_input = self.source.sample_filename or self.source.name
-            self._rename_tokens = derive_source_tokens(token_input, self.task_tokens)
+            date_fmt = getattr(self.source, "date_format", "")
+            self._rename_tokens = derive_source_tokens(
+                token_input, self.task_tokens, date_fmt)
 
         tokens = self._rename_tokens
 
