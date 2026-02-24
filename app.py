@@ -6,6 +6,8 @@ import os
 import sys
 import json
 import logging
+import platform
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -81,6 +83,41 @@ def _load_app_icon() -> QIcon:
             painter.end()
             icon.addPixmap(pixmap)
     return icon
+
+
+# ---------------------------------------------------------------------------
+# Cross-platform file browser helpers
+# ---------------------------------------------------------------------------
+
+_PLATFORM = platform.system()
+if _PLATFORM == "Darwin":
+    _REVEAL_LABEL = "Reveal in Finder"
+elif _PLATFORM == "Windows":
+    _REVEAL_LABEL = "Reveal in Explorer"
+else:
+    _REVEAL_LABEL = "Open in File Browser"
+
+
+def reveal_in_file_browser(path: str) -> None:
+    """Open the containing folder in the native file browser and select the item."""
+    p = Path(path)
+    if not p.exists():
+        # Fall back to parent if the exact path doesn't exist
+        p = p.parent
+        if not p.exists():
+            return
+    target = str(p)
+    if _PLATFORM == "Windows":
+        if p.is_dir():
+            os.startfile(target)
+        else:
+            subprocess.Popen(["explorer", "/select,", target])
+    elif _PLATFORM == "Darwin":
+        subprocess.Popen(["open", "-R", target])
+    else:
+        # Linux / other — xdg-open opens the containing folder
+        folder = target if p.is_dir() else str(p.parent)
+        subprocess.Popen(["xdg-open", folder])
 
 
 # ---------------------------------------------------------------------------
@@ -2478,7 +2515,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.current_banner)
 
         # Version + History vertical split
-        ver_hist_splitter = QSplitter(Qt.Vertical)
+        self.ver_hist_splitter = QSplitter(Qt.Vertical)
 
         # Version tree
         ver_group = QGroupBox("Available Versions")
@@ -2489,6 +2526,8 @@ class MainWindow(QMainWindow):
         self.version_tree.setRootIsDecorated(False)
         self.version_tree.setAlternatingRowColors(True)
         self.version_tree.setSortingEnabled(True)
+        self.version_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.version_tree.customContextMenuRequested.connect(self._version_context_menu)
         self.version_tree.files_dropped.connect(self._handle_version_drop)
         header = self.version_tree.header()
         header.setStretchLastSection(True)
@@ -2519,7 +2558,7 @@ class MainWindow(QMainWindow):
         ver_layout.addLayout(promote_row)
         ver_layout.addWidget(self.progress_bar)
 
-        ver_hist_splitter.addWidget(ver_group)
+        self.ver_hist_splitter.addWidget(ver_group)
 
         # History tree
         hist_group = QGroupBox("Promotion History")
@@ -2551,10 +2590,10 @@ class MainWindow(QMainWindow):
         hist_layout.addWidget(self.history_tree)
         hist_layout.addLayout(revert_row)
 
-        ver_hist_splitter.addWidget(hist_group)
-        ver_hist_splitter.setSizes([400, 200])
+        self.ver_hist_splitter.addWidget(hist_group)
+        self.ver_hist_splitter.setSizes([400, 200])
 
-        right_layout.addWidget(ver_hist_splitter)
+        right_layout.addWidget(self.ver_hist_splitter)
         splitter.addWidget(right_panel)
 
         splitter.setSizes([250, 850])
@@ -2864,6 +2903,20 @@ class MainWindow(QMainWindow):
         else:
             menu.addAction(f"Remove {len(selected_indices)} Sources", lambda: self._remove_sources(selected_indices))
 
+        # Reveal in file browser
+        menu.addSeparator()
+        if len(selected_indices) == 1:
+            source = self.config.watched_sources[selected_indices[0]]
+            menu.addAction(
+                f"{_REVEAL_LABEL} — Source",
+                lambda: reveal_in_file_browser(source.source_dir),
+            )
+            if source.latest_target:
+                menu.addAction(
+                    f"{_REVEAL_LABEL} — Latest Target",
+                    lambda: reveal_in_file_browser(source.latest_target),
+                )
+
         # Group submenu
         menu.addSeparator()
         group_menu = menu.addMenu("Group")
@@ -2888,6 +2941,74 @@ class MainWindow(QMainWindow):
             group_menu.addAction("Remove from Group", lambda: self._assign_group(selected_indices, ""))
 
         menu.exec(self.source_list.mapToGlobal(pos))
+
+    def _version_context_menu(self, pos):
+        items = self.version_tree.selectedItems()
+        if not items or not self._current_source:
+            return
+        version: VersionInfo = items[0].data(0, Qt.UserRole)
+        source = self._current_source
+        promoter = self._promoters.get(source.name) if source else None
+        current = promoter.get_current_version() if promoter else None
+        is_promoted = current and version.version_string == current.version
+
+        menu = QMenu(self)
+
+        # Reveal actions
+        menu.addAction(
+            f"{_REVEAL_LABEL} — Version",
+            lambda: reveal_in_file_browser(version.source_path),
+        )
+        if source.latest_target:
+            menu.addAction(
+                f"{_REVEAL_LABEL} — Latest Target",
+                lambda: reveal_in_file_browser(source.latest_target),
+            )
+
+        # Promote
+        menu.addSeparator()
+        if is_promoted:
+            promote_action = menu.addAction("Keep This Version", self._promote_selected)
+        else:
+            promote_action = menu.addAction("Promote This Version", self._promote_selected)
+
+        # Copy actions
+        menu.addSeparator()
+        menu.addAction("Copy Version Path", lambda: QApplication.clipboard().setText(version.source_path))
+        if source.latest_target:
+            menu.addAction("Copy Latest Target Path", lambda: QApplication.clipboard().setText(source.latest_target))
+        menu.addAction("Copy Version Info", lambda: self._copy_version_info(version, source))
+
+        # History
+        menu.addSeparator()
+        menu.addAction("View Promotion History", self._scroll_to_history)
+
+        menu.exec(self.version_tree.mapToGlobal(pos))
+
+    def _copy_version_info(self, version: VersionInfo, source: WatchedSource):
+        """Copy a formatted summary of the version to the clipboard."""
+        lines = [
+            f"Source: {source.name}",
+            f"Version: {version.version_string}",
+            f"Files: {version.file_count}",
+            f"Size: {version.total_size_human}",
+            f"Frame Range: {version.frame_range or 'N/A'}",
+            f"Timecode: {version.start_timecode or 'N/A'}",
+            f"Path: {version.source_path}",
+        ]
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def _scroll_to_history(self):
+        """Ensure the history panel is visible and scroll to it."""
+        # Make sure the history panel has a reasonable size in the splitter
+        sizes = self.ver_hist_splitter.sizes()
+        if sizes[1] < 100:
+            self.ver_hist_splitter.setSizes([sizes[0], max(200, sizes[0] // 2)])
+        self.history_tree.scrollToTop()
+        self.history_tree.setFocus()
+        # Select the first (most recent) history entry if available
+        if self.history_tree.topLevelItemCount() > 0:
+            self.history_tree.setCurrentItem(self.history_tree.topLevelItem(0))
 
     def _assign_group(self, indices: list, group_name: str):
         """Assign or unassign sources to a group."""
