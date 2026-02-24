@@ -883,7 +883,7 @@ class ProjectSettingsDialog(QDialog):
                 rename_resolved = _expand_group_token(rename_resolved, source.group)
                 sample_file = f"{rename_resolved}.####.exr"
                 group_tag = f" [{source.group}]" if source.group else ""
-                previews.append(f"{source.name}{group_tag}: {dir_str}\\{sample_file}")
+                previews.append(f"{source.name}{group_tag}: {str(Path(dir_str) / sample_file)}")
             if not self._selected_source and len(config.watched_sources) > 3:
                 previews.append(f"... and {len(config.watched_sources) - 3} more")
         else:
@@ -907,7 +907,7 @@ class ProjectSettingsDialog(QDialog):
             rename_resolved = rename_resolved.replace("{source_fullname}", "<source_fullname>")
             rename_resolved = rename_resolved.replace("{group}", "<group>")
             sample_file = f"{rename_resolved}.####.exr"
-            previews.append(f"{dir_str}\\{sample_file}")
+            previews.append(str(Path(dir_str) / sample_file))
 
         self.path_preview_label.setText("\n".join(previews))
         self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
@@ -1133,7 +1133,7 @@ class LatestPathDialog(QDialog):
                 rename_resolved = _expand_group_token(rename_resolved, source.group)
                 sample_file = f"{rename_resolved}.####.exr"
                 group_tag = f" [{source.group}]" if source.group else ""
-                previews.append(f"{source.name}{group_tag}: {dir_str}\\{sample_file}")
+                previews.append(f"{source.name}{group_tag}: {str(Path(dir_str) / sample_file)}")
             if len(config.watched_sources) > 4:
                 previews.append(f"... and {len(config.watched_sources) - 4} more")
         else:
@@ -1157,7 +1157,7 @@ class LatestPathDialog(QDialog):
             rename_resolved = rename_resolved.replace("{source_fullname}", "<source_fullname>")
             rename_resolved = rename_resolved.replace("{group}", "<group>")
             sample_file = f"{rename_resolved}.####.exr"
-            previews.append(f"{dir_str}\\{sample_file}")
+            previews.append(str(Path(dir_str) / sample_file))
 
         self.preview_label.setText("\n".join(previews))
         self.preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")

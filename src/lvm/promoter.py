@@ -42,6 +42,12 @@ class Promoter:
     def __init__(self, watched_source: WatchedSource, task_tokens: list = None):
         self.source = watched_source
         self.task_tokens = task_tokens or []
+
+        if not watched_source.latest_target:
+            raise PromotionError(
+                f"Source '{watched_source.name}' has no latest target path configured."
+            )
+
         self.history = HistoryManager(
             os.path.join(watched_source.latest_target, watched_source.history_filename)
         )
@@ -276,14 +282,22 @@ class Promoter:
 
     def _clear_target(self, target_dir: Path, valid_extensions: set):
         """Remove existing media files from the target directory (not the history file)."""
-        for f in target_dir.iterdir():
+        try:
+            entries = list(target_dir.iterdir())
+        except OSError as e:
+            raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
+
+        for f in entries:
             if f.is_file() and f.suffix.lower() in valid_extensions:
                 try:
                     f.unlink()
                 except PermissionError:
                     raise PromotionError(f"Cannot delete {f} - file may be in use")
             elif f.is_symlink():
-                f.unlink()
+                try:
+                    f.unlink()
+                except OSError as e:
+                    logger.warning(f"Could not remove symlink {f}: {e}")
 
     def _link_or_copy(self, source: Path, target: Path):
         """Route to the correct file operation based on link_mode."""
