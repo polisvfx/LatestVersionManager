@@ -86,6 +86,8 @@ def apply_project_defaults(config: ProjectConfig):
             source.file_rename_template = config.default_file_rename_template
         if not source.override_link_mode:
             source.link_mode = config.default_link_mode
+        if not source.override_date_format:
+            source.date_format = config.default_date_format
 
 
 def load_config(config_path: str) -> ProjectConfig:
