@@ -2863,25 +2863,51 @@ class MainWindow(QMainWindow):
     def _add_source(self):
         if not self.config:
             return
-        dlg = SourceDialog(project_config=self.config, parent=self)
-        if dlg.exec() == QDialog.Accepted:
-            source = dlg.get_source()
-            self.config.watched_sources.append(source)
-            if self.config_path:
-                self._save_project()
-            self._reload_ui()
-            self.statusBar().showMessage(f"Added source: {source.name}")
+        draft = None
+        while True:
+            dlg = SourceDialog(source=draft, project_config=self.config, parent=self)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            draft = dlg.get_source()
+            existing_names = [s.name for s in self.config.watched_sources]
+            if draft.name in existing_names:
+                QMessageBox.warning(
+                    self, "Duplicate Name",
+                    f"A source named '{draft.name}' already exists.\n"
+                    f"Please choose a different name.",
+                )
+                continue
+            break
+        self.config.watched_sources.append(draft)
+        if self.config_path:
+            self._save_project()
+        self._reload_ui()
+        self.statusBar().showMessage(f"Added source: {draft.name}")
 
     def _edit_source(self, index: int):
         if not self.config or index < 0 or index >= len(self.config.watched_sources):
             return
-        source = self.config.watched_sources[index]
-        dlg = SourceDialog(source=source, project_config=self.config, parent=self)
-        if dlg.exec() == QDialog.Accepted:
-            self.config.watched_sources[index] = dlg.get_source()
-            if self.config_path:
-                self._save_project()
-            self._reload_ui()
+        draft = self.config.watched_sources[index]
+        while True:
+            dlg = SourceDialog(source=draft, project_config=self.config, parent=self)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            draft = dlg.get_source()
+            existing_names = [
+                s.name for i, s in enumerate(self.config.watched_sources) if i != index
+            ]
+            if draft.name in existing_names:
+                QMessageBox.warning(
+                    self, "Duplicate Name",
+                    f"A source named '{draft.name}' already exists.\n"
+                    f"Please choose a different name.",
+                )
+                continue
+            break
+        self.config.watched_sources[index] = draft
+        if self.config_path:
+            self._save_project()
+        self._reload_ui()
 
     def _remove_source(self, index: int):
         self._remove_sources([index])
