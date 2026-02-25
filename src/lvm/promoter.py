@@ -10,6 +10,7 @@ import re
 import shutil
 import logging
 import platform
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Callable
@@ -53,6 +54,11 @@ class Promoter:
         )
         # Cache derived tokens for file renaming
         self._rename_tokens = None
+        self._cancelled = threading.Event()
+
+    def cancel(self):
+        """Signal that the current promotion should be aborted at the next checkpoint."""
+        self._cancelled.set()
 
     def promote(
         self,
@@ -73,8 +79,9 @@ class Promoter:
             The HistoryEntry that was recorded.
 
         Raises:
-            PromotionError: If the promotion fails.
+            PromotionError: If the promotion fails or is cancelled.
         """
+        self._cancelled.clear()
         if user is None:
             try:
                 user = os.getlogin()
@@ -168,6 +175,8 @@ class Promoter:
         else:
             # Sequential for symlink/hardlink (fast already) or small sets
             for i, src_file in enumerate(source_files):
+                if self._cancelled.is_set():
+                    raise PromotionError("Promotion cancelled by user.")
                 target_name = self._remap_filename(src_file.name)
                 target_file = target_dir / target_name
                 self._link_or_copy(src_file, target_file)
@@ -185,6 +194,8 @@ class Promoter:
         completed = [0]  # mutable counter for closure
 
         def _copy_one(src_file: Path):
+            if self._cancelled.is_set():
+                return
             target_name = self._remap_filename(src_file.name)
             target_file = target_dir / target_name
             if target_file.exists() or target_file.is_symlink():
@@ -199,6 +210,9 @@ class Promoter:
             # Wait for all to complete, propagate exceptions
             for future in futures:
                 future.result()
+
+        if self._cancelled.is_set():
+            raise PromotionError("Promotion cancelled by user.")
 
     def _promote_single_file(
         self,

@@ -135,6 +135,10 @@ class PromoteWorker(QThread):
         self.promoter = promoter
         self.version = version
 
+    def cancel(self):
+        """Request cancellation of the running promotion."""
+        self.promoter.cancel()
+
     def run(self):
         try:
             entry = self.promoter.promote(
@@ -2588,9 +2592,17 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(True)
+        self.btn_cancel_promote = QPushButton("Cancel")
+        self.btn_cancel_promote.setVisible(False)
+        self.btn_cancel_promote.setFixedWidth(70)
+        self.btn_cancel_promote.clicked.connect(self._cancel_promotion)
+
+        progress_row = QHBoxLayout()
+        progress_row.addWidget(self.progress_bar)
+        progress_row.addWidget(self.btn_cancel_promote)
 
         ver_layout.addLayout(promote_row)
-        ver_layout.addWidget(self.progress_bar)
+        ver_layout.addLayout(progress_row)
 
         self.ver_hist_splitter.addWidget(ver_group)
 
@@ -4135,6 +4147,9 @@ class MainWindow(QMainWindow):
         self.btn_revert.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
+        self.btn_cancel_promote.setVisible(True)
+        self.btn_cancel_promote.setEnabled(True)
+        self.btn_cancel_promote.setText("Cancel")
 
         self._worker = PromoteWorker(promoter, version, self)
         self._worker.progress.connect(self._on_promote_progress)
@@ -4147,9 +4162,18 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(current)
         self.progress_bar.setFormat(f"{current}/{total} \u2014 {filename}")
 
+    def _cancel_promotion(self):
+        """Request cancellation of the running promotion."""
+        if self._worker:
+            self._worker.cancel()
+            self.btn_cancel_promote.setEnabled(False)
+            self.btn_cancel_promote.setText("Cancelling...")
+            self.statusBar().showMessage("Cancelling promotion...")
+
     def _on_promote_finished(self, entry):
         self._worker = None
         self.progress_bar.setVisible(False)
+        self.btn_cancel_promote.setVisible(False)
 
         # Check if this is part of a batch promotion
         if hasattr(self, '_batch_promote_list') and self._batch_promote_list:
@@ -4175,6 +4199,7 @@ class MainWindow(QMainWindow):
     def _on_promote_error(self, error_msg):
         self._worker = None
         self.progress_bar.setVisible(False)
+        self.btn_cancel_promote.setVisible(False)
         self.btn_promote.setEnabled(True)
 
         # If batch promotion, ask whether to continue
