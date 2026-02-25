@@ -7,6 +7,8 @@ name = "latest-version-manager"
 version = "0.0.0-dev"
 description = "VFX version promotion tool for managing versioned file sequences"
 requires-python = ">=3.12"
+license = {file = "LICENSE"}
+license-files = ["LICENSE"]
 dependencies = [
     "PySide6>=6.6,<7",
     "watchdog>=4.0,<6",
