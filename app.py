@@ -675,6 +675,165 @@ class ProjectSetupDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Tag Input Widget (for whitelist / blacklist)
+# ---------------------------------------------------------------------------
+
+class FlowLayout(QVBoxLayout):
+    """Simple flow layout that wraps widgets into rows."""
+
+    def __init__(self, parent=None, spacing=4):
+        super().__init__(parent)
+        self._rows: list[QHBoxLayout] = []
+        self._spacing = spacing
+        self.setSpacing(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+        self._add_row()
+
+    def _add_row(self):
+        row = QHBoxLayout()
+        row.setSpacing(self._spacing)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch()
+        super().addLayout(row)
+        self._rows.append(row)
+        return row
+
+    def addWidget(self, widget):
+        row = self._rows[-1]
+        row.insertWidget(row.count() - 1, widget)
+
+    def removeWidget(self, widget):
+        for row in self._rows:
+            row.removeWidget(widget)
+        widget.setParent(None)
+
+
+class TagWidget(QFrame):
+    """A single removable tag pill with an X button on the right."""
+
+    removed = Signal(str)
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self._text = text
+        self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet(
+            "TagWidget {"
+            "  background: #3a3f47; border: 1px solid #555; border-radius: 10px;"
+            "  padding: 1px 6px 1px 2px;"
+            "}"
+            "TagWidget:hover { background: #454b55; }"
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 1, 2, 1)
+        layout.setSpacing(2)
+
+        label = QLabel(text)
+        label.setStyleSheet("background: transparent; border: none; color: #ddd; padding: 0;")
+        layout.addWidget(label)
+
+        close_btn = QPushButton("\u00d7")
+        close_btn.setFixedSize(16, 16)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent; border: none; color: #aaa;"
+            "  font-size: 13px; font-weight: bold; padding: 0; margin: 0;"
+            "}"
+            "QPushButton:hover { color: #ff6b6b; }"
+        )
+        close_btn.clicked.connect(lambda: self.removed.emit(self._text))
+        layout.addWidget(close_btn)
+
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    @property
+    def text(self):
+        return self._text
+
+
+class TagInputWidget(QWidget):
+    """Container that displays tags as removable pills with a text input.
+
+    Typing a comma converts the preceding text into a tag.
+    """
+
+    def __init__(self, initial_tags: list[str] = None, placeholder: str = "", parent=None):
+        super().__init__(parent)
+        self._tags: list[str] = []
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+
+        self._tag_container = QWidget()
+        self._flow = FlowLayout(self._tag_container, spacing=4)
+        outer.addWidget(self._tag_container)
+
+        self._input = QLineEdit()
+        self._input.setPlaceholderText(placeholder)
+        self._input.textChanged.connect(self._on_text_changed)
+        self._input.returnPressed.connect(self._commit_input)
+        outer.addWidget(self._input)
+
+        if initial_tags:
+            for tag in initial_tags:
+                self._add_tag(tag)
+        self._update_container_visibility()
+
+    def _on_text_changed(self, text: str):
+        if "," in text:
+            parts = text.split(",")
+            for part in parts[:-1]:
+                word = part.strip()
+                if word:
+                    self._add_tag(word)
+            self._input.setText(parts[-1].lstrip())
+
+    def _commit_input(self):
+        word = self._input.text().strip().rstrip(",")
+        if word:
+            self._add_tag(word)
+            self._input.clear()
+
+    def _add_tag(self, text: str):
+        text = text.strip()
+        if not text or text in self._tags:
+            return
+        self._tags.append(text)
+        tag_w = TagWidget(text)
+        tag_w.removed.connect(self._remove_tag)
+        self._flow.addWidget(tag_w)
+        self._update_container_visibility()
+
+    def _remove_tag(self, text: str):
+        if text in self._tags:
+            self._tags.remove(text)
+        for i in range(self._tag_container.layout().count()):
+            item = self._tag_container.layout().itemAt(i)
+            if item and isinstance(item, QHBoxLayout):
+                for j in range(item.count()):
+                    sub = item.itemAt(j)
+                    if sub and sub.widget() and isinstance(sub.widget(), TagWidget):
+                        if sub.widget().text == text:
+                            self._flow.removeWidget(sub.widget())
+                            self._update_container_visibility()
+                            return
+
+    def _update_container_visibility(self):
+        self._tag_container.setVisible(bool(self._tags))
+
+    def tags(self) -> list[str]:
+        """Return the current list of tags, including any uncommitted input."""
+        result = list(self._tags)
+        pending = self._input.text().strip().rstrip(",")
+        if pending and pending not in result:
+            result.append(pending)
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Project Settings Dialog
 # ---------------------------------------------------------------------------
 
@@ -820,12 +979,10 @@ class ProjectSettingsDialog(QDialog):
         filter_sep.setStyleSheet("font-weight: bold; margin-top: 10px;")
         layout.addRow("", filter_sep)
 
-        self.whitelist_edit = QLineEdit(", ".join(config.name_whitelist))
-        self.whitelist_edit.setPlaceholderText("comp, grade, final")
+        self.whitelist_edit = TagInputWidget(config.name_whitelist, placeholder="Type and press comma to add...")
         layout.addRow("Whitelist:", self.whitelist_edit)
 
-        self.blacklist_edit = QLineEdit(", ".join(config.name_blacklist))
-        self.blacklist_edit.setPlaceholderText("denoise, prerender, wip, temp")
+        self.blacklist_edit = TagInputWidget(config.name_blacklist, placeholder="Type and press comma to add...")
         layout.addRow("Blacklist:", self.blacklist_edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -956,8 +1113,8 @@ class ProjectSettingsDialog(QDialog):
             config.default_naming_rule = ""
             config.naming_configured = False
 
-        config.name_whitelist = [kw.strip() for kw in self.whitelist_edit.text().split(",") if kw.strip()]
-        config.name_blacklist = [kw.strip() for kw in self.blacklist_edit.text().split(",") if kw.strip()]
+        config.name_whitelist = self.whitelist_edit.tags()
+        config.name_blacklist = self.blacklist_edit.tags()
 
         # Re-apply defaults to non-overridden sources
         apply_project_defaults(config)
