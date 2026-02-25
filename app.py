@@ -1330,6 +1330,7 @@ class DiscoveryDialog(QDialog):
         self._worker = None
         self._config = config
         self._results = []  # store DiscoveryResults for add-to-project
+        self._timecodes_populated = False
         self._ignored_paths: set[str] = set()          # ignored source directory paths
         self._ignored_versions: set[tuple[str, int]] = set()  # (path, version_number)
 
@@ -1497,10 +1498,18 @@ class DiscoveryDialog(QDialog):
         self._worker = None
         self.scan_btn.setEnabled(True)
         self._results = results
+        self._timecodes_populated = False
 
         if not results:
             self.status_label.setText("No versioned content found.")
             return
+
+        # Populate timecodes once on new results rather than on every tree rebuild
+        tc_mode = self._config.timecode_mode if self._config else "lazy"
+        if tc_mode != "never":
+            for result in self._results:
+                populate_timecodes(result.versions_found)
+            self._timecodes_populated = True
 
         self._rebuild_tree()
 
@@ -1510,12 +1519,6 @@ class DiscoveryDialog(QDialog):
 
         if not self._results:
             return
-
-        # Load timecodes based on project setting (default to lazy if no config)
-        tc_mode = self._config.timecode_mode if self._config else "lazy"
-        if tc_mode != "never":
-            for result in self._results:
-                populate_timecodes(result.versions_found)
 
         root_dir = self.dir_combo.currentText().strip()
         root = Path(root_dir).resolve() if root_dir else None
@@ -1931,6 +1934,10 @@ class ManageGroupsDialog(QDialog):
         self.btn_root.clicked.connect(self._set_root_dir)
         btn_row.addWidget(self.btn_root)
 
+        self.btn_clear_root = QPushButton("Clear Root")
+        self.btn_clear_root.clicked.connect(self._clear_root_dir)
+        btn_row.addWidget(self.btn_clear_root)
+
         self.btn_delete = QPushButton("Delete")
         self.btn_delete.clicked.connect(self._delete_group)
         btn_row.addWidget(self.btn_delete)
@@ -1950,7 +1957,17 @@ class ManageGroupsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self.group_list.currentItemChanged.connect(self._on_group_selected)
         self._rebuild_list()
+
+    def _on_group_selected(self):
+        item = self.group_list.currentItem()
+        if item:
+            name = item.data(Qt.UserRole)
+            has_root = bool(self._groups[name].get("root_dir", ""))
+            self.btn_clear_root.setEnabled(has_root)
+        else:
+            self.btn_clear_root.setEnabled(False)
 
     def _next_color(self) -> str:
         used = {v.get("color", "") for v in self._groups.values()}
@@ -1972,6 +1989,7 @@ class ManageGroupsDialog(QDialog):
             if root:
                 item.setToolTip(f"Root directory: {root}")
             self.group_list.addItem(item)
+        self._on_group_selected()
 
     def _add_group(self):
         name, ok = QInputDialog.getText(self, "New Group", "Group name:")
@@ -2025,10 +2043,14 @@ class ManageGroupsDialog(QDialog):
         )
         if path:
             self._groups[name]["root_dir"] = path
-        elif path == "":
-            # User may want to clear — only if they had one set and hit cancel
-            # Do nothing on cancel; offer explicit clear via empty selection
-            pass
+        self._rebuild_list()
+
+    def _clear_root_dir(self):
+        item = self.group_list.currentItem()
+        if not item:
+            return
+        name = item.data(Qt.UserRole)
+        self._groups[name]["root_dir"] = ""
         self._rebuild_list()
 
     def _delete_group(self):
