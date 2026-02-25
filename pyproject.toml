@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "latest-version-manager"
+version = "0.0.0-dev"
+description = "VFX version promotion tool for managing versioned file sequences"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.6,<7",
+    "watchdog>=4.0,<6",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

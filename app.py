@@ -3084,6 +3084,15 @@ class MainWindow(QMainWindow):
         lines = [
             f"Source: {source.name}",
             f"Version: {version.version_string}",
+        ]
+        if getattr(version, "date_string", None):
+            date_fmt = getattr(source, "date_format", "")
+            if date_fmt:
+                from src.lvm.task_tokens import format_date_display
+                lines.append(f"Date: {format_date_display(version.date_string, date_fmt)}")
+            else:
+                lines.append(f"Date: {version.date_string}")
+        lines += [
             f"Files: {version.file_count}",
             f"Size: {version.total_size_human}",
             f"Frame Range: {version.frame_range or 'N/A'}",

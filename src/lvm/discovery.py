@@ -65,7 +65,7 @@ def discover(
     valid_extensions = set(extensions) if extensions else MEDIA_EXTENSIONS
     results = []
 
-    _walk_for_versions(root, root, 0, max_depth, valid_extensions, results)
+    _walk_for_versions(root, root, 0, max_depth, valid_extensions, results, visited={root})
 
     # Apply whitelist/blacklist filtering
     if whitelist or blacklist:
@@ -146,8 +146,11 @@ def _walk_for_versions(
     max_depth: int,
     extensions: set,
     results: list,
+    visited: set = None,
 ):
     """Recursively walk directories looking for versioned content."""
+    if visited is None:
+        visited = set()
     if depth > max_depth:
         return
 
@@ -436,9 +439,17 @@ def _walk_for_versions(
                 suggested_date_format=guessed_fmt,
             ))
 
-    # Recurse into non-versioned subdirectories
+    # Recurse into non-versioned subdirectories (with symlink loop protection)
     for subdir in subdirs:
-        _walk_for_versions(subdir, root, depth + 1, max_depth, extensions, results)
+        try:
+            real_path = subdir.resolve()
+        except OSError:
+            continue
+        if real_path in visited:
+            logger.debug(f"Skipping already-visited path (symlink loop?): {subdir}")
+            continue
+        visited.add(real_path)
+        _walk_for_versions(subdir, root, depth + 1, max_depth, extensions, results, visited)
 
 
 def _populate_date_on_vi(vi: VersionInfo, name: str):
