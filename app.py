@@ -1816,6 +1816,12 @@ class DiscoveryDialog(QDialog):
                 result = self._results[idx]
                 result_path = result.path
 
+                menu.addAction(
+                    _REVEAL_LABEL,
+                    lambda p=result_path: reveal_in_file_browser(p),
+                )
+                menu.addSeparator()
+
                 if result_path in self._ignored_paths:
                     menu.addAction("Unignore this source",
                         lambda p=result_path: self._unignore_source(p))
@@ -1836,6 +1842,12 @@ class DiscoveryDialog(QDialog):
                 if vi_idx is not None and vi_idx < len(result.versions_found):
                     version = result.versions_found[vi_idx]
                     key = (result.path, version.version_number)
+
+                    menu.addAction(
+                        _REVEAL_LABEL,
+                        lambda p=version.source_path: reveal_in_file_browser(p),
+                    )
+                    menu.addSeparator()
 
                     if key in self._ignored_versions:
                         menu.addAction(f"Unignore {version.version_string}",
