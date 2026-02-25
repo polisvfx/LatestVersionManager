@@ -135,6 +135,10 @@ class PromoteWorker(QThread):
         self.promoter = promoter
         self.version = version
 
+    def cancel(self):
+        """Request cancellation of the running promotion."""
+        self.promoter.cancel()
+
     def run(self):
         try:
             entry = self.promoter.promote(
@@ -883,7 +887,7 @@ class ProjectSettingsDialog(QDialog):
                 rename_resolved = _expand_group_token(rename_resolved, source.group)
                 sample_file = f"{rename_resolved}.####.exr"
                 group_tag = f" [{source.group}]" if source.group else ""
-                previews.append(f"{source.name}{group_tag}: {dir_str}\\{sample_file}")
+                previews.append(f"{source.name}{group_tag}: {str(Path(dir_str) / sample_file)}")
             if not self._selected_source and len(config.watched_sources) > 3:
                 previews.append(f"... and {len(config.watched_sources) - 3} more")
         else:
@@ -907,7 +911,7 @@ class ProjectSettingsDialog(QDialog):
             rename_resolved = rename_resolved.replace("{source_fullname}", "<source_fullname>")
             rename_resolved = rename_resolved.replace("{group}", "<group>")
             sample_file = f"{rename_resolved}.####.exr"
-            previews.append(f"{dir_str}\\{sample_file}")
+            previews.append(str(Path(dir_str) / sample_file))
 
         self.path_preview_label.setText("\n".join(previews))
         self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
@@ -1133,7 +1137,7 @@ class LatestPathDialog(QDialog):
                 rename_resolved = _expand_group_token(rename_resolved, source.group)
                 sample_file = f"{rename_resolved}.####.exr"
                 group_tag = f" [{source.group}]" if source.group else ""
-                previews.append(f"{source.name}{group_tag}: {dir_str}\\{sample_file}")
+                previews.append(f"{source.name}{group_tag}: {str(Path(dir_str) / sample_file)}")
             if len(config.watched_sources) > 4:
                 previews.append(f"... and {len(config.watched_sources) - 4} more")
         else:
@@ -1157,7 +1161,7 @@ class LatestPathDialog(QDialog):
             rename_resolved = rename_resolved.replace("{source_fullname}", "<source_fullname>")
             rename_resolved = rename_resolved.replace("{group}", "<group>")
             sample_file = f"{rename_resolved}.####.exr"
-            previews.append(f"{dir_str}\\{sample_file}")
+            previews.append(str(Path(dir_str) / sample_file))
 
         self.preview_label.setText("\n".join(previews))
         self.preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
@@ -1326,6 +1330,7 @@ class DiscoveryDialog(QDialog):
         self._worker = None
         self._config = config
         self._results = []  # store DiscoveryResults for add-to-project
+        self._timecodes_populated = False
         self._ignored_paths: set[str] = set()          # ignored source directory paths
         self._ignored_versions: set[tuple[str, int]] = set()  # (path, version_number)
 
@@ -1493,10 +1498,18 @@ class DiscoveryDialog(QDialog):
         self._worker = None
         self.scan_btn.setEnabled(True)
         self._results = results
+        self._timecodes_populated = False
 
         if not results:
             self.status_label.setText("No versioned content found.")
             return
+
+        # Populate timecodes once on new results rather than on every tree rebuild
+        tc_mode = self._config.timecode_mode if self._config else "lazy"
+        if tc_mode != "never":
+            for result in self._results:
+                populate_timecodes(result.versions_found)
+            self._timecodes_populated = True
 
         self._rebuild_tree()
 
@@ -1506,12 +1519,6 @@ class DiscoveryDialog(QDialog):
 
         if not self._results:
             return
-
-        # Load timecodes based on project setting (default to lazy if no config)
-        tc_mode = self._config.timecode_mode if self._config else "lazy"
-        if tc_mode != "never":
-            for result in self._results:
-                populate_timecodes(result.versions_found)
 
         root_dir = self.dir_combo.currentText().strip()
         root = Path(root_dir).resolve() if root_dir else None
@@ -1927,6 +1934,10 @@ class ManageGroupsDialog(QDialog):
         self.btn_root.clicked.connect(self._set_root_dir)
         btn_row.addWidget(self.btn_root)
 
+        self.btn_clear_root = QPushButton("Clear Root")
+        self.btn_clear_root.clicked.connect(self._clear_root_dir)
+        btn_row.addWidget(self.btn_clear_root)
+
         self.btn_delete = QPushButton("Delete")
         self.btn_delete.clicked.connect(self._delete_group)
         btn_row.addWidget(self.btn_delete)
@@ -1946,7 +1957,17 @@ class ManageGroupsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self.group_list.currentItemChanged.connect(self._on_group_selected)
         self._rebuild_list()
+
+    def _on_group_selected(self):
+        item = self.group_list.currentItem()
+        if item:
+            name = item.data(Qt.UserRole)
+            has_root = bool(self._groups[name].get("root_dir", ""))
+            self.btn_clear_root.setEnabled(has_root)
+        else:
+            self.btn_clear_root.setEnabled(False)
 
     def _next_color(self) -> str:
         used = {v.get("color", "") for v in self._groups.values()}
@@ -1968,6 +1989,7 @@ class ManageGroupsDialog(QDialog):
             if root:
                 item.setToolTip(f"Root directory: {root}")
             self.group_list.addItem(item)
+        self._on_group_selected()
 
     def _add_group(self):
         name, ok = QInputDialog.getText(self, "New Group", "Group name:")
@@ -2021,10 +2043,14 @@ class ManageGroupsDialog(QDialog):
         )
         if path:
             self._groups[name]["root_dir"] = path
-        elif path == "":
-            # User may want to clear — only if they had one set and hit cancel
-            # Do nothing on cancel; offer explicit clear via empty selection
-            pass
+        self._rebuild_list()
+
+    def _clear_root_dir(self):
+        item = self.group_list.currentItem()
+        if not item:
+            return
+        name = item.data(Qt.UserRole)
+        self._groups[name]["root_dir"] = ""
         self._rebuild_list()
 
     def _delete_group(self):
@@ -2588,9 +2614,17 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(True)
+        self.btn_cancel_promote = QPushButton("Cancel")
+        self.btn_cancel_promote.setVisible(False)
+        self.btn_cancel_promote.setFixedWidth(70)
+        self.btn_cancel_promote.clicked.connect(self._cancel_promotion)
+
+        progress_row = QHBoxLayout()
+        progress_row.addWidget(self.progress_bar)
+        progress_row.addWidget(self.btn_cancel_promote)
 
         ver_layout.addLayout(promote_row)
-        ver_layout.addWidget(self.progress_bar)
+        ver_layout.addLayout(progress_row)
 
         self.ver_hist_splitter.addWidget(ver_group)
 
@@ -2863,25 +2897,51 @@ class MainWindow(QMainWindow):
     def _add_source(self):
         if not self.config:
             return
-        dlg = SourceDialog(project_config=self.config, parent=self)
-        if dlg.exec() == QDialog.Accepted:
-            source = dlg.get_source()
-            self.config.watched_sources.append(source)
-            if self.config_path:
-                self._save_project()
-            self._reload_ui()
-            self.statusBar().showMessage(f"Added source: {source.name}")
+        draft = None
+        while True:
+            dlg = SourceDialog(source=draft, project_config=self.config, parent=self)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            draft = dlg.get_source()
+            existing_names = [s.name for s in self.config.watched_sources]
+            if draft.name in existing_names:
+                QMessageBox.warning(
+                    self, "Duplicate Name",
+                    f"A source named '{draft.name}' already exists.\n"
+                    f"Please choose a different name.",
+                )
+                continue
+            break
+        self.config.watched_sources.append(draft)
+        if self.config_path:
+            self._save_project()
+        self._reload_ui()
+        self.statusBar().showMessage(f"Added source: {draft.name}")
 
     def _edit_source(self, index: int):
         if not self.config or index < 0 or index >= len(self.config.watched_sources):
             return
-        source = self.config.watched_sources[index]
-        dlg = SourceDialog(source=source, project_config=self.config, parent=self)
-        if dlg.exec() == QDialog.Accepted:
-            self.config.watched_sources[index] = dlg.get_source()
-            if self.config_path:
-                self._save_project()
-            self._reload_ui()
+        draft = self.config.watched_sources[index]
+        while True:
+            dlg = SourceDialog(source=draft, project_config=self.config, parent=self)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            draft = dlg.get_source()
+            existing_names = [
+                s.name for i, s in enumerate(self.config.watched_sources) if i != index
+            ]
+            if draft.name in existing_names:
+                QMessageBox.warning(
+                    self, "Duplicate Name",
+                    f"A source named '{draft.name}' already exists.\n"
+                    f"Please choose a different name.",
+                )
+                continue
+            break
+        self.config.watched_sources[index] = draft
+        if self.config_path:
+            self._save_project()
+        self._reload_ui()
 
     def _remove_source(self, index: int):
         self._remove_sources([index])
@@ -3024,6 +3084,15 @@ class MainWindow(QMainWindow):
         lines = [
             f"Source: {source.name}",
             f"Version: {version.version_string}",
+        ]
+        if getattr(version, "date_string", None):
+            date_fmt = getattr(source, "date_format", "")
+            if date_fmt:
+                from src.lvm.task_tokens import format_date_display
+                lines.append(f"Date: {format_date_display(version.date_string, date_fmt)}")
+            else:
+                lines.append(f"Date: {version.date_string}")
+        lines += [
             f"Files: {version.file_count}",
             f"Size: {version.total_size_human}",
             f"Frame Range: {version.frame_range or 'N/A'}",
@@ -4109,6 +4178,9 @@ class MainWindow(QMainWindow):
         self.btn_revert.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
+        self.btn_cancel_promote.setVisible(True)
+        self.btn_cancel_promote.setEnabled(True)
+        self.btn_cancel_promote.setText("Cancel")
 
         self._worker = PromoteWorker(promoter, version, self)
         self._worker.progress.connect(self._on_promote_progress)
@@ -4121,9 +4193,18 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(current)
         self.progress_bar.setFormat(f"{current}/{total} \u2014 {filename}")
 
+    def _cancel_promotion(self):
+        """Request cancellation of the running promotion."""
+        if self._worker:
+            self._worker.cancel()
+            self.btn_cancel_promote.setEnabled(False)
+            self.btn_cancel_promote.setText("Cancelling...")
+            self.statusBar().showMessage("Cancelling promotion...")
+
     def _on_promote_finished(self, entry):
         self._worker = None
         self.progress_bar.setVisible(False)
+        self.btn_cancel_promote.setVisible(False)
 
         # Check if this is part of a batch promotion
         if hasattr(self, '_batch_promote_list') and self._batch_promote_list:
@@ -4149,6 +4230,7 @@ class MainWindow(QMainWindow):
     def _on_promote_error(self, error_msg):
         self._worker = None
         self.progress_bar.setVisible(False)
+        self.btn_cancel_promote.setVisible(False)
         self.btn_promote.setEnabled(True)
 
         # If batch promotion, ask whether to continue

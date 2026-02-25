@@ -10,6 +10,7 @@ import re
 import shutil
 import logging
 import platform
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Callable
@@ -42,11 +43,22 @@ class Promoter:
     def __init__(self, watched_source: WatchedSource, task_tokens: list = None):
         self.source = watched_source
         self.task_tokens = task_tokens or []
+
+        if not watched_source.latest_target:
+            raise PromotionError(
+                f"Source '{watched_source.name}' has no latest target path configured."
+            )
+
         self.history = HistoryManager(
             os.path.join(watched_source.latest_target, watched_source.history_filename)
         )
         # Cache derived tokens for file renaming
         self._rename_tokens = None
+        self._cancelled = threading.Event()
+
+    def cancel(self):
+        """Signal that the current promotion should be aborted at the next checkpoint."""
+        self._cancelled.set()
 
     def promote(
         self,
@@ -67,8 +79,9 @@ class Promoter:
             The HistoryEntry that was recorded.
 
         Raises:
-            PromotionError: If the promotion fails.
+            PromotionError: If the promotion fails or is cancelled.
         """
+        self._cancelled.clear()
         if user is None:
             try:
                 user = os.getlogin()
@@ -162,6 +175,8 @@ class Promoter:
         else:
             # Sequential for symlink/hardlink (fast already) or small sets
             for i, src_file in enumerate(source_files):
+                if self._cancelled.is_set():
+                    raise PromotionError("Promotion cancelled by user.")
                 target_name = self._remap_filename(src_file.name)
                 target_file = target_dir / target_name
                 self._link_or_copy(src_file, target_file)
@@ -179,6 +194,8 @@ class Promoter:
         completed = [0]  # mutable counter for closure
 
         def _copy_one(src_file: Path):
+            if self._cancelled.is_set():
+                return
             target_name = self._remap_filename(src_file.name)
             target_file = target_dir / target_name
             if target_file.exists() or target_file.is_symlink():
@@ -193,6 +210,9 @@ class Promoter:
             # Wait for all to complete, propagate exceptions
             for future in futures:
                 future.result()
+
+        if self._cancelled.is_set():
+            raise PromotionError("Promotion cancelled by user.")
 
     def _promote_single_file(
         self,
@@ -276,14 +296,22 @@ class Promoter:
 
     def _clear_target(self, target_dir: Path, valid_extensions: set):
         """Remove existing media files from the target directory (not the history file)."""
-        for f in target_dir.iterdir():
+        try:
+            entries = list(target_dir.iterdir())
+        except OSError as e:
+            raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
+
+        for f in entries:
             if f.is_file() and f.suffix.lower() in valid_extensions:
                 try:
                     f.unlink()
                 except PermissionError:
                     raise PromotionError(f"Cannot delete {f} - file may be in use")
             elif f.is_symlink():
-                f.unlink()
+                try:
+                    f.unlink()
+                except OSError as e:
+                    logger.warning(f"Could not remove symlink {f}: {e}")
 
     def _link_or_copy(self, source: Path, target: Path):
         """Route to the correct file operation based on link_mode."""

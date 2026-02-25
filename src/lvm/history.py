@@ -27,22 +27,42 @@ class HistoryManager:
                           e.g. /online/hero_comp_latest/.latest_history.json
         """
         self.path = Path(history_path)
+        self._cache: Optional[dict] = None
+        self._cache_mtime: Optional[float] = None
 
     def load(self) -> dict:
         """
         Load the history file. Returns a dict with 'current' and 'history' keys.
         Returns empty structure if file doesn't exist.
+
+        Results are cached by file mtime to avoid redundant disk reads when
+        get_current() and get_history() are called in quick succession.
         """
         if not self.path.exists():
+            self._cache = None
+            self._cache_mtime = None
             return {"current": None, "history": []}
+
+        try:
+            current_mtime = self.path.stat().st_mtime
+        except OSError:
+            current_mtime = None
+
+        if (self._cache is not None
+                and current_mtime is not None
+                and current_mtime == self._cache_mtime):
+            return self._cache
 
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return {
+            result = {
                 "current": HistoryEntry.from_dict(data["current"]) if data.get("current") else None,
                 "history": [HistoryEntry.from_dict(h) for h in data.get("history", [])],
             }
+            self._cache = result
+            self._cache_mtime = current_mtime
+            return result
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.error(f"Failed to parse history file {self.path}: {e}")
             # Back up the corrupt file and start fresh
@@ -50,6 +70,8 @@ class HistoryManager:
             if self.path.exists():
                 self.path.rename(backup)
                 logger.info(f"Backed up corrupt history to {backup}")
+            self._cache = None
+            self._cache_mtime = None
             return {"current": None, "history": []}
 
     def save(self, current: HistoryEntry, history: list[HistoryEntry]):
@@ -74,8 +96,21 @@ class HistoryManager:
             # Atomic rename (works on both platforms for same-directory moves)
             tmp_path.replace(self.path)
             logger.info(f"History saved: {current.version} -> {self.path}")
+
+            # Update cache to avoid re-reading the file we just wrote
+            try:
+                new_mtime = self.path.stat().st_mtime
+            except OSError:
+                new_mtime = None
+            self._cache = {
+                "current": current,
+                "history": trimmed,
+            }
+            self._cache_mtime = new_mtime
         except OSError as e:
             logger.error(f"Failed to save history file: {e}")
+            self._cache = None
+            self._cache_mtime = None
             if tmp_path.exists():
                 tmp_path.unlink()
             raise

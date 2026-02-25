@@ -78,6 +78,14 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # ── Run tests ─────────────────────────────────────────────────────────
+      # Only portable test suites are run in CI. test_kia_source.py requires
+      # local VFX media data and is intended for developer machines only.
+      - name: Run tests
+        run: |
+          python -m unittest tests.test_date_versions -v
+          python -m unittest tests.test_timecode -v
+
       # ── Inject release version into package ─────────────────────────────
       # When triggered by a published release (tag e.g. v1.2.3), patch
       # __init__.py so PyInstaller and the running app both report that version.
