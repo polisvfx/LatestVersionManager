@@ -2578,6 +2578,7 @@ class MainWindow(QMainWindow):
         self._manual_versions: dict[str, list[VersionInfo]] = {}
         self._current_source: WatchedSource = None
         self._worker: PromoteWorker = None
+        self._promoting_source_name: str = None
         self._batch_promote_list: list = []
         self._batch_promote_index: int = 0
 
@@ -2633,6 +2634,14 @@ class MainWindow(QMainWindow):
         self.watch_toggle.clicked.connect(self._toggle_watcher)
         self.watch_toggle.setEnabled(False)
         toolbar.addWidget(self.watch_toggle)
+
+        self.auto_promote_cb = QCheckBox("Auto-Promote")
+        self.auto_promote_cb.setToolTip(
+            "Automatically promote new versions when detected,\n"
+            "only if frame range matches the last promoted version."
+        )
+        self.auto_promote_cb.setEnabled(False)
+        toolbar.addWidget(self.auto_promote_cb)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -4310,6 +4319,7 @@ class MainWindow(QMainWindow):
 
     def _start_promotion(self, promoter: Promoter, version: VersionInfo):
         """Start the promotion in a background thread, checking link mode availability first."""
+        self._promoting_source_name = promoter.source.name
         mode = promoter.source.link_mode
         available, reason = check_link_mode_available(mode)
         if not available and mode == "symlink":
@@ -4370,22 +4380,27 @@ class MainWindow(QMainWindow):
             self._batch_promote_next()
             return
 
-        promoted_name = self._current_source.name
+        promoted_name = self._promoting_source_name or (
+            self._current_source.name if self._current_source else "unknown"
+        )
+        self._promoting_source_name = None
         self.statusBar().showMessage(
             f"Promoted {promoted_name} \u2192 {entry.version}"
         )
-        # Refresh the current source view
+        # Invalidate cache for the promoted source
         self._versions_cache.pop(promoted_name, None)
-        self._reload_ui()
-        # Reselect the promoted source
-        for i in range(self.source_list.count()):
-            item = self.source_list.item(i)
-            if item.data(Qt.UserRole) == promoted_name:
-                self.source_list.setCurrentRow(i)
-                break
+        # Only reload UI and reselect if the promoted source is currently viewed
+        if self._current_source and self._current_source.name == promoted_name:
+            self._reload_ui()
+            for i in range(self.source_list.count()):
+                item = self.source_list.item(i)
+                if item.data(Qt.UserRole) == promoted_name:
+                    self.source_list.setCurrentRow(i)
+                    break
 
     def _on_promote_error(self, error_msg):
         self._worker = None
+        self._promoting_source_name = None
         self.progress_bar.setVisible(False)
         self.btn_cancel_promote.setVisible(False)
         self.btn_promote.setEnabled(True)
@@ -4415,11 +4430,13 @@ class MainWindow(QMainWindow):
             self.watcher.stop()
             self.watch_toggle.setText("Start Watching")
             self.watch_toggle.setChecked(False)
+            self.auto_promote_cb.setEnabled(False)
         else:
             if self.config:
                 self.watcher.start(self.config.watched_sources)
                 self.watch_toggle.setText("Stop Watching")
                 self.watch_toggle.setChecked(True)
+                self.auto_promote_cb.setEnabled(True)
 
     def _on_watcher_change(self, source_name: str):
         """A watched source had new files — invalidate cache and refresh."""
@@ -4435,8 +4452,102 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"New version detected in: {source_name}")
 
+        # Attempt auto-promotion if enabled
+        self._try_auto_promote(source_name)
+
     def _on_watch_status(self, status: str):
         self.statusBar().showMessage(status)
+
+    @staticmethod
+    def _normalize_frame_range(frame_range):
+        """Extract core frame range, stripping gap annotations.
+
+        '1001-1120 (95/120 frames, gaps detected)' -> '1001-1120'
+        '1001-1120' -> '1001-1120'
+        None -> None
+        """
+        if frame_range is None:
+            return None
+        return frame_range.split(" ")[0].split("(")[0].strip()
+
+    def _try_auto_promote(self, source_name: str):
+        """Attempt auto-promotion for a source after watcher detected changes.
+
+        Auto-promotes only when:
+        - The Auto-Promote checkbox is checked
+        - No promotion is already in progress
+        - The source has a previous promotion (history entry)
+        - A newer highest version exists
+        - The new version's frame range matches the last promoted version
+        """
+        if not self.auto_promote_cb.isChecked():
+            return
+
+        if self._worker is not None:
+            logger.info(f"Auto-promote skipped for {source_name}: promotion already in progress")
+            self.statusBar().showMessage(
+                f"Auto-promote skipped for {source_name}: promotion already in progress"
+            )
+            return
+
+        # Find promoter (only exists for sources with a latest_target)
+        promoter = self._promoters.get(source_name)
+        if not promoter:
+            return
+
+        # Re-scan to pick up the new version
+        scanner = self._scanners.get(source_name)
+        if not scanner:
+            return
+
+        versions = scanner.scan()
+        self._versions_cache[source_name] = versions
+        if not versions:
+            return
+
+        highest = versions[-1]
+
+        # Check last promoted version
+        current_entry = promoter.get_current_version()
+        if not current_entry:
+            logger.info(f"Auto-promote skipped for {source_name}: no previous promotion (promote manually first)")
+            self.statusBar().showMessage(
+                f"Auto-promote skipped for {source_name}: no previous promotion exists"
+            )
+            return
+
+        if current_entry.version == highest.version_string:
+            return  # Already on highest
+
+        # Compare frame ranges (normalized to strip gap annotations)
+        prev_range = self._normalize_frame_range(current_entry.frame_range)
+        new_range = self._normalize_frame_range(highest.frame_range)
+
+        if prev_range != new_range:
+            msg = (
+                f"Auto-promote skipped for {source_name}: "
+                f"frame range changed ({prev_range} \u2192 {new_range})"
+            )
+            logger.info(msg)
+            self.statusBar().showMessage(msg)
+            return
+
+        # Pre-check link mode (avoid modal dialogs in auto-promote path)
+        mode = promoter.source.link_mode
+        available, reason = check_link_mode_available(mode)
+        if not available:
+            logger.warning(f"Auto-promote skipped for {source_name}: {reason}")
+            self.statusBar().showMessage(
+                f"Auto-promote skipped for {source_name}: {reason}"
+            )
+            return
+
+        # All checks passed — auto-promote
+        logger.info(f"Auto-promoting {source_name}: {highest.version_string}")
+        self.statusBar().showMessage(
+            f"Auto-promoting {source_name} to {highest.version_string}..."
+        )
+        self._start_promotion(promoter, highest)
 
     # --- State persistence ---
 
