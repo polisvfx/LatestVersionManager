@@ -183,6 +183,5 @@ cython_debug/
 
 # Claude
 .claude/
-tests/
 CLAUDE.md
-nul
+tests/
