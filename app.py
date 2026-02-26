@@ -2423,7 +2423,7 @@ class UpdateDialog(QDialog):
         self._downloaded_zip = zip_path
         self._progress_bar.setVisible(False)
         self._status_label.setText(
-            "Update downloaded. Click <b>Install && Restart</b> to apply.\n\n"
+            "Update downloaded. Click <b>Install &amp; Restart</b> to apply.\n\n"
             "The application will close, update, and relaunch automatically."
         )
         self._size_label.setVisible(False)
