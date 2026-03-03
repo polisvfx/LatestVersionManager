@@ -922,9 +922,6 @@ class CollapsibleSection(QWidget):
         self._collapsed = not checked
         self._toggle_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
         self._content.setVisible(checked)
-        # Trigger parent dialog to resize
-        if self.window():
-            self.window().adjustSize()
 
 
 # ---------------------------------------------------------------------------
