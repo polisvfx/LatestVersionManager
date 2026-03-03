@@ -924,9 +924,6 @@ class CollapsibleSection(QWidget):
         self._collapsed = not checked
         self._toggle_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
         self._content.setVisible(checked)
-        # Trigger parent dialog to resize
-        if self.window():
-            self.window().adjustSize()
 
 
 # ---------------------------------------------------------------------------
@@ -936,11 +933,17 @@ class CollapsibleSection(QWidget):
 class ProjectSettingsDialog(QDialog):
     """Dialog for editing project-wide settings."""
 
+    _last_geometry = None  # remember size/position within session
+
     def __init__(self, config: ProjectConfig, selected_source: WatchedSource = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Project Settings")
         self.setMinimumWidth(620)
         self.setMinimumHeight(400)
+        if ProjectSettingsDialog._last_geometry:
+            self.restoreGeometry(ProjectSettingsDialog._last_geometry)
+        else:
+            self.resize(700, 600)
         self._config = config
         self._selected_source = selected_source
         self._naming_reset = False
@@ -1349,6 +1352,10 @@ class ProjectSettingsDialog(QDialog):
 
         # Re-apply defaults to non-overridden sources
         apply_project_defaults(config)
+
+    def done(self, result):
+        ProjectSettingsDialog._last_geometry = self.saveGeometry()
+        super().done(result)
 
     def _save_as_template(self):
         """Save the current config as a reusable template (Feature #17)."""
