@@ -2977,9 +2977,24 @@ class MainWindow(QMainWindow):
         header.resizeSection(4, 160)
         header.resizeSection(5, 110)
 
-        # Thumbnail/Preview panel (Feature #7)
-        ver_content_splitter = QSplitter(Qt.Horizontal)
-        ver_content_splitter.addWidget(self.version_tree)
+        # Thumbnail/Preview panel (Feature #7) — collapsible, collapsed by default
+        self._ver_content_splitter = QSplitter(Qt.Horizontal)
+        self._ver_content_splitter.addWidget(self.version_tree)
+
+        # Preview panel container with toggle button
+        preview_frame = QWidget()
+        preview_layout = QVBoxLayout(preview_frame)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._preview_toggle = QPushButton("\u25b6 Preview")
+        self._preview_toggle.setCheckable(True)
+        self._preview_toggle.setChecked(False)
+        self._preview_toggle.setFixedHeight(24)
+        self._preview_toggle.setStyleSheet(
+            "QPushButton { text-align: left; border: none; padding-left: 4px; }"
+            " QPushButton:checked { font-weight: bold; }"
+        )
+        self._preview_toggle.toggled.connect(self._toggle_preview_panel)
 
         self.thumbnail_label = QLabel()
         self.thumbnail_label.setAlignment(Qt.AlignCenter)
@@ -2987,12 +3002,19 @@ class MainWindow(QMainWindow):
         self.thumbnail_label.setMaximumWidth(320)
         self.thumbnail_label.setStyleSheet("QLabel { background-color: #1e1e1e; border: 1px solid #444; border-radius: 4px; padding: 4px; }")
         self.thumbnail_label.setText("No Preview")
-        ver_content_splitter.addWidget(self.thumbnail_label)
-        ver_content_splitter.setSizes([600, 200])
+        self.thumbnail_label.setVisible(False)  # Hidden by default
 
-        ver_layout.addWidget(ver_content_splitter)
+        preview_layout.addWidget(self._preview_toggle)
+        preview_layout.addWidget(self.thumbnail_label, 1)
 
-        # Connect version selection for thumbnail
+        self._ver_content_splitter.addWidget(preview_frame)
+        self._ver_content_splitter.setCollapsible(0, False)  # Version tree not collapsible
+        self._ver_content_splitter.setCollapsible(1, True)   # Preview panel collapsible
+        self._ver_content_splitter.setSizes([600, 24])       # Only toggle button width
+
+        ver_layout.addWidget(self._ver_content_splitter)
+
+        # Connect version selection for thumbnail (lazy — only loads when visible)
         self.version_tree.currentItemChanged.connect(self._on_version_selected_thumbnail)
 
         # Promote controls
@@ -4937,7 +4959,27 @@ class MainWindow(QMainWindow):
 
     # --- Thumbnail/Preview helpers (Feature #7) ---
 
+    def _toggle_preview_panel(self, checked):
+        """Show/hide the preview panel. Triggers thumbnail load if becoming visible."""
+        self.thumbnail_label.setVisible(checked)
+        self._preview_toggle.setText("\u25bc Preview" if checked else "\u25b6 Preview")
+        if checked:
+            # Expand the splitter to show the preview
+            sizes = self._ver_content_splitter.sizes()
+            if sizes[1] < 160:
+                self._ver_content_splitter.setSizes([600, 200])
+            # Trigger thumbnail load for currently selected version
+            current = self.version_tree.currentItem()
+            if current:
+                self._on_version_selected_thumbnail(current, None)
+        else:
+            self._ver_content_splitter.setSizes([600, 24])
+
     def _on_version_selected_thumbnail(self, current, previous):
+        # Only load thumbnails when preview panel is visible
+        if not self.thumbnail_label.isVisible():
+            return
+
         if not current:
             self.thumbnail_label.setPixmap(QPixmap())
             self.thumbnail_label.setText("No Preview")

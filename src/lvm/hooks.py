@@ -8,11 +8,24 @@ Environment variables are passed to give hooks context about the operation.
 import logging
 import os
 import subprocess
+import sys
 from typing import Optional
 
 from .models import WatchedSource, VersionInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _subprocess_kwargs() -> dict:
+    """Return platform-specific kwargs to suppress console windows on Windows."""
+    kwargs = {}
+    if sys.platform == "win32":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = si
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
 
 
 class HookError(Exception):
@@ -73,6 +86,7 @@ def run_hook(
             capture_output=True,
             text=True,
             timeout=timeout,
+            **_subprocess_kwargs(),
         )
         if result.stdout:
             logger.info(f"{label} stdout: {result.stdout.rstrip()}")

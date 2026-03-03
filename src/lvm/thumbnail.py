@@ -10,10 +10,24 @@ import hashlib
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _subprocess_kwargs() -> dict:
+    """Return platform-specific kwargs to suppress console windows on Windows."""
+    kwargs = {}
+    if sys.platform == "win32":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = si
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
+
 
 _oiiotool_path: Optional[str] = None
 _oiiotool_checked: bool = False
@@ -66,7 +80,7 @@ def _generate_with_oiiotool(oiiotool: str, input_file: Path, output: Path) -> bo
             "--colorconvert", "scene_linear", "sRGB",
             "-o", str(output),
         ]
-        result = subprocess.run(cmd, capture_output=True, timeout=15)
+        result = subprocess.run(cmd, capture_output=True, timeout=15, **_subprocess_kwargs())
         if result.returncode == 0 and output.exists():
             return True
         # Retry without color conversion (may not have OCIO config)
@@ -76,7 +90,7 @@ def _generate_with_oiiotool(oiiotool: str, input_file: Path, output: Path) -> bo
             "--resize", "320x0",
             "-o", str(output),
         ]
-        result = subprocess.run(cmd, capture_output=True, timeout=15)
+        result = subprocess.run(cmd, capture_output=True, timeout=15, **_subprocess_kwargs())
         return result.returncode == 0 and output.exists()
     except (subprocess.TimeoutExpired, OSError) as e:
         logger.debug(f"oiiotool thumbnail failed: {e}")
@@ -103,7 +117,7 @@ def _generate_with_ffmpeg(ffmpeg: str, input_file: Path, output: Path, is_contai
                 "-frames:v", "1",
                 str(output),
             ]
-        result = subprocess.run(cmd, capture_output=True, timeout=15)
+        result = subprocess.run(cmd, capture_output=True, timeout=15, **_subprocess_kwargs())
         return result.returncode == 0 and output.exists()
     except (subprocess.TimeoutExpired, OSError) as e:
         logger.debug(f"ffmpeg thumbnail failed: {e}")
