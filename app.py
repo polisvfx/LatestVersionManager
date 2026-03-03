@@ -575,12 +575,14 @@ class ProjectSetupDialog(QDialog):
         layout.addRow("Project Name:", self.name_edit)
 
         # Template dropdown (Feature #17)
-        from src.lvm.templates import list_templates
-        templates = list_templates()
         self.template_combo = QComboBox()
         self.template_combo.addItem("(none)", "")
-        for t in templates:
-            self.template_combo.addItem(f"{t['name']} [{t['location']}]", t["path"])
+        try:
+            from src.lvm.templates import list_templates
+            for t in list_templates():
+                self.template_combo.addItem(f"{t['name']} [{t['location']}]", t["path"])
+        except Exception:
+            logger.warning("Could not load templates", exc_info=True)
         layout.addRow("From Template:", self.template_combo)
 
         # Project Root — the logical root of the project
@@ -3452,7 +3454,11 @@ class MainWindow(QMainWindow):
     # --- Project management ---
 
     def _new_project(self):
-        dlg = ProjectSetupDialog(parent=self)
+        try:
+            dlg = ProjectSetupDialog(parent=self)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open New Project dialog:\n{e}")
+            return
         if dlg.exec() != QDialog.Accepted:
             return
 
@@ -3477,8 +3483,9 @@ class MainWindow(QMainWindow):
             # Apply template if selected (Feature #17)
             template_path = info.get("template_path", "")
             if template_path and self.config:
-                from src.lvm.templates import load_template
-                load_template(self.config, template_path)
+                from src.lvm.templates import load_template, apply_template
+                template_data = load_template(template_path)
+                apply_template(self.config, template_data)
                 if self.config_path:
                     self._save_project()
                 self._reload_ui()
