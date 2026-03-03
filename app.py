@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QDialogButtonBox, QHeaderView, QMenu,
     QToolBar, QSizePolicy, QFrame, QAbstractItemView,
     QColorDialog, QInputDialog, QStyledItemDelegate, QStyle,
-    QTextEdit, QDockWidget, QPlainTextEdit,
+    QTextEdit, QDockWidget, QPlainTextEdit, QScrollArea,
+    QToolButton,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData
 from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
@@ -867,6 +868,66 @@ class TagInputWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Collapsible Section Widget
+# ---------------------------------------------------------------------------
+
+class CollapsibleSection(QWidget):
+    """A collapsible section with a toggle header and animated content area."""
+
+    def __init__(self, title: str, parent=None, collapsed: bool = False):
+        super().__init__(parent)
+        self._collapsed = collapsed
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Header button
+        self._toggle_btn = QToolButton()
+        self._toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._toggle_btn.setText(title)
+        self._toggle_btn.setCheckable(True)
+        self._toggle_btn.setChecked(not collapsed)
+        self._toggle_btn.setArrowType(Qt.DownArrow if not collapsed else Qt.RightArrow)
+        self._toggle_btn.setStyleSheet(
+            "QToolButton { border: none; font-weight: bold; font-size: 12px;"
+            " padding: 6px 4px; color: #ddd; }"
+            "QToolButton:hover { color: #fff; background: #3a3a3a; }"
+        )
+        self._toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._toggle_btn.clicked.connect(self._on_toggle)
+
+        # Separator line under header
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setStyleSheet("color: #444;")
+
+        # Content area
+        self._content = QWidget()
+        self._content_layout = QFormLayout(self._content)
+        self._content_layout.setContentsMargins(8, 4, 4, 8)
+        self._content.setVisible(not collapsed)
+
+        main_layout.addWidget(self._toggle_btn)
+        main_layout.addWidget(separator)
+        main_layout.addWidget(self._content)
+
+    def content_layout(self) -> QFormLayout:
+        """Return the QFormLayout inside the collapsible content area."""
+        return self._content_layout
+
+    def _on_toggle(self, checked: bool = None):
+        if checked is None:
+            checked = self._toggle_btn.isChecked()
+        self._collapsed = not checked
+        self._toggle_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        self._content.setVisible(checked)
+        # Trigger parent dialog to resize
+        if self.window():
+            self.window().adjustSize()
+
+
+# ---------------------------------------------------------------------------
 # Project Settings Dialog
 # ---------------------------------------------------------------------------
 
@@ -876,16 +937,33 @@ class ProjectSettingsDialog(QDialog):
     def __init__(self, config: ProjectConfig, selected_source: WatchedSource = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Project Settings")
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(620)
+        self.setMinimumHeight(400)
         self._config = config
         self._selected_source = selected_source
+        self._naming_reset = False
 
-        layout = QFormLayout(self)
+        # Outer layout with scroll area
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll_widget = QWidget()
+        top_layout = QVBoxLayout(scroll_widget)
+        top_layout.setContentsMargins(12, 12, 12, 12)
+        top_layout.setSpacing(12)
+
+        # ==================================================================
+        # GENERAL (always visible, not collapsible)
+        # ==================================================================
+        general_form = QFormLayout()
+        general_form.setContentsMargins(0, 0, 0, 0)
 
         self.name_edit = QLineEdit(config.project_name)
-        layout.addRow("Project Name:", self.name_edit)
+        general_form.addRow("Project Name:", self.name_edit)
 
-        # Project Root
         self.root_edit = QLineEdit(config.effective_project_root)
         self.root_edit.textChanged.connect(self._update_path_preview)
         self.root_browse_btn = QPushButton("Browse...")
@@ -895,10 +973,17 @@ class ProjectSettingsDialog(QDialog):
         root_row.addWidget(self.root_browse_btn)
         root_help = QLabel("The root directory of the project (used for {project_root} token).")
         root_help.setStyleSheet("color: #999; font-size: 11px;")
-        layout.addRow("Project Root:", root_row)
-        layout.addRow("", root_help)
+        general_form.addRow("Project Root:", root_row)
+        general_form.addRow("", root_help)
 
-        # Latest path template
+        top_layout.addLayout(general_form)
+
+        # ==================================================================
+        # OUTPUT PATHS
+        # ==================================================================
+        paths_section = CollapsibleSection("Output Paths")
+        paths = paths_section.content_layout()
+
         template_help = QLabel(
             "Relative paths resolve from each source's directory.\n"
             "Tokens: {source_dir}, {source_name}, {source_basename},\n"
@@ -908,52 +993,105 @@ class ProjectSettingsDialog(QDialog):
             "Examples: {group_root}/online/{source_name}  |  latest/{group}/{source_basename}_latest"
         )
         template_help.setStyleSheet("color: #999; font-size: 11px;")
-        layout.addRow("", template_help)
+        paths.addRow("", template_help)
 
         self.latest_template_edit = QLineEdit(config.latest_path_template)
         self.latest_template_edit.setPlaceholderText("latest/{source_basename}_latest")
         self.latest_template_edit.textChanged.connect(self._update_path_preview)
-        layout.addRow("Latest Path Template:", self.latest_template_edit)
+        paths.addRow("Latest Path Template:", self.latest_template_edit)
 
-        # File rename template
         rename_help = QLabel(
             "Controls the output filename (without frame/ext).\n"
             "Tokens: {source_name}, {source_basename}, {source_fullname}, {group}"
         )
         rename_help.setStyleSheet("color: #999; font-size: 11px;")
-        layout.addRow("", rename_help)
+        paths.addRow("", rename_help)
 
         self.rename_template_edit = QLineEdit(config.default_file_rename_template)
         self.rename_template_edit.setPlaceholderText("{source_basename}_latest")
         self.rename_template_edit.textChanged.connect(self._update_path_preview)
-        layout.addRow("File Rename Template:", self.rename_template_edit)
+        paths.addRow("File Rename Template:", self.rename_template_edit)
 
-        # Combined preview (path + filename)
         self.path_preview_label = QLabel("")
         self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
         self.path_preview_label.setWordWrap(True)
-        layout.addRow("Resolved Preview:", self.path_preview_label)
+        paths.addRow("Resolved Preview:", self.path_preview_label)
 
-        # Default version pattern
+        top_layout.addWidget(paths_section)
+
+        # ==================================================================
+        # SOURCE NAMING & DETECTION
+        # ==================================================================
+        naming_section = CollapsibleSection("Source Naming && Detection")
+        naming = naming_section.content_layout()
+
+        # --- Naming rule (improved display) ---
+        naming_row = QHBoxLayout()
+        self.naming_label = QLabel()
+        self.naming_label.setWordWrap(True)
+        self._format_naming_label(config.default_naming_rule)
+        naming_row.addWidget(self.naming_label, 1)
+        self.reset_naming_btn = QPushButton("Reset")
+        self.reset_naming_btn.setToolTip("Reset naming convention so it is re-asked on next ingest")
+        self.reset_naming_btn.clicked.connect(self._reset_naming)
+        naming_row.addWidget(self.reset_naming_btn)
+        naming.addRow("Naming Rule:", naming_row)
+
+        # --- Task names ---
+        task_help = QLabel(
+            "Task names stripped from filenames to produce cleaner source names.\n"
+            "Each % matches one character (e.g. comp_%% matches comp_mp). Bounded by: _ - ."
+        )
+        task_help.setStyleSheet("color: #999; font-size: 11px;")
+        naming.addRow("", task_help)
+
+        self.tasks_edit = QLineEdit(", ".join(config.task_tokens))
+        self.tasks_edit.setPlaceholderText("comp, grade, dmp, fx, roto, paint")
+        self.tasks_edit.textChanged.connect(self._update_path_preview)
+        naming.addRow("Task Names:", self.tasks_edit)
+
+        # --- Version pattern ---
         self.pattern_edit = QLineEdit(config.default_version_pattern)
-        layout.addRow("Default Version Pattern:", self.pattern_edit)
+        naming.addRow("Version Pattern:", self.pattern_edit)
 
-        # Default date format
+        # --- Date format ---
         self.date_format_combo = QComboBox()
         self.date_format_combo.addItems(["(none)", "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"])
         if config.default_date_format:
             self.date_format_combo.setCurrentText(config.default_date_format)
-        layout.addRow("Default Date Format:", self.date_format_combo)
+        naming.addRow("Date Format:", self.date_format_combo)
 
-        # Default file extensions
+        # --- File extensions ---
         self.extensions_edit = QLineEdit(" ".join(config.default_file_extensions))
-        layout.addRow("Default File Extensions:", self.extensions_edit)
+        naming.addRow("File Extensions:", self.extensions_edit)
 
-        # Default link mode
+        top_layout.addWidget(naming_section)
+
+        # ==================================================================
+        # DISCOVERY FILTERS
+        # ==================================================================
+        filters_section = CollapsibleSection("Discovery Filters")
+        filters = filters_section.content_layout()
+
+        self.whitelist_edit = TagInputWidget(config.name_whitelist, placeholder="Type and press comma to add...")
+        filters.addRow("Whitelist:", self.whitelist_edit)
+
+        self.blacklist_edit = TagInputWidget(config.name_blacklist, placeholder="Type and press comma to add...")
+        filters.addRow("Blacklist:", self.blacklist_edit)
+
+        top_layout.addWidget(filters_section)
+
+        # ==================================================================
+        # ADVANCED (collapsed by default)
+        # ==================================================================
+        advanced_section = CollapsibleSection("Advanced", collapsed=True)
+        adv = advanced_section.content_layout()
+
+        # Link mode
         self.link_mode_combo = QComboBox()
         self.link_mode_combo.addItems(["copy", "hardlink", "symlink"])
         self.link_mode_combo.setCurrentText(config.default_link_mode)
-        layout.addRow("Default Link Mode:", self.link_mode_combo)
+        adv.addRow("Default Link Mode:", self.link_mode_combo)
 
         # Timecode mode
         self.timecode_combo = QComboBox()
@@ -961,101 +1099,66 @@ class ProjectSettingsDialog(QDialog):
         self.timecode_combo.setCurrentText(config.timecode_mode)
         tc_help = QLabel(
             "Always: read timecodes during scan (slower, all TCs visible immediately)\n"
-            "Lazy: read timecodes when a source is viewed (fast scan, TCs on demand)\n"
+            "Lazy: read on demand when a source is viewed (fast scan)\n"
             "Never: skip timecode extraction entirely (fastest)"
         )
         tc_help.setStyleSheet("color: #999; font-size: 11px;")
-        layout.addRow("", tc_help)
-        layout.addRow("Timecode Mode:", self.timecode_combo)
+        adv.addRow("Timecode Mode:", self.timecode_combo)
+        adv.addRow("", tc_help)
 
-        # Task tokens section
-        task_sep = QLabel("Task Names")
-        task_sep.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        layout.addRow("", task_sep)
-
-        task_help = QLabel(
-            "Task names are stripped from filenames to produce cleaner source names.\n"
-            "Each % matches exactly one character (e.g. comp_%% matches comp_mp).\n"
-            "Tokens are bounded by dividers: _ - ."
-        )
-        task_help.setStyleSheet("color: #999; font-size: 11px;")
-        layout.addRow("", task_help)
-
-        self.tasks_edit = QLineEdit(", ".join(config.task_tokens))
-        self.tasks_edit.setPlaceholderText("comp, grade, dmp, fx, roto, paint")
-        self.tasks_edit.textChanged.connect(self._update_path_preview)
-        layout.addRow("Task Names:", self.tasks_edit)
-
-        # Now that all fields affecting the preview exist, compute initial preview
-        self._update_path_preview()
-
-        # Naming rule display
-        naming_sep = QLabel("Source Naming")
-        naming_sep.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        layout.addRow("", naming_sep)
-
-        naming_row = QHBoxLayout()
-        rule_display = config.default_naming_rule or "(not yet configured — set on first ingest)"
-        self.naming_label = QLabel(rule_display)
-        self.naming_label.setStyleSheet("color: #ccc;")
-        naming_row.addWidget(self.naming_label, 1)
-        self.reset_naming_btn = QPushButton("Reset")
-        self.reset_naming_btn.setToolTip("Reset naming convention so it is re-asked on next ingest")
-        self.reset_naming_btn.clicked.connect(self._reset_naming)
-        naming_row.addWidget(self.reset_naming_btn)
-        layout.addRow("Naming Rule:", naming_row)
-
-        self._naming_reset = False
-
-        # Filters section
-        filter_sep = QLabel("Discovery Filters")
-        filter_sep.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        layout.addRow("", filter_sep)
-
-        self.whitelist_edit = TagInputWidget(config.name_whitelist, placeholder="Type and press comma to add...")
-        layout.addRow("Whitelist:", self.whitelist_edit)
-
-        self.blacklist_edit = TagInputWidget(config.name_blacklist, placeholder="Type and press comma to add...")
-        layout.addRow("Blacklist:", self.blacklist_edit)
-
-        # Hooks section (Feature #2)
-        hooks_sep = QLabel("Promotion Hooks")
-        hooks_sep.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        layout.addRow("", hooks_sep)
+        # Promotion hooks
+        hooks_header = QLabel("Promotion Hooks")
+        hooks_header.setStyleSheet("font-weight: bold; margin-top: 6px;")
+        adv.addRow("", hooks_header)
 
         hooks_help = QLabel(
             "Shell commands to run before/after each promotion.\n"
             "Leave empty to disable. Tokens: {source_name}, {version}, {target_dir}"
         )
         hooks_help.setStyleSheet("color: #999; font-size: 11px;")
-        layout.addRow("", hooks_help)
+        adv.addRow("", hooks_help)
 
         self.pre_promote_edit = QLineEdit(getattr(config, 'pre_promote_cmd', '') or '')
         self.pre_promote_edit.setPlaceholderText("e.g. echo 'Starting promotion of {source_name}'")
-        layout.addRow("Pre-Promote Command:", self.pre_promote_edit)
+        adv.addRow("Pre-Promote Command:", self.pre_promote_edit)
 
         self.post_promote_edit = QLineEdit(getattr(config, 'post_promote_cmd', '') or '')
         self.post_promote_edit.setPlaceholderText("e.g. python notify.py --source {source_name} --version {version}")
-        layout.addRow("Post-Promote Command:", self.post_promote_edit)
+        adv.addRow("Post-Promote Command:", self.post_promote_edit)
 
-        # Sequence validation (Feature #11)
-        seq_sep = QLabel("Sequence Validation")
-        seq_sep.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        layout.addRow("", seq_sep)
+        # Sequence validation
+        seq_header = QLabel("Sequence Validation")
+        seq_header.setStyleSheet("font-weight: bold; margin-top: 6px;")
+        adv.addRow("", seq_header)
 
         self.block_incomplete_cb = QCheckBox("Block promotion of incomplete sequences (warn on frame gaps)")
         self.block_incomplete_cb.setChecked(getattr(config, 'block_incomplete_sequences', False))
-        layout.addRow("", self.block_incomplete_cb)
+        adv.addRow("", self.block_incomplete_cb)
 
-        # Save as Template (Feature #17)
+        top_layout.addWidget(advanced_section)
+
+        # ==================================================================
+        # Footer (Save as Template + OK/Cancel)
+        # ==================================================================
+        top_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        outer.addWidget(scroll, 1)
+
+        # Bottom bar outside scroll
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(12, 6, 12, 10)
         save_tpl_btn = QPushButton("Save as Template...")
         save_tpl_btn.clicked.connect(self._save_as_template)
-        layout.addRow("", save_tpl_btn)
-
+        bottom.addWidget(save_tpl_btn)
+        bottom.addStretch()
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        bottom.addWidget(buttons)
+        outer.addLayout(bottom)
+
+        # Compute initial preview now that all fields exist
+        self._update_path_preview()
 
     def _update_path_preview(self):
         """Update the resolved path preview based on the current templates.
@@ -1146,9 +1249,61 @@ class ProjectSettingsDialog(QDialog):
         if d:
             self.root_edit.setText(d)
 
+    def _format_naming_label(self, rule: str):
+        """Format the naming rule label with a human-readable description."""
+        if not rule:
+            self.naming_label.setText("Not configured yet — will be set on first ingest")
+            self.naming_label.setStyleSheet("color: #999; font-size: 11px;")
+            return
+
+        descriptions = {
+            "source_name": (
+                "Source Name",
+                "Filename without version, frame numbers, or extension",
+                "hero_comp_v003.1001.exr  →  hero_comp",
+            ),
+            "source_basename": (
+                "Base Name",
+                "Filename without version, frames, extension, or task tokens",
+                "hero_comp_v003.1001.exr  →  hero",
+            ),
+            "source_fullname": (
+                "Full Name",
+                "Filename without frame numbers or extension (keeps version)",
+                "hero_comp_v003.1001.exr  →  hero_comp_v003",
+            ),
+        }
+
+        if rule in descriptions:
+            label, desc, example = descriptions[rule]
+            text = (
+                f'<b>{label}</b> <span style="color:#999;">({rule})</span><br/>'
+                f'<span style="color:#aaa; font-size:11px;">{desc}</span><br/>'
+                f'<span style="color:#88cc88; font-size:11px;">e.g. {example}</span>'
+            )
+        elif rule.startswith("parent:"):
+            depth = rule.split(":")[1]
+            if depth == "0":
+                level_desc = "immediate parent folder"
+            elif depth == "1":
+                level_desc = "grandparent folder"
+            else:
+                level_desc = f"ancestor folder (depth {depth})"
+            text = (
+                f'<b>Parent Directory</b> <span style="color:#999;">({level_desc})</span><br/>'
+                f'<span style="color:#aaa; font-size:11px;">Source name comes from the {level_desc} of the version folder</span>'
+            )
+        else:
+            text = f'<span style="color:#ccc;">{rule}</span>'
+
+        self.naming_label.setText(text)
+        self.naming_label.setTextFormat(Qt.RichText)
+        self.naming_label.setStyleSheet("")
+
     def _reset_naming(self):
         """Reset naming convention so it will be re-asked on next discovery ingest."""
         self._naming_reset = True
+        self.naming_label.setTextFormat(Qt.PlainText)
         self.naming_label.setText("(will be re-asked on next ingest)")
         self.naming_label.setStyleSheet("color: #ffaa00;")
 
