@@ -88,6 +88,12 @@ def apply_project_defaults(config: ProjectConfig):
             source.link_mode = config.default_link_mode
         if not source.override_date_format:
             source.date_format = config.default_date_format
+        if not source.override_block_incomplete:
+            source.block_incomplete_sequences = config.block_incomplete_sequences
+        if not source.override_pre_promote_cmd:
+            source.pre_promote_cmd = config.pre_promote_cmd
+        if not source.override_post_promote_cmd:
+            source.post_promote_cmd = config.post_promote_cmd
 
 
 def load_config(config_path: str) -> ProjectConfig:

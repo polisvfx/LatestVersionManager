@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QDialogButtonBox, QHeaderView, QMenu,
     QToolBar, QSizePolicy, QFrame, QAbstractItemView,
     QColorDialog, QInputDialog, QStyledItemDelegate, QStyle,
-    QTextEdit,
+    QTextEdit, QDockWidget, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData
 from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
@@ -130,10 +130,11 @@ class PromoteWorker(QThread):
     finished = Signal(object)          # HistoryEntry on success
     error = Signal(str)                # error message
 
-    def __init__(self, promoter: Promoter, version: VersionInfo, parent=None):
+    def __init__(self, promoter: Promoter, version: VersionInfo, parent=None, force=False):
         super().__init__(parent)
         self.promoter = promoter
         self.version = version
+        self.force = force
 
     def cancel(self):
         """Request cancellation of the running promotion."""
@@ -144,6 +145,7 @@ class PromoteWorker(QThread):
             entry = self.promoter.promote(
                 self.version,
                 progress_callback=self._on_progress,
+                force=self.force,
             )
             self.finished.emit(entry)
         except PromotionError as e:
@@ -153,6 +155,26 @@ class PromoteWorker(QThread):
 
     def _on_progress(self, current, total, filename):
         self.progress.emit(current, total, filename)
+
+
+# ---------------------------------------------------------------------------
+# Worker thread for thumbnail generation
+# ---------------------------------------------------------------------------
+
+class ThumbnailWorker(QThread):
+    finished = Signal(str)  # path to thumbnail or empty string
+
+    def __init__(self, source_path, version_string, extensions, cache_dir, parent=None):
+        super().__init__(parent)
+        self.source_path = source_path
+        self.version_string = version_string
+        self.extensions = extensions
+        self.cache_dir = cache_dir
+
+    def run(self):
+        from src.lvm.thumbnail import get_thumbnail
+        result = get_thumbnail(self.source_path, self.version_string, self.extensions, self.cache_dir)
+        self.finished.emit(result or "")
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +573,15 @@ class ProjectSetupDialog(QDialog):
         self.name_edit.setPlaceholderText("My VFX Project")
         layout.addRow("Project Name:", self.name_edit)
 
+        # Template dropdown (Feature #17)
+        from src.lvm.templates import list_templates
+        templates = list_templates()
+        self.template_combo = QComboBox()
+        self.template_combo.addItem("(none)", "")
+        for t in templates:
+            self.template_combo.addItem(f"{t['name']} [{t['location']}]", t["path"])
+        layout.addRow("From Template:", self.template_combo)
+
         # Project Root — the logical root of the project
         self.root_edit = QLineEdit()
         self.root_browse_btn = QPushButton("Browse...")
@@ -663,6 +694,7 @@ class ProjectSetupDialog(QDialog):
         tasks = [t.strip() for t in self.tasks_edit.text().split(",") if t.strip()]
         root = self.root_edit.text().strip()
         save = self.save_edit.text().strip() or root
+        template_path = self.template_combo.currentData() or ""
         return {
             "project_name": self.name_edit.text().strip() or "Untitled",
             "project_root": root,
@@ -671,6 +703,7 @@ class ProjectSetupDialog(QDialog):
             "name_whitelist": wl,
             "name_blacklist": bl,
             "task_tokens": tasks,
+            "template_path": template_path,
         }
 
 
@@ -985,6 +1018,40 @@ class ProjectSettingsDialog(QDialog):
         self.blacklist_edit = TagInputWidget(config.name_blacklist, placeholder="Type and press comma to add...")
         layout.addRow("Blacklist:", self.blacklist_edit)
 
+        # Hooks section (Feature #2)
+        hooks_sep = QLabel("Promotion Hooks")
+        hooks_sep.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addRow("", hooks_sep)
+
+        hooks_help = QLabel(
+            "Shell commands to run before/after each promotion.\n"
+            "Leave empty to disable. Tokens: {source_name}, {version}, {target_dir}"
+        )
+        hooks_help.setStyleSheet("color: #999; font-size: 11px;")
+        layout.addRow("", hooks_help)
+
+        self.pre_promote_edit = QLineEdit(getattr(config, 'pre_promote_cmd', '') or '')
+        self.pre_promote_edit.setPlaceholderText("e.g. echo 'Starting promotion of {source_name}'")
+        layout.addRow("Pre-Promote Command:", self.pre_promote_edit)
+
+        self.post_promote_edit = QLineEdit(getattr(config, 'post_promote_cmd', '') or '')
+        self.post_promote_edit.setPlaceholderText("e.g. python notify.py --source {source_name} --version {version}")
+        layout.addRow("Post-Promote Command:", self.post_promote_edit)
+
+        # Sequence validation (Feature #11)
+        seq_sep = QLabel("Sequence Validation")
+        seq_sep.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addRow("", seq_sep)
+
+        self.block_incomplete_cb = QCheckBox("Block promotion of incomplete sequences (warn on frame gaps)")
+        self.block_incomplete_cb.setChecked(getattr(config, 'block_incomplete_sequences', False))
+        layout.addRow("", self.block_incomplete_cb)
+
+        # Save as Template (Feature #17)
+        save_tpl_btn = QPushButton("Save as Template...")
+        save_tpl_btn.clicked.connect(self._save_as_template)
+        layout.addRow("", save_tpl_btn)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -1116,8 +1183,23 @@ class ProjectSettingsDialog(QDialog):
         config.name_whitelist = self.whitelist_edit.tags()
         config.name_blacklist = self.blacklist_edit.tags()
 
+        # Hooks (Feature #2)
+        config.pre_promote_cmd = self.pre_promote_edit.text().strip()
+        config.post_promote_cmd = self.post_promote_edit.text().strip()
+
+        # Sequence validation (Feature #11)
+        config.block_incomplete_sequences = self.block_incomplete_cb.isChecked()
+
         # Re-apply defaults to non-overridden sources
         apply_project_defaults(config)
+
+    def _save_as_template(self):
+        """Save the current config as a reusable template (Feature #17)."""
+        from src.lvm.templates import save_template
+        name, ok = QInputDialog.getText(self, "Save Template", "Template name:")
+        if ok and name.strip():
+            path = save_template(self._config, name.strip())
+            QMessageBox.information(self, "Template Saved", f"Template saved to:\n{path}")
 
 
 # ---------------------------------------------------------------------------
@@ -2573,6 +2655,114 @@ class AboutDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Batch Promote Review Dialog
+# ---------------------------------------------------------------------------
+
+class BatchPromoteReviewDialog(QDialog):
+    """Review table for batch promotion with per-source checkboxes."""
+
+    def __init__(self, promote_list, source_status, promoters, already_current, skipped, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Batch Promotion Review")
+        self.setMinimumSize(900, 500)
+
+        layout = QVBoxLayout(self)
+
+        summary = QLabel(f"<b>{len(promote_list)}</b> source(s) will be promoted")
+        summary.setStyleSheet("font-size: 13px; padding: 4px;")
+        layout.addWidget(summary)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["", "Source", "Current", "Target Version", "Files", "Frame Range", "Timecode", "Status"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setAlternatingRowColors(True)
+        header = self.tree.header()
+        header.resizeSection(0, 30)
+
+        for source, version in promote_list:
+            promoter = promoters.get(source.name)
+            current = promoter.get_current_version() if promoter else None
+            current_ver = current.version if current else "---"
+
+            row_status = "normal"
+            status_text = "OK"
+            if version.frame_range and "gaps detected" in version.frame_range:
+                row_status = "red"
+                status_text = "GAPS"
+            elif current:
+                if current.frame_range and version.frame_range and current.frame_range != version.frame_range:
+                    row_status = "orange"
+                    status_text = "Range changed"
+                elif current.start_timecode and version.start_timecode and current.start_timecode != version.start_timecode:
+                    row_status = "orange"
+                    status_text = "TC changed"
+
+            item = QTreeWidgetItem([
+                "", source.name, current_ver, version.version_string,
+                str(version.file_count), version.frame_range or "---",
+                version.start_timecode or "---", status_text,
+            ])
+            item.setCheckState(0, Qt.Checked)
+            item.setData(0, Qt.UserRole, (source, version))
+
+            color_map = {"normal": "#90ee90", "orange": "#ffaa00", "red": "#ff6666"}
+            color = QColor(color_map[row_status])
+            for col in range(1, 8):
+                item.setForeground(col, color)
+
+            self.tree.addTopLevelItem(item)
+
+        layout.addWidget(self.tree)
+
+        if already_current or skipped:
+            info_parts = []
+            if already_current:
+                info_parts.append(f"{len(already_current)} already current")
+            if skipped:
+                info_parts.append(f"{len(skipped)} skipped")
+            info_label = QLabel(", ".join(info_parts))
+            info_label.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
+            layout.addWidget(info_label)
+
+        btn_row = QHBoxLayout()
+        btn_select_all = QPushButton("Select All")
+        btn_select_all.clicked.connect(lambda: self._set_all_checked(True))
+        btn_deselect_all = QPushButton("Deselect All")
+        btn_deselect_all.clicked.connect(lambda: self._set_all_checked(False))
+        btn_row.addWidget(btn_select_all)
+        btn_row.addWidget(btn_deselect_all)
+        btn_row.addStretch()
+
+        btn_promote = QPushButton("Promote Selected")
+        btn_promote.setStyleSheet(
+            "QPushButton { background-color: #2d5a2d; color: white; padding: 8px 20px; "
+            "border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #3a7a3a; }"
+        )
+        btn_promote.clicked.connect(self.accept)
+        btn_row.addWidget(btn_promote)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        layout.addLayout(btn_row)
+
+    def _set_all_checked(self, checked):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for i in range(self.tree.topLevelItemCount()):
+            self.tree.topLevelItem(i).setCheckState(0, state)
+
+    def get_selected(self):
+        selected = []
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item.checkState(0) == Qt.Checked:
+                selected.append(item.data(0, Qt.UserRole))
+        return selected
+
+
+# ---------------------------------------------------------------------------
 # Main Window
 # ---------------------------------------------------------------------------
 
@@ -2593,6 +2783,9 @@ class MainWindow(QMainWindow):
         self._promoting_source_name: str = None
         self._batch_promote_list: list = []
         self._batch_promote_index: int = 0
+        self._force_promote: bool = False
+        self._target_conflicts: dict = {}
+        self._thumb_worker: ThumbnailWorker = None
 
         # File watcher
         self.watcher = SourceWatcher(self)
@@ -2603,6 +2796,15 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu()
+        self._build_shortcuts()
+
+        # Log handler setup (Feature #19)
+        from src.lvm.log_handler import QtLogHandler
+        self._log_handler = QtLogHandler(max_buffer=1000)
+        self._log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+        logging.getLogger().addHandler(self._log_handler)
+        self._log_handler.log_record.connect(self._append_log_entry)
+
         self._restore_state()
 
     # --- UI Construction ---
@@ -2774,7 +2976,46 @@ class MainWindow(QMainWindow):
         header.resizeSection(3, 80)
         header.resizeSection(4, 160)
         header.resizeSection(5, 110)
-        ver_layout.addWidget(self.version_tree)
+
+        # Thumbnail/Preview panel (Feature #7) — collapsible, collapsed by default
+        self._ver_content_splitter = QSplitter(Qt.Horizontal)
+        self._ver_content_splitter.addWidget(self.version_tree)
+
+        # Preview panel container with toggle button
+        preview_frame = QWidget()
+        preview_layout = QVBoxLayout(preview_frame)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._preview_toggle = QPushButton("\u25b6 Preview")
+        self._preview_toggle.setCheckable(True)
+        self._preview_toggle.setChecked(False)
+        self._preview_toggle.setFixedHeight(24)
+        self._preview_toggle.setStyleSheet(
+            "QPushButton { text-align: left; border: none; padding-left: 4px; }"
+            " QPushButton:checked { font-weight: bold; }"
+        )
+        self._preview_toggle.toggled.connect(self._toggle_preview_panel)
+
+        self.thumbnail_label = QLabel()
+        self.thumbnail_label.setAlignment(Qt.AlignCenter)
+        self.thumbnail_label.setMinimumWidth(160)
+        self.thumbnail_label.setMaximumWidth(320)
+        self.thumbnail_label.setStyleSheet("QLabel { background-color: #1e1e1e; border: 1px solid #444; border-radius: 4px; padding: 4px; }")
+        self.thumbnail_label.setText("No Preview")
+        self.thumbnail_label.setVisible(False)  # Hidden by default
+
+        preview_layout.addWidget(self._preview_toggle)
+        preview_layout.addWidget(self.thumbnail_label, 1)
+
+        self._ver_content_splitter.addWidget(preview_frame)
+        self._ver_content_splitter.setCollapsible(0, False)  # Version tree not collapsible
+        self._ver_content_splitter.setCollapsible(1, True)   # Preview panel collapsible
+        self._ver_content_splitter.setSizes([600, 24])       # Only toggle button width
+
+        ver_layout.addWidget(self._ver_content_splitter)
+
+        # Connect version selection for thumbnail (lazy — only loads when visible)
+        self.version_tree.currentItemChanged.connect(self._on_version_selected_thumbnail)
 
         # Promote controls
         promote_row = QHBoxLayout()
@@ -2845,6 +3086,39 @@ class MainWindow(QMainWindow):
         splitter.setSizes([250, 850])
         main_layout.addWidget(splitter)
 
+        # Log panel (Feature #19)
+        self.log_dock = QDockWidget("Log", self)
+        self.log_dock.setAllowedAreas(Qt.BottomDockWidgetArea)
+        log_widget = QWidget()
+        log_layout = QVBoxLayout(log_widget)
+        log_layout.setContentsMargins(4, 4, 4, 4)
+
+        log_controls = QHBoxLayout()
+        self.log_level_filter = QComboBox()
+        self.log_level_filter.addItems(["ALL", "DEBUG", "INFO", "WARNING", "ERROR"])
+        self.log_level_filter.setCurrentText("INFO")
+        self.log_level_filter.currentTextChanged.connect(self._filter_log)
+        log_controls.addWidget(QLabel("Level:"))
+        log_controls.addWidget(self.log_level_filter)
+        log_controls.addStretch()
+        btn_clear_log = QPushButton("Clear")
+        btn_clear_log.clicked.connect(self._clear_log)
+        log_controls.addWidget(btn_clear_log)
+        btn_copy_log = QPushButton("Copy")
+        btn_copy_log.clicked.connect(self._copy_log)
+        log_controls.addWidget(btn_copy_log)
+        log_layout.addLayout(log_controls)
+
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumBlockCount(1000)
+        self.log_text.setStyleSheet("QPlainTextEdit { font-family: 'Consolas', 'Monaco', monospace; font-size: 11px; }")
+        log_layout.addWidget(self.log_text)
+
+        self.log_dock.setWidget(log_widget)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+        self.log_dock.setVisible(False)
+
         # Status bar
         self.statusBar().showMessage("Ready")
 
@@ -2914,6 +3188,11 @@ class MainWindow(QMainWindow):
         validate_action.triggered.connect(self._validate_config)
         tools_menu.addAction(validate_action)
 
+        view_menu = menubar.addMenu("&View")
+        self.log_dock_action = self.log_dock.toggleViewAction()
+        self.log_dock_action.setShortcut(QKeySequence("Ctrl+L"))
+        view_menu.addAction(self.log_dock_action)
+
         source_menu = menubar.addMenu("&Sources")
 
         add_source_action = QAction("&Add Source...", self)
@@ -2943,6 +3222,59 @@ class MainWindow(QMainWindow):
         about_action = QAction("&About...", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+    def _build_shortcuts(self):
+        """Register keyboard shortcuts (Feature #10)."""
+        # F5: Refresh all
+        f5 = QAction(self)
+        f5.setShortcut(QKeySequence("F5"))
+        f5.triggered.connect(self._refresh_all)
+        self.addAction(f5)
+
+        # Ctrl+F: Focus search
+        search_sc = QAction(self)
+        search_sc.setShortcut(QKeySequence("Ctrl+F"))
+        search_sc.triggered.connect(lambda: self.source_search.setFocus())
+        self.addAction(search_sc)
+
+        # Escape: Cancel promotion
+        esc = QAction(self)
+        esc.setShortcut(QKeySequence(Qt.Key_Escape))
+        esc.triggered.connect(self._cancel_promotion)
+        self.addAction(esc)
+
+        # Delete: Remove selected sources (only when source_list focused)
+        delete_sc = QAction(self)
+        delete_sc.setShortcut(QKeySequence(Qt.Key_Delete))
+        delete_sc.triggered.connect(self._delete_selected_sources)
+        self.addAction(delete_sc)
+
+    def _promote_selected_if_version_focused(self):
+        if self.version_tree.hasFocus() and self.version_tree.selectedItems():
+            self._promote_selected()
+
+    def _reveal_current_source(self):
+        if self._current_source and self._current_source.source_dir:
+            reveal_in_file_browser(self._current_source.source_dir)
+
+    def _delete_selected_sources(self):
+        if not self.source_list.hasFocus():
+            return
+        selected_items = self.source_list.selectedItems()
+        if not selected_items:
+            return
+        # Use existing remove logic
+        names = [item.data(Qt.UserRole) for item in selected_items]
+        if len(names) == 1:
+            reply = QMessageBox.question(self, "Remove Source", f"Remove '{names[0]}'?")
+        else:
+            reply = QMessageBox.question(self, "Remove Sources", f"Remove {len(names)} source(s)?")
+        if reply != QMessageBox.Yes:
+            return
+        self.config.watched_sources = [s for s in self.config.watched_sources if s.name not in names]
+        if self.config_path:
+            self._save_project()
+        self._reload_ui()
 
     def _check_for_updates(self):
         dlg = UpdateDialog(self)
@@ -2986,6 +3318,16 @@ class MainWindow(QMainWindow):
                 task_tokens=info.get("task_tokens", []),
             )
             self._load_project(output_path)
+
+            # Apply template if selected (Feature #17)
+            template_path = info.get("template_path", "")
+            if template_path and self.config:
+                from src.lvm.templates import load_template
+                load_template(self.config, template_path)
+                if self.config_path:
+                    self._save_project()
+                self._reload_ui()
+
             self.statusBar().showMessage(f"Created project: {output_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to create project:\n{e}")
@@ -3449,22 +3791,12 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Build confirmation message
-        mode_label = " (force)" if force else ""
-        msg = f"Promote {len(promote_list)} source(s) to their highest version{mode_label}?\n\n"
-        for source, version in promote_list:
-            msg += f"  {source.name}: {version.version_string} ({version.total_size_human})\n"
-        if already_current and not force:
-            msg += f"\nAlready current ({len(already_current)}):\n"
-            for s in already_current:
-                msg += f"  {s}\n"
-        if skipped:
-            msg += f"\nSkipped:\n"
-            for s in skipped:
-                msg += f"  {s}\n"
-
-        reply = QMessageBox.question(self, "Confirm Batch Promotion", msg)
-        if reply != QMessageBox.Yes:
+        # Show batch review dialog (Feature #9)
+        dlg = BatchPromoteReviewDialog(promote_list, self._source_status, self._promoters, already_current, skipped, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        promote_list = dlg.get_selected()
+        if not promote_list:
             return
 
         self._batch_promote_list = promote_list
@@ -3486,7 +3818,7 @@ class MainWindow(QMainWindow):
         if not promoter:
             # Create promoter if needed
             if source.latest_target:
-                promoter = Promoter(source, self.config.task_tokens)
+                promoter = Promoter(source, self.config.task_tokens, self.config.project_name)
                 self._promoters[source.name] = promoter
             else:
                 self._batch_promote_index += 1
@@ -3549,7 +3881,7 @@ class MainWindow(QMainWindow):
             highest_ver = versions[-1].version_string if versions else None
 
             if source.latest_target:
-                self._promoters[source.name] = Promoter(source, self.config.task_tokens)
+                self._promoters[source.name] = Promoter(source, self.config.task_tokens, self.config.project_name)
                 promoter = self._promoters[source.name]
                 current = promoter.get_current_version()
 
@@ -3578,6 +3910,14 @@ class MainWindow(QMainWindow):
                 "status": status,
                 "has_overrides": source.has_overrides,
             }
+
+        # Conflict detection (Feature #3)
+        from src.lvm.conflicts import detect_target_conflicts
+        conflicts = detect_target_conflicts(self.config)
+        self._target_conflicts = {}
+        for target, name_a, name_b in conflicts:
+            self._target_conflicts.setdefault(name_a, []).append(name_b)
+            self._target_conflicts.setdefault(name_b, []).append(name_a)
 
         self._populate_source_list()
 
@@ -3627,6 +3967,10 @@ class MainWindow(QMainWindow):
         else:
             text = f"    {source.name}"
 
+        # Conflict warning indicator (Feature #3)
+        if source.name in self._target_conflicts:
+            text += " [!]"
+
         # Append group tag
         if source.group:
             text += f"  \u2022{source.group}"
@@ -3661,6 +4005,12 @@ class MainWindow(QMainWindow):
         if has_overrides:
             item.setForeground(QColor("#88aaff"))
             item.setToolTip(item.toolTip() + " | Custom settings")
+
+        # Conflict warning (Feature #3)
+        if source.name in self._target_conflicts:
+            conflict_names = ", ".join(self._target_conflicts[source.name])
+            item.setForeground(QColor("#ff8c00"))
+            item.setToolTip(item.toolTip() + f" | TARGET CONFLICT with: {conflict_names}")
 
         if source.group:
             item.setToolTip(item.toolTip() + f" | Group: {source.group}")
@@ -4256,6 +4606,7 @@ class MainWindow(QMainWindow):
         if not items or not self._current_source:
             return
 
+        self._force_promote = False
         version: VersionInfo = items[0].data(0, Qt.UserRole)
         source = self._current_source
 
@@ -4267,6 +4618,19 @@ class MainWindow(QMainWindow):
         promoter = self._promoters.get(source.name)
         if not promoter:
             return
+
+        # Check for incomplete sequences (Feature #11)
+        from src.lvm.promoter import has_frame_gaps
+        block_incomplete = getattr(source, 'block_incomplete_sequences', False) or getattr(self.config, 'block_incomplete_sequences', False)
+        if block_incomplete and has_frame_gaps(version):
+            reply = QMessageBox.warning(
+                self, "Incomplete Sequence",
+                f"Sequence has frame gaps: {version.frame_range}\n\nPromote anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            self._force_promote = True
 
         # Detect "keep" vs normal promote
         current = promoter.get_current_version()
@@ -4361,7 +4725,7 @@ class MainWindow(QMainWindow):
         self.btn_cancel_promote.setEnabled(True)
         self.btn_cancel_promote.setText("Cancel")
 
-        self._worker = PromoteWorker(promoter, version, self)
+        self._worker = PromoteWorker(promoter, version, self, force=self._force_promote)
         self._worker.progress.connect(self._on_promote_progress)
         self._worker.finished.connect(self._on_promote_finished)
         self._worker.error.connect(self._on_promote_error)
@@ -4560,6 +4924,96 @@ class MainWindow(QMainWindow):
             f"Auto-promoting {source_name} to {highest.version_string}..."
         )
         self._start_promotion(promoter, highest)
+
+    # --- Log viewer helpers (Feature #19) ---
+
+    _LOG_COLORS = {
+        "DEBUG": "#888888",
+        "INFO": "#cccccc",
+        "WARNING": "#ffaa00",
+        "ERROR": "#ff4444",
+        "CRITICAL": "#ff0000",
+    }
+
+    def _append_log_entry(self, level: str, message: str):
+        import html as _html
+        color = self._LOG_COLORS.get(level, "#cccccc")
+        min_level = self.log_level_filter.currentText()
+        level_order = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        if min_level != "ALL":
+            if level_order.index(level) < level_order.index(min_level):
+                return
+        self.log_text.appendHtml(f'<span style="color:{color}">{_html.escape(message)}</span>')
+
+    def _filter_log(self):
+        self.log_text.clear()
+        for level, msg in self._log_handler.get_buffer():
+            self._append_log_entry(level, msg)
+
+    def _clear_log(self):
+        self.log_text.clear()
+        self._log_handler.clear_buffer()
+
+    def _copy_log(self):
+        QApplication.clipboard().setText(self.log_text.toPlainText())
+
+    # --- Thumbnail/Preview helpers (Feature #7) ---
+
+    def _toggle_preview_panel(self, checked):
+        """Show/hide the preview panel. Triggers thumbnail load if becoming visible."""
+        self.thumbnail_label.setVisible(checked)
+        self._preview_toggle.setText("\u25bc Preview" if checked else "\u25b6 Preview")
+        if checked:
+            # Expand the splitter to show the preview
+            sizes = self._ver_content_splitter.sizes()
+            if sizes[1] < 160:
+                self._ver_content_splitter.setSizes([600, 200])
+            # Trigger thumbnail load for currently selected version
+            current = self.version_tree.currentItem()
+            if current:
+                self._on_version_selected_thumbnail(current, None)
+        else:
+            self._ver_content_splitter.setSizes([600, 24])
+
+    def _on_version_selected_thumbnail(self, current, previous):
+        # Only load thumbnails when preview panel is visible
+        if not self.thumbnail_label.isVisible():
+            return
+
+        if not current:
+            self.thumbnail_label.setPixmap(QPixmap())
+            self.thumbnail_label.setText("No Preview")
+            return
+
+        version = current.data(0, Qt.UserRole)
+        if not version or not self._current_source:
+            return
+
+        cache_dir = ""
+        if self.config_path:
+            cache_dir = str(Path(self.config_path).parent / ".lvm_cache")
+        if not cache_dir:
+            return
+
+        self._thumb_worker = ThumbnailWorker(
+            version.source_path, version.version_string,
+            self._current_source.file_extensions, cache_dir, self
+        )
+        self._thumb_worker.finished.connect(self._on_thumbnail_ready)
+        self._thumb_worker.start()
+
+    def _on_thumbnail_ready(self, thumb_path):
+        if thumb_path:
+            pixmap = QPixmap(thumb_path)
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    self.thumbnail_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+                self.thumbnail_label.setPixmap(scaled)
+                self.thumbnail_label.setText("")
+                return
+        self.thumbnail_label.setPixmap(QPixmap())
+        self.thumbnail_label.setText("No Preview")
 
     # --- State persistence ---
 

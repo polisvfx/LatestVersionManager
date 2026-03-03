@@ -24,13 +24,27 @@ In a typical compositing or grading workflow, artists iterate through numbered v
 
 **Verify integrity at any time.** The verify command checks that the files in every "latest" folder actually match what's expected - catching silent corruption, accidental deletions, or manual edits that went sideways.
 
-**Batch promote everything at once.** The "promote all" feature scans every source in your project and promotes each one to its highest available version in a single operation. Sources already on the latest version are skipped automatically.
+**Batch promote everything at once.** The "promote all" feature scans every source in your project and promotes each one to its highest available version in a single operation. A review dialog lets you inspect each pending promotion with frame range and status details, toggle individual sources on or off, and spot potential issues before committing.
+
+**Roll back to a previous version.** Made a mistake? The rollback command re-promotes the previous version from your history in one step, both from the CLI and the GUI.
+
+**Run custom hooks before and after promotion.** Configure shell commands that run automatically around every promotion. Pre-promote hooks can gate the operation (a non-zero exit blocks the promote), while post-promote hooks can trigger downstream notifications, renders, or syncs. Hook commands receive environment variables (`LVM_SOURCE_NAME`, `LVM_VERSION`, `LVM_TARGET_DIR`, etc.) for full context.
+
+**Catch conflicts and incomplete sequences early.** LVM warns you when multiple sources point at the same target directory and when image sequences have frame gaps. Gap blocking is configurable per-project and per-source, and can be overridden with `--force` when you know what you're doing.
+
+**Preview thumbnails for selected versions.** The GUI can generate preview thumbnails using oiiotool (preferred for VFX linear/ACES workflows) or ffmpeg (fallback for containers and general media). Thumbnails are cached and loaded asynchronously, and the preview panel is collapsible so it stays out of the way until you need it.
 
 **Watch for new versions in real time.** The file watcher monitors your source directories and alerts you through the GUI when new versions appear, so you don't have to manually rescan.
 
 **Organize sources into groups.** For larger projects with many shots or sequences, sources can be grouped and managed together. Path templates with tokens like `{source_name}`, `{group}`, and `{task}` automate where files come from and where they go.
 
 **Filter with whitelists and blacklists.** Control which folders get picked up during discovery by including or excluding keywords - handy for ignoring WIP renders, test outputs, or denoise passes you don't want in the pipeline.
+
+**Save and reuse project templates.** Save your project configuration (defaults, extensions, link mode, hooks) as a reusable template. Templates can be stored per-user or per-project, and applied when setting up new projects to skip repetitive configuration.
+
+**Built-in log viewer.** A collapsible log panel in the GUI shows color-coded log output (debug, info, warning, error) in real time, so you can troubleshoot without switching to a terminal.
+
+**Keyboard shortcuts.** Common actions are bound to keyboard shortcuts: F5 to refresh, Ctrl+F to search, Delete to remove sources, and Escape to cancel a running promotion.
 
 ## Installation
 
@@ -92,6 +106,9 @@ You can also run LVM from the command line via Python:
 # Set up a new project
 python main.py setup --name "MyShow" --dir ./myshow
 
+# Set up a project from a saved template
+python main.py setup --name "MyShow" --dir ./myshow --template "VFX Default"
+
 # Discover versioned content in a directory
 python main.py discover ./renders --depth 4
 
@@ -104,17 +121,32 @@ python main.py status myproject.json
 # Promote a specific version
 python main.py promote myproject.json hero_comp v003
 
+# Promote a version, overriding frame gap warnings
+python main.py promote myproject.json hero_comp v003 --force
+
 # Promote everything to the latest version
 python main.py promote-all myproject.json -y
 
 # Preview what would happen without copying anything
 python main.py promote myproject.json hero_comp v003 --dry-run
 
+# Roll back to the previous version
+python main.py rollback myproject.json hero_comp
+
 # View promotion history
 python main.py history myproject.json hero_comp
 
 # Verify file integrity across all sources
 python main.py verify myproject.json
+
+# Validate config and check for target conflicts
+python main.py validate myproject.json
+
+# Save current config as a reusable template
+python main.py save-template myproject.json --name "VFX Default"
+
+# List available templates
+python main.py list-templates
 ```
 
 ## Link Modes

@@ -17,6 +17,7 @@ from typing import Optional, Callable
 
 from .models import VersionInfo, WatchedSource, HistoryEntry
 from .history import HistoryManager
+from .hooks import run_pre_promote_hook, run_post_promote_hook, HookError
 from .task_tokens import derive_source_tokens
 from .config import _expand_group_token
 
@@ -37,12 +38,18 @@ class PromotionError(Exception):
     pass
 
 
+def has_frame_gaps(version: VersionInfo) -> bool:
+    """Return True if the version's frame_range indicates gaps."""
+    return version.frame_range is not None and "gaps detected" in version.frame_range
+
+
 class Promoter:
     """Handles promoting a version to the latest target."""
 
-    def __init__(self, watched_source: WatchedSource, task_tokens: list = None):
+    def __init__(self, watched_source: WatchedSource, task_tokens: list = None, project_name: str = ""):
         self.source = watched_source
         self.task_tokens = task_tokens or []
+        self.project_name = project_name
 
         if not watched_source.latest_target:
             raise PromotionError(
@@ -65,6 +72,7 @@ class Promoter:
         version: VersionInfo,
         user: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        force: bool = False,
     ) -> HistoryEntry:
         """
         Promote a version to be the current "latest".
@@ -74,6 +82,7 @@ class Promoter:
             user: Username to record. Defaults to OS login name.
             progress_callback: Optional callback(current_file, total_files, filename)
                                for UI progress updates.
+            force: If True, skip sequence completeness validation.
 
         Returns:
             The HistoryEntry that was recorded.
@@ -96,6 +105,19 @@ class Promoter:
         # Validate source exists
         if not source_path.exists():
             raise PromotionError(f"Source no longer exists: {source_path}")
+
+        # Sequence completeness validation
+        if not force and self.source.block_incomplete_sequences and has_frame_gaps(version):
+            raise PromotionError(
+                f"Sequence has frame gaps: {version.frame_range}. "
+                f"Use force to override, or disable block_incomplete_sequences."
+            )
+
+        # Run pre-promote hook
+        try:
+            run_pre_promote_hook(self.source, version, user, self.project_name)
+        except HookError as e:
+            raise PromotionError(f"Pre-promote hook failed:\n{e}")
 
         # Create target directory if needed
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -124,6 +146,9 @@ class Promoter:
         entry.source_mtime = self._get_max_mtime(source_path)
         entry.target_mtime = self._get_max_mtime(target_dir)
         self.history.record_promotion(entry)
+
+        # Run post-promote hook
+        run_post_promote_hook(self.source, version, user, self.project_name)
 
         logger.info(f"Promotion complete: {version.version_string}")
         return entry
