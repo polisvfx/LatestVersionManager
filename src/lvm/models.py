@@ -156,7 +156,7 @@ class WatchedSource:
     override_file_rename: bool = False
     override_link_mode: bool = False
     # Sequence completeness validation
-    block_incomplete_sequences: bool = False
+    block_incomplete_sequences: bool = True
     override_block_incomplete: bool = False
     # Pre/post-promote hooks
     pre_promote_cmd: str = ""
@@ -205,8 +205,8 @@ class WatchedSource:
             d["override_file_rename"] = True
         if self.override_link_mode:
             d["override_link_mode"] = True
-        if self.block_incomplete_sequences:
-            d["block_incomplete_sequences"] = True
+        if not self.block_incomplete_sequences:
+            d["block_incomplete_sequences"] = False
         if self.override_block_incomplete:
             d["override_block_incomplete"] = True
         if self.pre_promote_cmd:
@@ -249,7 +249,7 @@ class WatchedSource:
             override_latest_target=data.get("override_latest_target", False),
             override_file_rename=data.get("override_file_rename", False),
             override_link_mode=override_link,
-            block_incomplete_sequences=data.get("block_incomplete_sequences", False),
+            block_incomplete_sequences=data.get("block_incomplete_sequences", True),
             override_block_incomplete=data.get("override_block_incomplete", False),
             pre_promote_cmd=data.get("pre_promote_cmd", ""),
             post_promote_cmd=data.get("post_promote_cmd", ""),
@@ -287,7 +287,7 @@ class ProjectConfig:
     # Discovery UI state
     discovery_search_history: list = field(default_factory=list)  # recent search paths
     # Sequence completeness validation
-    block_incomplete_sequences: bool = False
+    block_incomplete_sequences: bool = True
     # Pre/post-promote hooks (project-level defaults)
     pre_promote_cmd: str = ""
     post_promote_cmd: str = ""
@@ -340,8 +340,8 @@ class ProjectConfig:
             d["timecode_mode"] = self.timecode_mode
         if self.discovery_search_history:
             d["discovery_search_history"] = self.discovery_search_history
-        if self.block_incomplete_sequences:
-            d["block_incomplete_sequences"] = True
+        if not self.block_incomplete_sequences:
+            d["block_incomplete_sequences"] = False
         if self.pre_promote_cmd:
             d["pre_promote_cmd"] = self.pre_promote_cmd
         if self.post_promote_cmd:
@@ -372,7 +372,7 @@ class ProjectConfig:
             naming_configured=data.get("naming_configured", False),
             timecode_mode=data.get("timecode_mode", "lazy"),
             discovery_search_history=data.get("discovery_search_history", []),
-            block_incomplete_sequences=data.get("block_incomplete_sequences", False),
+            block_incomplete_sequences=data.get("block_incomplete_sequences", True),
             pre_promote_cmd=data.get("pre_promote_cmd", ""),
             post_promote_cmd=data.get("post_promote_cmd", ""),
             project_root=data.get("project_root", ""),
