@@ -155,6 +155,14 @@ class WatchedSource:
     override_latest_target: bool = False
     override_file_rename: bool = False
     override_link_mode: bool = False
+    # Sequence completeness validation
+    block_incomplete_sequences: bool = False
+    override_block_incomplete: bool = False
+    # Pre/post-promote hooks
+    pre_promote_cmd: str = ""
+    post_promote_cmd: str = ""
+    override_pre_promote_cmd: bool = False
+    override_post_promote_cmd: bool = False
 
     @property
     def use_symlinks(self) -> bool:
@@ -197,6 +205,18 @@ class WatchedSource:
             d["override_file_rename"] = True
         if self.override_link_mode:
             d["override_link_mode"] = True
+        if self.block_incomplete_sequences:
+            d["block_incomplete_sequences"] = True
+        if self.override_block_incomplete:
+            d["override_block_incomplete"] = True
+        if self.pre_promote_cmd:
+            d["pre_promote_cmd"] = self.pre_promote_cmd
+        if self.post_promote_cmd:
+            d["post_promote_cmd"] = self.post_promote_cmd
+        if self.override_pre_promote_cmd:
+            d["override_pre_promote_cmd"] = True
+        if self.override_post_promote_cmd:
+            d["override_post_promote_cmd"] = True
         return d
 
     @classmethod
@@ -229,6 +249,12 @@ class WatchedSource:
             override_latest_target=data.get("override_latest_target", False),
             override_file_rename=data.get("override_file_rename", False),
             override_link_mode=override_link,
+            block_incomplete_sequences=data.get("block_incomplete_sequences", False),
+            override_block_incomplete=data.get("override_block_incomplete", False),
+            pre_promote_cmd=data.get("pre_promote_cmd", ""),
+            post_promote_cmd=data.get("post_promote_cmd", ""),
+            override_pre_promote_cmd=data.get("override_pre_promote_cmd", False),
+            override_post_promote_cmd=data.get("override_post_promote_cmd", False),
         )
 
 
@@ -260,6 +286,11 @@ class ProjectConfig:
     timecode_mode: str = "lazy"
     # Discovery UI state
     discovery_search_history: list = field(default_factory=list)  # recent search paths
+    # Sequence completeness validation
+    block_incomplete_sequences: bool = False
+    # Pre/post-promote hooks (project-level defaults)
+    pre_promote_cmd: str = ""
+    post_promote_cmd: str = ""
     # Explicit project root — when set, overrides project_dir for {project_root} token
     project_root: str = ""
     # Runtime only — not serialized, set by config loader
@@ -309,6 +340,12 @@ class ProjectConfig:
             d["timecode_mode"] = self.timecode_mode
         if self.discovery_search_history:
             d["discovery_search_history"] = self.discovery_search_history
+        if self.block_incomplete_sequences:
+            d["block_incomplete_sequences"] = True
+        if self.pre_promote_cmd:
+            d["pre_promote_cmd"] = self.pre_promote_cmd
+        if self.post_promote_cmd:
+            d["post_promote_cmd"] = self.post_promote_cmd
         if self.project_root:
             d["project_root"] = self.project_root
         return d
@@ -335,6 +372,9 @@ class ProjectConfig:
             naming_configured=data.get("naming_configured", False),
             timecode_mode=data.get("timecode_mode", "lazy"),
             discovery_search_history=data.get("discovery_search_history", []),
+            block_incomplete_sequences=data.get("block_incomplete_sequences", False),
+            pre_promote_cmd=data.get("pre_promote_cmd", ""),
+            post_promote_cmd=data.get("post_promote_cmd", ""),
             project_root=data.get("project_root", ""),
         )
 

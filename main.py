@@ -31,6 +31,7 @@ from src.lvm.promoter import Promoter, generate_report
 from src.lvm.models import WatchedSource
 from src.lvm.discovery import discover, format_discovery_report
 from src.lvm.timecode import populate_timecodes
+from src.lvm.conflicts import detect_target_conflicts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,6 +77,21 @@ def cmd_setup(args):
         task_tokens=task_tokens,
         output_filename=os.path.basename(args.output) if args.output else None,
     )
+
+    # Apply template if specified
+    if args.template:
+        from src.lvm.templates import list_templates, load_template, apply_template
+        from src.lvm.config import save_config
+        templates = list_templates()
+        match = next((t for t in templates if t["name"] == args.template), None)
+        if not match:
+            print(f"Template '{args.template}' not found.")
+            sys.exit(1)
+        tpl_data = load_template(match["path"])
+        config = load_config(output)
+        apply_template(config, tpl_data)
+        save_config(config, output)
+        print(f"Applied template: {args.template}")
 
     print(f"\nProject file created: {output}")
     print("\nNext steps:")
@@ -153,7 +169,7 @@ def cmd_scan(args):
             populate_timecodes(versions)
 
         # Check current version
-        promoter = Promoter(source, config.task_tokens)
+        promoter = Promoter(source, config.task_tokens, config.project_name)
         current = promoter.get_current_version()
         current_ver = current.version if current else None
 
@@ -174,7 +190,7 @@ def cmd_status(args):
     print(f"Project: {config.project_name}\n")
 
     for source in config.watched_sources:
-        promoter = Promoter(source, config.task_tokens)
+        promoter = Promoter(source, config.task_tokens, config.project_name)
         current = promoter.get_current_version()
         integrity = promoter.verify()
 
@@ -222,7 +238,7 @@ def cmd_promote(args):
         print(f"Available: {', '.join(v.version_string for v in versions)}")
         sys.exit(1)
 
-    promoter = Promoter(source, config.task_tokens)
+    promoter = Promoter(source, config.task_tokens, config.project_name)
     current_entry = promoter.get_current_version()
 
     # Dry run mode
@@ -276,7 +292,7 @@ def cmd_promote(args):
         pct = int(current / total * 100)
         print(f"\r  Copying: {current}/{total} ({pct}%) - {filename}", end="", flush=True)
 
-    entry = promoter.promote(target_version, progress_callback=progress)
+    entry = promoter.promote(target_version, progress_callback=progress, force=getattr(args, 'force', False))
     print(f"\n\nDone. {source.name} is now at {entry.version}")
 
     # Write report if requested
@@ -308,7 +324,7 @@ def cmd_promote_all(args):
             continue
 
         highest = versions[-1]
-        promoter = Promoter(source, config.task_tokens)
+        promoter = Promoter(source, config.task_tokens, config.project_name)
         current = promoter.get_current_version()
 
         if not args.force and current and current.version == highest.version_string:
@@ -361,7 +377,7 @@ def cmd_promote_all(args):
     for i, (source, version, promoter) in enumerate(promote_list):
         print(f"\n[{i+1}/{len(promote_list)}] Promoting {source.name} -> {version.version_string}...")
         try:
-            entry = promoter.promote(version)
+            entry = promoter.promote(version, force=args.force)
             print(f"  Done.")
             reports.append(generate_report(entry, source))
         except Exception as e:
@@ -385,7 +401,7 @@ def cmd_history(args):
         print(f"Source '{args.source_name}' not found.")
         sys.exit(1)
 
-    promoter = Promoter(source, config.task_tokens)
+    promoter = Promoter(source, config.task_tokens, config.project_name)
     history = promoter.get_history()
 
     if not history:
@@ -407,7 +423,7 @@ def cmd_verify(args):
 
     all_ok = True
     for source in config.watched_sources:
-        promoter = Promoter(source, config.task_tokens)
+        promoter = Promoter(source, config.task_tokens, config.project_name)
         result = promoter.verify()
         icon = "OK" if result["valid"] else "!!"
         print(f"  [{icon}] {source.name}: {result['message']}")
@@ -418,6 +434,66 @@ def cmd_verify(args):
         print("\nAll sources verified OK.")
     else:
         print("\nSome sources have issues - check above.")
+
+
+def cmd_rollback(args):
+    """Rollback to the previous version from history."""
+    config = load_config(args.config)
+
+    source = _find_source(config, args.source_name)
+    if not source:
+        print(f"Source '{args.source_name}' not found.")
+        sys.exit(1)
+
+    promoter = Promoter(source, config.task_tokens, config.project_name)
+    history = promoter.get_history()
+
+    if len(history) < 2:
+        print(f"Cannot rollback: need at least 2 history entries, found {len(history)}.")
+        sys.exit(1)
+
+    current = history[0]
+    previous = history[1]
+    print(f"Current: {current.version}")
+    print(f"Rolling back to: {previous.version}")
+    print(f"  Originally promoted by: {previous.set_by} at {previous.set_at}")
+
+    # Re-scan to verify the old version still exists on disk
+    scanner = VersionScanner(source, config.task_tokens)
+    versions = scanner.scan()
+    target_version = None
+    for v in versions:
+        if v.version_string == previous.version:
+            target_version = v
+            break
+
+    if not target_version:
+        print(f"Version {previous.version} no longer exists on disk.")
+        sys.exit(1)
+
+    print(f"  Source: {target_version.source_path}")
+    print(f"  Files:  {target_version.file_count} ({target_version.total_size_human})")
+    if target_version.frame_range:
+        print(f"  Frames: {target_version.frame_range}")
+
+    if not args.yes:
+        confirm = input("\nProceed with rollback? [y/N] ").strip().lower()
+        if confirm != "y":
+            print("Cancelled.")
+            return
+
+    def progress(current, total, filename):
+        pct = int(current / total * 100)
+        print(f"\r  Copying: {current}/{total} ({pct}%) - {filename}", end="", flush=True)
+
+    entry = promoter.promote(target_version, progress_callback=progress)
+    print(f"\n\nRollback complete. {source.name} is now at {entry.version}")
+
+    if args.report:
+        report = generate_report(entry, source)
+        with open(args.report, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        print(f"Report written to: {args.report}")
 
 
 def cmd_validate(args):
@@ -460,6 +536,11 @@ def cmd_validate(args):
         if source.group and source.group not in config.groups:
             warnings.append(f"{source.name}: assigned to group '{source.group}' which is not defined")
 
+    # Check for overlapping targets
+    conflicts = detect_target_conflicts(config)
+    for target, name_a, name_b in conflicts:
+        warnings.append(f"CONFLICT: '{name_a}' and '{name_b}' share target: {target}")
+
     # Report
     if issues:
         print("ERRORS:")
@@ -476,6 +557,29 @@ def cmd_validate(args):
     else:
         print(f"\nConfig has {len(issues)} error(s)")
         sys.exit(1)
+
+
+def cmd_save_template(args):
+    """Save current config as a reusable template."""
+    config = load_config(args.config)
+    from src.lvm.templates import save_template
+    path = save_template(config, args.name, location=args.location,
+                         project_dir=config.project_dir)
+    print(f"Template saved: {path}")
+
+
+def cmd_list_templates(args):
+    """List available configuration templates."""
+    from src.lvm.templates import list_templates
+    project_dir = getattr(args, 'project_dir', None)
+    templates = list_templates(project_dir)
+    if not templates:
+        print("No templates found.")
+        return
+    print("Available templates:\n")
+    for t in templates:
+        loc = f"[{t['location']}]"
+        print(f"  {t['name']:30s} {loc:10s} {t['project_name']}")
 
 
 def _find_source(config, name: str) -> WatchedSource:
@@ -528,6 +632,7 @@ def main():
     p_promote.add_argument("source_name", help="Name of the watched source")
     p_promote.add_argument("version", help="Version to promote (e.g. v003 or 3)")
     p_promote.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    p_promote.add_argument("--force", action="store_true", help="Override gap/incompleteness block")
     p_promote.add_argument("--dry-run", action="store_true", help="Preview file operations without copying")
     p_promote.add_argument("--report", help="Write promotion report to file (JSON)")
 
@@ -544,6 +649,13 @@ def main():
     p_history.add_argument("config", help="Path to project config JSON")
     p_history.add_argument("source_name", help="Name of the watched source")
 
+    # rollback
+    p_rollback = subparsers.add_parser("rollback", help="Rollback to the previous version")
+    p_rollback.add_argument("config", help="Path to project config JSON")
+    p_rollback.add_argument("source_name", help="Name of the watched source")
+    p_rollback.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    p_rollback.add_argument("--report", help="Write report to file (JSON)")
+
     # verify
     p_verify = subparsers.add_parser("verify", help="Verify integrity of latest targets")
     p_verify.add_argument("config", help="Path to project config JSON")
@@ -551,6 +663,20 @@ def main():
     # validate
     p_validate = subparsers.add_parser("validate", help="Validate project config file")
     p_validate.add_argument("config", help="Path to project config JSON")
+
+    # save-template
+    p_save_tpl = subparsers.add_parser("save-template", help="Save current config as a template")
+    p_save_tpl.add_argument("config", help="Path to project config JSON")
+    p_save_tpl.add_argument("--name", required=True, help="Template name")
+    p_save_tpl.add_argument("--location", default="user", choices=["user", "project"],
+                            help="Where to store: 'user' (global) or 'project' (local)")
+
+    # list-templates
+    p_list_tpl = subparsers.add_parser("list-templates", help="List available templates")
+    p_list_tpl.add_argument("--project-dir", default=None, help="Project directory for local templates")
+
+    # Add --template to setup
+    p_setup.add_argument("--template", default="", help="Apply a template by name")
 
     args = parser.parse_args()
 
@@ -567,8 +693,11 @@ def main():
         "promote": cmd_promote,
         "promote-all": cmd_promote_all,
         "history": cmd_history,
+        "rollback": cmd_rollback,
         "verify": cmd_verify,
         "validate": cmd_validate,
+        "save-template": cmd_save_template,
+        "list-templates": cmd_list_templates,
     }
 
     commands[args.command](args)
