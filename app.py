@@ -1020,7 +1020,6 @@ class ProjectSettingsDialog(QDialog):
         self.path_preview_label = QLabel("")
         self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
         self.path_preview_label.setWordWrap(True)
-        self.path_preview_label.setTextFormat(Qt.RichText)
         self.path_preview_label.setMinimumWidth(50)
         self.path_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         paths.addRow("Resolved Preview:", self.path_preview_label)
@@ -1248,17 +1247,12 @@ class ProjectSettingsDialog(QDialog):
             sample_file = f"{rename_resolved}.####.exr"
             previews.append(str(Path(dir_str) / sample_file))
 
-        def _path_to_html(p: str) -> str:
-            escaped = p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            # Insert word-break opportunities after every slash so long paths wrap
-            return escaped.replace("/", "/<wbr>").replace("\\", "\\<wbr>")
+        def _path_wrappable(p: str) -> str:
+            # Insert zero-width spaces after path separators so Qt can wrap long paths.
+            # Qt's rich text engine doesn't support <wbr>; \u200b works natively.
+            return p.replace("/", "/\u200b").replace("\\", "\\\u200b")
 
-        html = "<br>".join(
-            f'<span>{_path_to_html(p)}</span>' for p in previews
-        )
-        self.path_preview_label.setText(
-            f'<div style="word-wrap:break-word;">{html}</div>'
-        )
+        self.path_preview_label.setText("\n".join(_path_wrappable(p) for p in previews))
         self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
 
     def _browse_root(self):
