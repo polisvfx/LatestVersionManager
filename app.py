@@ -1248,8 +1248,13 @@ class ProjectSettingsDialog(QDialog):
             sample_file = f"{rename_resolved}.####.exr"
             previews.append(str(Path(dir_str) / sample_file))
 
+        def _path_to_html(p: str) -> str:
+            escaped = p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            # Insert word-break opportunities after every slash so long paths wrap
+            return escaped.replace("/", "/<wbr>").replace("\\", "\\<wbr>")
+
         html = "<br>".join(
-            f'<span style="word-wrap:break-word;">{p}</span>' for p in previews
+            f'<span>{_path_to_html(p)}</span>' for p in previews
         )
         self.path_preview_label.setText(
             f'<div style="word-wrap:break-word;">{html}</div>'
