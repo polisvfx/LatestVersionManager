@@ -1018,6 +1018,9 @@ class ProjectSettingsDialog(QDialog):
         self.path_preview_label = QLabel("")
         self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
         self.path_preview_label.setWordWrap(True)
+        self.path_preview_label.setTextFormat(Qt.RichText)
+        self.path_preview_label.setMinimumWidth(50)
+        self.path_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         paths.addRow("Resolved Preview:", self.path_preview_label)
 
         top_layout.addWidget(paths_section)
@@ -1243,7 +1246,12 @@ class ProjectSettingsDialog(QDialog):
             sample_file = f"{rename_resolved}.####.exr"
             previews.append(str(Path(dir_str) / sample_file))
 
-        self.path_preview_label.setText("\n".join(previews))
+        html = "<br>".join(
+            f'<span style="word-wrap:break-word;">{p}</span>' for p in previews
+        )
+        self.path_preview_label.setText(
+            f'<div style="word-wrap:break-word;">{html}</div>'
+        )
         self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
 
     def _browse_root(self):
