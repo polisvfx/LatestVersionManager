@@ -1474,11 +1474,38 @@ class LatestPathDialog(QDialog):
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, "Select Latest Target Directory")
         if d:
-            # Try to make relative to project_dir for portability
+            current_tpl = self.template_edit.text().strip()
+            uses_project_token = "{project_root}" in current_tpl or "{group_root}" in current_tpl
+            # Relative paths are resolved from source_dir at runtime, so
+            # make the browsed path relative to a representative source dir
+            # (unless {project_root}/{group_root} tokens are in use).
+            if not uses_project_token:
+                ref_source_dir = None
+                if self._source and self._source.source_dir:
+                    ref_source_dir = self._source.source_dir
+                elif self._config.watched_sources:
+                    for s in self._config.watched_sources:
+                        if s.source_dir:
+                            ref_source_dir = s.source_dir
+                            break
+                elif self._discovery_results:
+                    for dr in self._discovery_results:
+                        if dr.path:
+                            ref_source_dir = dr.path
+                            break
+                if ref_source_dir:
+                    try:
+                        rel = os.path.relpath(d, ref_source_dir).replace("\\", "/")
+                        self.template_edit.setText(rel)
+                        return
+                    except ValueError:
+                        pass
+            # Fall back: relative to project_dir (for {project_root} templates)
+            # or absolute path
             if self._config.project_dir:
                 try:
                     rel = os.path.relpath(d, self._config.project_dir).replace("\\", "/")
-                    self.template_edit.setText(rel)
+                    self.template_edit.setText("{project_root}/" + rel)
                     return
                 except ValueError:
                     pass
