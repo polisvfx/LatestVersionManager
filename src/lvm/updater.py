@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -105,6 +106,52 @@ def get_install_dir() -> Optional[Path]:
     return Path(sys.executable).parent
 
 
+def _get_ssl_context() -> ssl.SSLContext:
+    """Create an SSL context that works in PyInstaller bundles on all platforms.
+
+    On macOS, PyInstaller-frozen apps often cannot locate the system CA
+    certificates because the bundled OpenSSL looks in paths that don't exist
+    on the target machine.  This function detects that situation and loads
+    certificates from known macOS system paths as a fallback.
+    """
+    ctx = ssl.create_default_context()
+
+    if sys.platform == "darwin" and is_frozen():
+        # Check whether the default context actually loaded any CA certs
+        stats = ctx.cert_store_stats()
+        if stats["x509_ca"] == 0:
+            _MACOS_CERT_PATHS = (
+                "/etc/ssl/cert.pem",
+                "/usr/local/etc/openssl/cert.pem",
+                "/usr/local/etc/openssl@3/cert.pem",
+                "/usr/local/etc/openssl@1.1/cert.pem",
+                "/opt/homebrew/etc/openssl/cert.pem",
+                "/opt/homebrew/etc/openssl@3/cert.pem",
+            )
+            for cert_path in _MACOS_CERT_PATHS:
+                if os.path.isfile(cert_path):
+                    try:
+                        ctx.load_verify_locations(cert_path)
+                        logger.debug("Loaded CA certs from %s", cert_path)
+                        break
+                    except Exception:
+                        continue
+
+            # Last resort: use certifi if installed (common transitive dep)
+            if ctx.cert_store_stats()["x509_ca"] == 0:
+                try:
+                    import certifi
+                    ctx.load_verify_locations(certifi.where())
+                    logger.debug("Loaded CA certs from certifi")
+                except ImportError:
+                    logger.warning(
+                        "No CA certificates found — SSL verification may fail "
+                        "on this macOS system."
+                    )
+
+    return ctx
+
+
 # ---------------------------------------------------------------------------
 # Check for update
 # ---------------------------------------------------------------------------
@@ -123,7 +170,8 @@ def check_for_update(current_version: str) -> Optional[ReleaseInfo]:
     })
 
     try:
-        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        ctx = _get_ssl_context()
+        with urlopen(req, timeout=REQUEST_TIMEOUT, context=ctx) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except HTTPError as exc:
         if exc.code == 403:
@@ -200,7 +248,8 @@ def download_update(
     req = Request(release.asset_url, headers={"User-Agent": USER_AGENT})
 
     try:
-        with urlopen(req, timeout=60) as resp:
+        ctx = _get_ssl_context()
+        with urlopen(req, timeout=60, context=ctx) as resp:
             total = int(resp.headers.get("Content-Length", release.asset_size))
             downloaded = 0
 
