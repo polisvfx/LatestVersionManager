@@ -392,6 +392,7 @@ class SourceDialog(QDialog):
         self._project_config = project_config
 
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.name_edit = QLineEdit()
         layout.addRow("Name:", self.name_edit)
@@ -569,6 +570,7 @@ class ProjectSetupDialog(QDialog):
         self.setMinimumWidth(500)
 
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("My VFX Project")
@@ -907,6 +909,7 @@ class CollapsibleSection(QWidget):
         # Content area
         self._content = QWidget()
         self._content_layout = QFormLayout(self._content)
+        self._content_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self._content_layout.setContentsMargins(8, 4, 4, 8)
         self._content.setVisible(not collapsed)
 
@@ -964,6 +967,7 @@ class ProjectSettingsDialog(QDialog):
         # GENERAL (always visible, not collapsible)
         # ==================================================================
         general_form = QFormLayout()
+        general_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         general_form.setContentsMargins(0, 0, 0, 0)
 
         self.name_edit = QLineEdit(config.project_name)
@@ -1409,6 +1413,7 @@ class LatestPathDialog(QDialog):
 
         # Template input
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         token_help = QLabel(
             "Tokens: {source_dir}, {source_name}, {source_basename},\n"
