@@ -256,18 +256,70 @@ jobs:
           path: dist/${{ matrix.artifact_name }}.dmg
           retention-days: 7
 
+  # ── Python source distribution (platform-independent zip) ───────────────────
+  # Packages the raw Python scripts so users with Python already installed can
+  # run the app without a compiled binary. Only built once (on Linux).
+  build-python:
+    name: Build Python source zip
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Inject release version
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          perl -i -pe "s/__version__ = \".*\"/__version__ = \"$VERSION\"/" src/lvm/__init__.py
+          echo "Version set to: $VERSION"
+
+      - name: Create Python source zip
+        run: |
+          mkdir -p dist
+          zip -r dist/LatestVersionManager-python.zip \
+            app.py \
+            main.py \
+            src/ \
+            resources/ \
+            requirements.txt \
+            README.md \
+            start_lvm.bat \
+            start_lvm.sh \
+            start_lvm.command \
+            --exclude "**/__pycache__/*" \
+            --exclude "**/*.pyc"
+
+      - name: Upload Python source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LatestVersionManager-python
+          path: dist/LatestVersionManager-python.zip
+          retention-days: 7
+
   # ── Attach all artifacts to GitHub Release (only when a release is published) ──
   # Runs after all matrix builds finish, so only one job touches the release.
   publish:
     name: Publish to GitHub Release
     if: github.event_name == 'release'
-    needs: build
+    needs: [build, build-python]
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist/
+
+      - name: Rename artifacts to include version number
+        run: |
+          VERSION="${{ github.ref_name }}"
+          find dist -type f \( -name "*.zip" -o -name "*.dmg" \) | while read -r f; do
+            dir=$(dirname "$f")
+            base=$(basename "$f")
+            newbase="${base/LatestVersionManager-/LatestVersionManager-${VERSION}-}"
+            mv "$f" "$dir/$newbase"
+          done
 
       - name: Upload all artifacts to GitHub Release
         run: gh release upload "${{ github.ref_name }}" dist/**/*.zip dist/**/*.dmg --clobber
