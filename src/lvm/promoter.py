@@ -261,7 +261,7 @@ class Promoter:
         """Remap a versioned filename using the file rename template.
 
         If file_rename_template is set, uses it to build the base name.
-        Tokens: {source_name}, {source_basename}, {source_fullname}
+        Tokens: {source_title}, {source_name}, {source_basename}, {source_fullname}
         The frame number and extension are always preserved from the original.
 
         Examples (template="{source_name}"):
@@ -302,12 +302,14 @@ class Promoter:
             token_input = self.source.sample_filename or self.source.name
             date_fmt = getattr(self.source, "date_format", "")
             self._rename_tokens = derive_source_tokens(
-                token_input, self.task_tokens, date_fmt)
+                token_input, self.task_tokens, date_fmt,
+                source_title=self.source.name)
 
         tokens = self._rename_tokens
 
         # Expand template tokens
         base = template
+        base = base.replace("{source_title}", tokens["source_title"])
         base = base.replace("{source_name}", tokens["source_name"])
         base = base.replace("{source_basename}", tokens["source_basename"])
         base = base.replace("{source_fullname}", tokens["source_fullname"])

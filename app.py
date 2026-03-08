@@ -995,10 +995,11 @@ class ProjectSettingsDialog(QDialog):
 
         template_help = QLabel(
             "Relative paths resolve from each source's directory.\n"
-            "Tokens: {source_dir}, {source_name}, {source_basename},\n"
+            "Tokens: {source_dir}, {source_title}, {source_name}, {source_basename},\n"
             "{source_fullname}, {source_filename}, {project_root}, {group}, {group_root}\n"
             "If {group} is empty, the token and its trailing divider are omitted.\n"
             "{group_root} resolves to the group's root directory (falls back to {project_root}).\n"
+            "{source_title} is the source's in-project display name.\n"
             "Examples: {group_root}/online/{source_name}  |  latest/{group}/{source_basename}_latest"
         )
         template_help.setStyleSheet("color: #999; font-size: 11px;")
@@ -1011,7 +1012,7 @@ class ProjectSettingsDialog(QDialog):
 
         rename_help = QLabel(
             "Controls the output filename (without frame/ext).\n"
-            "Tokens: {source_name}, {source_basename}, {source_fullname}, {group}"
+            "Tokens: {source_title}, {source_name}, {source_basename}, {source_fullname}, {group}"
         )
         rename_help.setStyleSheet("color: #999; font-size: 11px;")
         paths.addRow("", rename_help)
@@ -1197,10 +1198,12 @@ class ProjectSettingsDialog(QDialog):
             sources = config.watched_sources[-3:] if config.watched_sources else []
         if sources:
             for source in sources:
-                tokens = derive_source_tokens(source.sample_filename or source.name, live_task_tokens)
+                tokens = derive_source_tokens(source.sample_filename or source.name,
+                                              live_task_tokens, source_title=source.name)
                 resolved = tpl
                 resolved = resolved.replace("{project_root}", live_root)
                 resolved = resolved.replace("{group_root}", _resolve_group_root(config, source.group) or "<project_root>")
+                resolved = resolved.replace("{source_title}", tokens["source_title"])
                 resolved = resolved.replace("{source_name}", tokens["source_name"])
                 resolved = resolved.replace("{source_basename}", tokens["source_basename"])
                 resolved = resolved.replace("{source_fullname}", tokens["source_fullname"])
@@ -1219,6 +1222,7 @@ class ProjectSettingsDialog(QDialog):
                     dir_str = str(p)
                 # Build sample renamed file
                 rename_resolved = rename_tpl
+                rename_resolved = rename_resolved.replace("{source_title}", tokens["source_title"])
                 rename_resolved = rename_resolved.replace("{source_name}", tokens["source_name"])
                 rename_resolved = rename_resolved.replace("{source_basename}", tokens["source_basename"])
                 rename_resolved = rename_resolved.replace("{source_fullname}", tokens["source_fullname"])
@@ -1232,6 +1236,7 @@ class ProjectSettingsDialog(QDialog):
             resolved = tpl
             resolved = resolved.replace("{project_root}", live_root)
             resolved = resolved.replace("{group_root}", "<group_root>")
+            resolved = resolved.replace("{source_title}", "<source_title>")
             resolved = resolved.replace("{source_name}", "<source_name>")
             resolved = resolved.replace("{source_basename}", "<source_basename>")
             resolved = resolved.replace("{source_fullname}", "<source_fullname>")
@@ -1244,6 +1249,7 @@ class ProjectSettingsDialog(QDialog):
             except OSError:
                 dir_str = str(p)
             rename_resolved = rename_tpl
+            rename_resolved = rename_resolved.replace("{source_title}", "<source_title>")
             rename_resolved = rename_resolved.replace("{source_name}", "<source_name>")
             rename_resolved = rename_resolved.replace("{source_basename}", "<source_basename>")
             rename_resolved = rename_resolved.replace("{source_fullname}", "<source_fullname>")
@@ -1416,10 +1422,11 @@ class LatestPathDialog(QDialog):
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         token_help = QLabel(
-            "Tokens: {source_dir}, {source_name}, {source_basename},\n"
+            "Tokens: {source_dir}, {source_title}, {source_name}, {source_basename},\n"
             "{source_fullname}, {source_filename}, {project_root}, {group}, {group_root}\n"
             "If {group} is empty, the token and its trailing divider are omitted.\n"
             "{group_root} resolves to the group's root directory (falls back to {project_root}).\n"
+            "{source_title} is the source's in-project display name.\n"
             "Examples: ../online  |  {group_root}/latest/{source_name}  |  online/{group}/{source_name}"
         )
         token_help.setStyleSheet("color: #999; font-size: 11px;")
@@ -1442,7 +1449,7 @@ class LatestPathDialog(QDialog):
         # File rename template
         rename_help = QLabel(
             "Controls the output filename (frame number and extension are preserved).\n"
-            "Tokens: {source_name}, {source_basename}, {source_fullname}"
+            "Tokens: {source_title}, {source_name}, {source_basename}, {source_fullname}"
         )
         rename_help.setStyleSheet("color: #999; font-size: 11px;")
         form.addRow("", rename_help)
@@ -1524,10 +1531,12 @@ class LatestPathDialog(QDialog):
 
         if sources:
             for source in sources:
-                tokens = derive_source_tokens(source.sample_filename or source.name, config.task_tokens)
+                tokens = derive_source_tokens(source.sample_filename or source.name,
+                                              config.task_tokens, source_title=source.name)
                 resolved = tpl
                 resolved = resolved.replace("{project_root}", config.effective_project_root or "<project_root>")
                 resolved = resolved.replace("{group_root}", _resolve_group_root(config, source.group) or "<project_root>")
+                resolved = resolved.replace("{source_title}", tokens["source_title"])
                 resolved = resolved.replace("{source_name}", tokens["source_name"])
                 resolved = resolved.replace("{source_basename}", tokens["source_basename"])
                 resolved = resolved.replace("{source_fullname}", tokens["source_fullname"])
@@ -1546,6 +1555,7 @@ class LatestPathDialog(QDialog):
                     dir_str = str(p)
                 # Build sample renamed file
                 rename_resolved = rename_tpl
+                rename_resolved = rename_resolved.replace("{source_title}", tokens["source_title"])
                 rename_resolved = rename_resolved.replace("{source_name}", tokens["source_name"])
                 rename_resolved = rename_resolved.replace("{source_basename}", tokens["source_basename"])
                 rename_resolved = rename_resolved.replace("{source_fullname}", tokens["source_fullname"])
@@ -1559,6 +1569,7 @@ class LatestPathDialog(QDialog):
             resolved = tpl
             resolved = resolved.replace("{project_root}", config.effective_project_root or "<project_root>")
             resolved = resolved.replace("{group_root}", "<group_root>")
+            resolved = resolved.replace("{source_title}", "<source_title>")
             resolved = resolved.replace("{source_name}", "<source_name>")
             resolved = resolved.replace("{source_basename}", "<source_basename>")
             resolved = resolved.replace("{source_fullname}", "<source_fullname>")
@@ -1571,6 +1582,7 @@ class LatestPathDialog(QDialog):
             except OSError:
                 dir_str = str(p)
             rename_resolved = rename_tpl
+            rename_resolved = rename_resolved.replace("{source_title}", "<source_title>")
             rename_resolved = rename_resolved.replace("{source_name}", "<source_name>")
             rename_resolved = rename_resolved.replace("{source_basename}", "<source_basename>")
             rename_resolved = rename_resolved.replace("{source_fullname}", "<source_fullname>")
@@ -2216,10 +2228,12 @@ class DiscoveryDialog(QDialog):
                 tokens = derive_source_tokens(
                     result.sample_filename or source_name,
                     self._config.task_tokens,
+                    source_title=source_name,
                 )
                 tpl = self._config.latest_path_template
                 tpl = tpl.replace("{project_root}", self._config.effective_project_root)
                 tpl = tpl.replace("{group_root}", _resolve_group_root(self._config, source.group))
+                tpl = tpl.replace("{source_title}", tokens["source_title"])
                 tpl = tpl.replace("{source_name}", tokens["source_name"])
                 tpl = tpl.replace("{source_basename}", tokens["source_basename"])
                 tpl = tpl.replace("{source_fullname}", tokens["source_fullname"])
@@ -4364,8 +4378,9 @@ class MainWindow(QMainWindow):
 
         if self.config.latest_path_template and "{" in self.config.latest_path_template:
             tokens_found = _re.findall(r"\{(\w+)\}", self.config.latest_path_template)
-            known = {"project_root", "group_root", "source_name", "source_basename",
-                     "source_fullname", "source_filename", "source_dir", "group"}
+            known = {"project_root", "group_root", "source_title", "source_name",
+                     "source_basename", "source_fullname", "source_filename",
+                     "source_dir", "group"}
             unknown = set(tokens_found) - known
             if unknown:
                 warnings.append(f"Unknown tokens in latest_path_template: {unknown}")
