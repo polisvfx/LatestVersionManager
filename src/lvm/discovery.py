@@ -245,12 +245,13 @@ def _walk_for_versions(
         if first_date_match:
             suggested_date_fmt = _detect_date_format(first_date_match.group(1))
 
-        # Grab a representative filename from the first version folder
+        # Grab a representative filename from the first non-empty version folder
         sample_filename = ""
-        first_vdir = versioned_dirs[0][0]
-        sample_files = _collect_media_files(first_vdir, extensions)
-        if sample_files:
-            sample_filename = sample_files[0].name
+        for vdir, _match in versioned_dirs:
+            sample_files = _collect_media_files(vdir, extensions)
+            if sample_files:
+                sample_filename = sample_files[0].name
+                break
 
         results.append(DiscoveryResult(
             path=str(current),

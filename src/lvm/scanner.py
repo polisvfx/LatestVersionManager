@@ -45,14 +45,30 @@ class VersionScanner:
         tokens = derive_source_tokens(sample, self._task_tokens, self._date_format)
         return tokens["source_basename"]
 
+    def _strip_extension_suffix(self, name: str) -> str:
+        """Strip trailing extension-like suffix from directory names.
+
+        Handles the convention where version directories include the file type
+        as an underscore suffix, e.g. 'hero_comp_v001_exr' for .exr sequences.
+        """
+        name_lower = name.lower()
+        for ext in self.source.file_extensions:
+            suffix = "_" + ext.lstrip(".")  # ".exr" -> "_exr"
+            if name_lower.endswith(suffix.lower()):
+                return name[:len(name) - len(suffix)]
+        return name
+
     def _matches_basename(self, entry_name: str) -> bool:
         """Check if an entry's basename matches the expected basename.
 
         If no expected basename is set, always returns True (no filtering).
+        Strips trailing extension suffixes (e.g. '_exr') from directory names
+        before comparison.
         """
         if not self._expected_basename:
             return True
-        tokens = derive_source_tokens(entry_name, self._task_tokens, self._date_format)
+        clean_name = self._strip_extension_suffix(entry_name)
+        tokens = derive_source_tokens(clean_name, self._task_tokens, self._date_format)
         return tokens["source_basename"] == self._expected_basename
 
     @staticmethod
