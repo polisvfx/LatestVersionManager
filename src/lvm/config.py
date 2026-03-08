@@ -65,10 +65,12 @@ def apply_project_defaults(config: ProjectConfig):
             # Resolve latest target from template using source context
             # Derive tokens from actual filename if available, falling back to source name
             token_input = source.sample_filename or source.name
-            tokens = derive_source_tokens(token_input, config.task_tokens)
+            tokens = derive_source_tokens(token_input, config.task_tokens,
+                                          source_title=source.name)
             tpl = config.latest_path_template
             tpl = tpl.replace("{project_root}", config.effective_project_root)
             tpl = tpl.replace("{group_root}", _resolve_group_root(config, source.group))
+            tpl = tpl.replace("{source_title}", tokens["source_title"])
             tpl = tpl.replace("{source_name}", tokens["source_name"])
             tpl = tpl.replace("{source_basename}", tokens["source_basename"])
             tpl = tpl.replace("{source_fullname}", tokens["source_fullname"])

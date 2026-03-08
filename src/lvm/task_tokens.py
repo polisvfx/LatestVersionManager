@@ -316,11 +316,13 @@ def derive_source_tokens(
     source_path_or_name: str,
     task_patterns: list[str] = None,
     date_format: str = "",
+    source_title: str = "",
 ) -> dict[str, str]:
     """Compute all source name tokens from a filename or path.
 
     Given a path like hero_comp_v001.1001.exr and task_patterns=["comp"], returns:
     {
+        "source_title": "<in-project name>",
         "source_filename": "hero_comp_v001.1001.exr",
         "source_fullname": "hero_comp_v001",
         "source_name": "hero_comp",
@@ -331,9 +333,11 @@ def derive_source_tokens(
         source_path_or_name: A filename or full path. Only the filename part is used.
         task_patterns: List of task token patterns for basename derivation.
         date_format: Date format for stripping dates from basename. Empty disables.
+        source_title: The source's in-project display name (WatchedSource.name).
 
     Returns:
-        Dict with keys: source_filename, source_fullname, source_name, source_basename.
+        Dict with keys: source_title, source_filename, source_fullname,
+        source_name, source_basename.
     """
     if task_patterns is None:
         task_patterns = []
@@ -358,6 +362,7 @@ def derive_source_tokens(
         source_basename = source_name
 
     return {
+        "source_title": source_title,
         "source_filename": filename,
         "source_fullname": fullname,
         "source_name": source_name,

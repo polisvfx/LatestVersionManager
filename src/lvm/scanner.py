@@ -49,11 +49,33 @@ class VersionScanner:
         """Check if an entry's basename matches the expected basename.
 
         If no expected basename is set, always returns True (no filtering).
+
+        Handles the VFX convention where version folders append the file
+        extension as a suffix (e.g. ``shot_comp_v003_exr`` instead of
+        containing ``shot_comp_v003.1001.exr``).  Before computing tokens
+        we strip any trailing ``_ext`` that matches a configured file
+        extension so the derived basename is comparable to the one from
+        the sample *filename*.
         """
         if not self._expected_basename:
             return True
-        tokens = derive_source_tokens(entry_name, self._task_tokens, self._date_format)
+        clean = self._strip_dir_ext_suffix(entry_name)
+        tokens = derive_source_tokens(clean, self._task_tokens, self._date_format)
         return tokens["source_basename"] == self._expected_basename
+
+    def _strip_dir_ext_suffix(self, dirname: str) -> str:
+        """Remove a trailing ``_ext`` from a directory name when it matches
+        one of the configured file extensions.
+
+        Example: ``shot_comp_v003_exr`` → ``shot_comp_v003`` (if ``.exr``
+        is a configured extension).
+        """
+        lower = dirname.lower()
+        for ext in self.source.file_extensions:
+            suffix = "_" + ext.lstrip(".")
+            if lower.endswith(suffix):
+                return dirname[:len(dirname) - len(suffix)]
+        return dirname
 
     @staticmethod
     def _compile_version_pattern(pattern: str, date_format: str = "") -> re.Pattern:
