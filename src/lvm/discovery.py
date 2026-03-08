@@ -118,7 +118,7 @@ def _scan_version_dir(vdir: Path, ver_num: int, extensions: set) -> VersionInfo:
     """
     ver_str = f"v{ver_num:03d}"
     files = _collect_media_files(vdir, extensions)
-    frame_range, frame_count = _detect_frame_range(files)
+    frame_range, frame_count, sub_sequences = _detect_frame_range(files)
 
     total_size = 0
     for f in files:
@@ -133,6 +133,7 @@ def _scan_version_dir(vdir: Path, ver_num: int, extensions: set) -> VersionInfo:
         source_path=str(vdir),
         frame_range=frame_range,
         frame_count=frame_count,
+        sub_sequences=sub_sequences,
         file_count=len(files),
         total_size_bytes=total_size,
         start_timecode=None,  # Lazy: extracted on demand, not during discovery
@@ -339,7 +340,7 @@ def _walk_for_versions(
             display = format_date_display(date_str, fmt)
 
             files = _collect_media_files(ddir, extensions)
-            frame_range, frame_count = _detect_frame_range(files)
+            frame_range, frame_count, sub_sequences = _detect_frame_range(files)
             total_size = 0
             for f in files:
                 try:
@@ -355,6 +356,7 @@ def _walk_for_versions(
                     source_path=str(ddir),
                     frame_range=frame_range,
                     frame_count=frame_count,
+                    sub_sequences=sub_sequences,
                     file_count=len(files),
                     total_size_bytes=total_size,
                     start_timecode=None,
@@ -486,31 +488,42 @@ def _collect_media_files(folder: Path, extensions: set) -> list[Path]:
     return files
 
 
-def _detect_frame_range(files: list[Path]) -> tuple[Optional[str], int]:
-    """Detect frame range from a list of files."""
+def _detect_frame_range(files: list[Path]) -> tuple[Optional[str], int, list]:
+    """Detect frame range from a list of files, grouping by sequence prefix.
+
+    Returns (primary_range_string, primary_frame_count, sub_sequences_list).
+    """
+    from .scanner import _group_files_by_sequence, _detect_frame_range_for_group
+
     if not files:
-        return None, 0
+        return None, 0, []
     if len(files) == 1:
-        return None, 1
+        return None, 1, []
 
-    frames = []
-    for f in files:
-        match = FRAME_RE.search(f.name)
-        if match:
-            frames.append(int(match.group(1)))
+    groups = _group_files_by_sequence(files, FRAME_RE)
 
-    if not frames:
-        return None, len(files)
+    if len(groups) <= 1:
+        group_files = next(iter(groups.values()))
+        range_str, count = _detect_frame_range_for_group(group_files, FRAME_RE)
+        return range_str, count, []
 
-    frames.sort()
-    first, last = frames[0], frames[-1]
-    expected = last - first + 1
-    actual = len(frames)
+    # Multiple groups: compute per-group ranges
+    group_info = []
+    for prefix, group_files in sorted(groups.items()):
+        range_str, count = _detect_frame_range_for_group(group_files, FRAME_RE)
+        display_name = prefix.rstrip("._") if prefix else "(non-sequence)"
+        group_info.append({
+            "name": display_name,
+            "prefix": prefix,
+            "file_count": len(group_files),
+            "frame_range": range_str,
+            "frame_count": count,
+        })
 
-    range_str = f"{first}-{last}"
-    if actual != expected:
-        range_str += f" ({actual}/{expected} frames, gaps detected)"
-    return range_str, actual
+    primary = max(group_info, key=lambda g: g["file_count"])
+    sub_sequences = [g for g in group_info if g is not primary]
+
+    return primary["frame_range"], primary["frame_count"], sub_sequences
 
 
 def _detect_date_format(date_str: str) -> str:

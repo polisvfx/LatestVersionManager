@@ -184,7 +184,7 @@ class VersionScanner:
             logger.debug(f"No matching files in version folder: {folder}")
             return None
 
-        frame_range, frame_count = self._detect_frame_range(files)
+        frame_range, frame_count, sub_sequences = self._detect_frame_range(files)
         total_size = sum(f.stat().st_size for f in files)
 
         return VersionInfo(
@@ -193,6 +193,7 @@ class VersionScanner:
             source_path=str(folder),
             frame_range=frame_range,
             frame_count=frame_count,
+            sub_sequences=sub_sequences,
             file_count=len(files),
             total_size_bytes=total_size,
             start_timecode=None,  # Lazy: extracted on demand via timecode module
@@ -246,39 +247,44 @@ class VersionScanner:
         files.sort()
         return files
 
-    def _detect_frame_range(self, files: list[Path]) -> tuple[Optional[str], int]:
+    def _detect_frame_range(self, files: list[Path]) -> tuple[Optional[str], int, list[dict]]:
         """
-        Detect frame range from a list of files.
-        Returns (range_string, frame_count).
+        Detect frame range from a list of files, grouping by sequence prefix.
+        Returns (primary_range_string, primary_frame_count, sub_sequences_list).
+        The sub_sequences_list is empty when there is only one sequence group.
         """
         if not files:
-            return None, 0
+            return None, 0, []
 
         if len(files) == 1:
-            return None, 1
+            return None, 1, []
 
-        frames = []
-        for f in files:
-            for pattern in self.FRAME_PATTERNS:
-                match = pattern.search(f.name)
-                if match:
-                    frames.append(int(match.group(1)))
-                    break
+        groups = _group_files_by_sequence(files)
 
-        if not frames:
-            return None, len(files)
+        # Single group (or no frame-number files): fast path
+        if len(groups) <= 1:
+            group_files = next(iter(groups.values()))
+            range_str, count = _detect_frame_range_for_group(group_files)
+            return range_str, count, []
 
-        frames.sort()
-        first = frames[0]
-        last = frames[-1]
-        expected_count = last - first + 1
-        actual_count = len(frames)
+        # Multiple groups: compute per-group ranges
+        group_info = []
+        for prefix, group_files in sorted(groups.items()):
+            range_str, count = _detect_frame_range_for_group(group_files)
+            display_name = prefix.rstrip("._") if prefix else "(non-sequence)"
+            group_info.append({
+                "name": display_name,
+                "prefix": prefix,
+                "file_count": len(group_files),
+                "frame_range": range_str,
+                "frame_count": count,
+            })
 
-        range_str = f"{first}-{last}"
-        if actual_count != expected_count:
-            range_str += f" ({actual_count}/{expected_count} frames, gaps detected)"
+        # Select primary: largest group by file_count
+        primary = max(group_info, key=lambda g: g["file_count"])
+        sub_sequences = [g for g in group_info if g is not primary]
 
-        return range_str, actual_count
+        return primary["frame_range"], primary["frame_count"], sub_sequences
 
     def get_latest_version(self) -> Optional[VersionInfo]:
         """Return the highest version number found."""
@@ -292,6 +298,69 @@ class VersionScanner:
 
 # Frame pattern for detecting sequence siblings
 _FRAME_RE = re.compile(r"[._](\d{3,8})\.\w+$")
+
+
+def _group_files_by_sequence(
+    files: list[Path],
+    frame_re: re.Pattern = None,
+) -> dict[str, list[Path]]:
+    """Group files by their sequence prefix (everything before the frame number).
+
+    Files that don't match the frame pattern are placed in a "" (empty string) group.
+
+    Example:
+        sh490_comp_v034.1001.exr       -> prefix "sh490_comp_v034."
+        sh490_comp_v034_Alpha.1001.exr -> prefix "sh490_comp_v034_Alpha."
+    """
+    if frame_re is None:
+        frame_re = _FRAME_RE
+    groups: dict[str, list[Path]] = {}
+    for f in files:
+        match = frame_re.search(f.name)
+        if match:
+            # Include everything up to and including the separator before frame digits
+            prefix = f.name[:match.start() + 1]
+        else:
+            prefix = ""
+        groups.setdefault(prefix, []).append(f)
+    return groups
+
+
+def _detect_frame_range_for_group(
+    files: list[Path],
+    frame_re: re.Pattern = None,
+) -> tuple[Optional[str], int]:
+    """Compute frame range for a single homogeneous sequence group.
+
+    Returns (range_string, frame_count).
+    """
+    if frame_re is None:
+        frame_re = _FRAME_RE
+
+    if not files:
+        return None, 0
+    if len(files) == 1:
+        return None, 1
+
+    frames = []
+    for f in files:
+        match = frame_re.search(f.name)
+        if match:
+            frames.append(int(match.group(1)))
+
+    if not frames:
+        return None, len(files)
+
+    frames.sort()
+    first, last = frames[0], frames[-1]
+    expected = last - first + 1
+    actual = len(frames)
+
+    range_str = f"{first}-{last}"
+    if actual != expected:
+        range_str += f" ({actual}/{expected} frames, gaps detected)"
+
+    return range_str, actual
 
 
 def detect_sequence_from_file(
@@ -398,25 +467,21 @@ def scan_directory_as_version(
     if not files:
         return files, None, 0
 
-    # Detect frame range
-    frames = []
-    for f in files:
-        m = _FRAME_RE.search(f.name)
-        if m:
-            frames.append(int(m.group(1)))
-    frames.sort()
+    # Detect frame range (grouped by sequence prefix to avoid false gaps)
+    groups = _group_files_by_sequence(files)
+    if len(groups) <= 1:
+        group_files = next(iter(groups.values()))
+        range_str, count = _detect_frame_range_for_group(group_files)
+    else:
+        # Multiple sequences: report primary (largest group)
+        best_range, best_count, best_size = None, 0, 0
+        for prefix, group_files in groups.items():
+            r, c = _detect_frame_range_for_group(group_files)
+            if len(group_files) > best_size:
+                best_range, best_count, best_size = r, c, len(group_files)
+        range_str, count = best_range, best_count
 
-    if len(frames) < 2:
-        return files, None, len(files)
-
-    first, last = frames[0], frames[-1]
-    expected = last - first + 1
-    actual = len(frames)
-    range_str = f"{first}-{last}"
-    if actual != expected:
-        range_str += f" ({actual}/{expected} frames, gaps detected)"
-
-    return files, range_str, actual
+    return files, range_str, count
 
 
 def create_manual_version(

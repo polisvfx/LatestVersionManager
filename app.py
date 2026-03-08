@@ -2012,11 +2012,14 @@ class DiscoveryDialog(QDialog):
                 if is_version_ignored:
                     label += "  (ignored)"
 
+                frame_display = v.frame_range or ""
+                if v.sub_sequences:
+                    frame_display += f" (+{len(v.sub_sequences)} layer{'s' if len(v.sub_sequences) > 1 else ''})"
                 child = QTreeWidgetItem([
                     label,
                     str(v.file_count),
                     v.total_size_human,
-                    v.frame_range or "",
+                    frame_display,
                     v.start_timecode or "",
                     "",
                 ])
@@ -2873,9 +2876,12 @@ class BatchPromoteReviewDialog(QDialog):
                     row_status = "orange"
                     status_text = "TC changed"
 
+            batch_frame_display = version.frame_range or "---"
+            if version.sub_sequences:
+                batch_frame_display += f" (+{len(version.sub_sequences)} layer{'s' if len(version.sub_sequences) > 1 else ''})"
             item = QTreeWidgetItem([
                 "", source.name, current_ver, version.version_string,
-                str(version.file_count), version.frame_range or "---",
+                str(version.file_count), batch_frame_display,
                 version.start_timecode or "---", status_text,
             ])
             item.setCheckState(0, Qt.Checked)
@@ -3797,6 +3803,11 @@ class MainWindow(QMainWindow):
             f"Files: {version.file_count}",
             f"Size: {version.total_size_human}",
             f"Frame Range: {version.frame_range or 'N/A'}",
+        ]
+        if version.sub_sequences:
+            for seq in version.sub_sequences:
+                lines.append(f"  + {seq['name']}: {seq['frame_range']} ({seq['file_count']} files)")
+        lines += [
             f"Timecode: {version.start_timecode or 'N/A'}",
             f"Path: {version.source_path}",
         ]
@@ -4507,16 +4518,26 @@ class MainWindow(QMainWindow):
                 date_fmt = getattr(source, "date_format", "")
                 date_display = format_date_display(v.date_string, date_fmt) if date_fmt else v.date_string
 
+            main_frame_display = v.frame_range or "\u2014"
+            if v.sub_sequences:
+                main_frame_display += f" (+{len(v.sub_sequences)} layer{'s' if len(v.sub_sequences) > 1 else ''})"
             item = QTreeWidgetItem([
                 version_label,
                 date_display or "\u2014",
                 str(v.file_count),
                 v.total_size_human,
-                v.frame_range or "\u2014",
+                main_frame_display,
                 v.start_timecode or "\u2014",
                 v.source_path,
             ])
             item.setData(0, Qt.UserRole, v)
+
+            # Tooltip with sub-sequence detail
+            if v.sub_sequences:
+                tooltip_lines = [f"Primary: {v.frame_range or 'N/A'}"]
+                for seq in v.sub_sequences:
+                    tooltip_lines.append(f"  {seq['name']}: {seq['frame_range']} ({seq['file_count']} files)")
+                item.setToolTip(4, "\n".join(tooltip_lines))
 
             if is_manual:
                 # Cyan tint for manually imported versions
