@@ -57,6 +57,7 @@ class VersionInfo:
     source_path: str             # Full path to the version folder or file
     frame_range: Optional[str] = None   # e.g. "1001-1120"
     frame_count: int = 0
+    sub_sequences: list = field(default_factory=list)  # per-layer info when folder has multiple sequences
     file_count: int = 0
     total_size_bytes: int = 0
     start_timecode: Optional[str] = None  # e.g. "01:00:00:00"
