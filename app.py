@@ -3001,6 +3001,12 @@ class MainWindow(QMainWindow):
         logging.getLogger().addHandler(self._log_handler)
         self._log_handler.log_record.connect(self._append_log_entry)
 
+        # Allow DEBUG records to reach the Qt log handler; keep console at INFO
+        logging.getLogger().setLevel(logging.DEBUG)
+        for h in logging.getLogger().handlers:
+            if isinstance(h, logging.StreamHandler) and h is not self._log_handler:
+                h.setLevel(logging.INFO)
+
         self._restore_state()
 
     # --- UI Construction ---
