@@ -26,7 +26,7 @@ DIVIDER_RE = r"[_.\-]"
 VERSION_RE = re.compile(r"[._\-]v(\d+)", re.IGNORECASE)
 
 # Frame number + extension at end of filename: name.1001.exr, name_1001.exr
-FRAME_EXT_RE = re.compile(r"[._](\d{3,8})\.\w+$")
+FRAME_EXT_RE = re.compile(r"[._](\d+)\.\w+$")
 
 # Date patterns in filenames: 6-digit (DDMMYY/YYMMDD) or 8-digit (DDMMYYYY/YYYYMMDD)
 # Bounded by dividers or string start/end to avoid matching frame numbers or reel IDs

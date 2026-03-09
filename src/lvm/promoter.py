@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 _VERSION_RE = re.compile(r"[._\-]v\d+", re.IGNORECASE)
 _DATE_RE = re.compile(r"(?:^|(?<=[._\-]))(\d{6}|\d{8})(?=[._\-]|$)")
 _DOUBLE_DIVIDER_RE = re.compile(r"([_.\-]){2,}")
-_FRAME_EXT_RE = re.compile(r"([._])(\d{3,8})\.(\w+)$")
+_FRAME_EXT_RE = re.compile(r"([._])(\d+)\.(\w+)$")
 
 # Number of threads for parallel file copy operations
 _COPY_WORKERS = 4

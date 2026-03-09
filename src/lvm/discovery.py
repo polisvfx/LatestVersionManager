@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 VERSION_RE = re.compile(r"[._\-]v(\d+)", re.IGNORECASE)
 
 # Frame number in filenames: name.1001.exr, name_1001.exr
-FRAME_RE = re.compile(r"[._](\d{3,8})\.\w+$")
+FRAME_RE = re.compile(r"[._](\d+)\.\w+$")
 
 # Date patterns: 6-digit DDMMYY/YYMMDD or 8-digit, bounded by dividers or string edges
 DATE_RE = re.compile(r"(?:^|(?<=[._\-]))(\d{6}|\d{8})(?=[._\-]|$)")
