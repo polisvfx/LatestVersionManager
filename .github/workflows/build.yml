@@ -239,6 +239,16 @@ jobs:
           cd dist
           zip -r ${{ matrix.artifact_name }}.zip LatestVersionManager/
 
+      # ── macOS: Create auto-updater ZIP ──────────────────────────────────
+      # The DMG is for manual downloads (preserves code signature).
+      # The ZIP of the internal LatestVersionManager/ folder is for the
+      # in-app auto-updater which replaces files inside the .app bundle.
+      - name: Create macOS auto-updater ZIP
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          zip -r ${{ matrix.artifact_name }}.zip LatestVersionManager/
+
       # ── Upload artifact (for every build — kept 7 days) ─────────────────
       - name: Upload build artifact (Windows / Linux)
         if: runner.os != 'macOS'
@@ -248,12 +258,20 @@ jobs:
           path: dist/${{ matrix.artifact_name }}.zip
           retention-days: 7
 
-      - name: Upload build artifact (macOS)
+      - name: Upload build artifact (macOS DMG)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-dmg
+          path: dist/${{ matrix.artifact_name }}.dmg
+          retention-days: 7
+
+      - name: Upload build artifact (macOS ZIP)
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.artifact_name }}.dmg
+          path: dist/${{ matrix.artifact_name }}.zip
           retention-days: 7
 
   # ── Python source distribution (platform-independent zip) ───────────────────

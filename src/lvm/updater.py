@@ -100,7 +100,16 @@ def is_frozen() -> bool:
 
 
 def get_install_dir() -> Optional[Path]:
-    """Return the root installation directory, or None if running from source."""
+    """Return the root installation directory, or None if running from source.
+
+    On macOS the executable lives inside a ``.app`` bundle at
+    ``LatestVersionManager.app/Contents/MacOS/LatestVersionManager``.
+    The auto-updater ZIP contains the *contents* of that ``MacOS/`` folder,
+    so we return that directory directly.
+
+    On Windows / Linux the layout is a flat folder produced by PyInstaller's
+    COLLECT step, and ``sys.executable`` sits at its root.
+    """
     if not is_frozen():
         return None
     return Path(sys.executable).parent
@@ -159,8 +168,9 @@ def _get_ssl_context() -> ssl.SSLContext:
 def check_for_update(current_version: str) -> Optional[ReleaseInfo]:
     """Query GitHub for the latest release and return *ReleaseInfo* if newer.
 
-    Returns ``None`` when the app is already up-to-date or no matching
-    platform asset is found.  Raises *UpdateCheckError* on network errors.
+    Returns ``None`` when the app is already up-to-date.
+    Raises *UpdateCheckError* on network errors or when a newer version
+    exists but no compatible download asset is found for this platform.
     """
     suffix = _get_platform_suffix()
 
@@ -208,8 +218,15 @@ def check_for_update(current_version: str) -> Optional[ReleaseInfo]:
             break
 
     if not asset_url:
-        logger.warning("No matching asset for platform suffix '%s'", suffix)
-        return None
+        # A newer version exists but there is no downloadable asset for this
+        # platform.  Raise instead of returning None (which the caller
+        # interprets as "already up-to-date").
+        version = tag.lstrip("vV")
+        raise UpdateCheckError(
+            f"A new version (v{version}) is available but no download was "
+            f"found for this platform.  Visit the release page to update "
+            f"manually:\n{data.get('html_url', '')}"
+        )
 
     version = tag.lstrip("vV")
 
@@ -307,6 +324,17 @@ def extract_update(zip_path: Path, extract_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Updater script generation
 # ---------------------------------------------------------------------------
+
+def _find_app_bundle(install_dir: Path) -> Optional[Path]:
+    """Walk up from *install_dir* looking for a ``.app`` bundle directory.
+
+    Returns the ``.app`` path if found, otherwise ``None``.
+    """
+    for parent in (install_dir, *install_dir.parents):
+        if parent.suffix == ".app":
+            return parent
+    return None
+
 
 def create_updater_script(
     extracted_dir: Path,
@@ -410,12 +438,18 @@ def _create_unix_updater(
     )
     backup_dir = install_dir.parent / f"{install_dir.name}_backup"
     log_file = Path(tempfile.gettempdir()) / "lvm_update.log"
+
+    # Detect macOS .app bundle so we can ad-hoc re-sign and launch properly
+    app_bundle = _find_app_bundle(install_dir)
+    app_bundle_path = str(app_bundle) if app_bundle else ""
+
     script.write(f"""#!/bin/bash
 PID={pid}
 INSTALL_DIR="{install_dir}"
 UPDATE_DIR="{extracted_dir}"
 BACKUP_DIR="{backup_dir}"
 EXE_NAME="{executable_path.name}"
+APP_BUNDLE="{app_bundle_path}"
 LOG="{log_file}"
 
 log() {{ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG"; }}
@@ -425,6 +459,7 @@ log "PID=$PID"
 log "INSTALL_DIR=$INSTALL_DIR"
 log "UPDATE_DIR=$UPDATE_DIR"
 log "EXE_NAME=$EXE_NAME"
+log "APP_BUNDLE=$APP_BUNDLE"
 
 echo "Waiting for Latest Version Manager to close..."
 log "Waiting for PID $PID to exit..."
@@ -452,12 +487,24 @@ log "Files installed."
 chmod -R +x "$INSTALL_DIR/$EXE_NAME" 2>/dev/null
 find "$INSTALL_DIR" -name "*.so" -o -name "*.dylib" | xargs chmod +x 2>/dev/null
 
+# macOS: ad-hoc re-sign the .app bundle so Gatekeeper allows relaunch
+if [ -n "$APP_BUNDLE" ] && [ -d "$APP_BUNDLE" ]; then
+    log "Ad-hoc re-signing $APP_BUNDLE ..."
+    codesign --force --deep --sign - "$APP_BUNDLE" 2>>"$LOG" || true
+    log "Re-sign done (rc=$?)."
+fi
+
 echo "Cleaning up..."
 rm -rf "$BACKUP_DIR"
 
 echo "Starting Latest Version Manager..."
-log "Starting $INSTALL_DIR/$EXE_NAME"
-"$INSTALL_DIR/$EXE_NAME" &
+if [ -n "$APP_BUNDLE" ] && [ -d "$APP_BUNDLE" ]; then
+    log "Opening $APP_BUNDLE"
+    open "$APP_BUNDLE" &
+else
+    log "Starting $INSTALL_DIR/$EXE_NAME"
+    "$INSTALL_DIR/$EXE_NAME" &
+fi
 
 log "Update complete."
 rm -- "$0"
