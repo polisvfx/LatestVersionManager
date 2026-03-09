@@ -3676,11 +3676,33 @@ class MainWindow(QMainWindow):
         if len(indices) == 1:
             source = self.config.watched_sources[indices[0]]
             msg = f"Remove '{source.name}' from this project?\n\nThis does NOT delete any files on disk."
+            reply = QMessageBox.question(self, "Remove Source", msg)
+            confirmed = reply == QMessageBox.Yes
         else:
-            names = "\n".join(f"  - {self.config.watched_sources[i].name}" for i in indices)
-            msg = f"Remove {len(indices)} sources from this project?\n\n{names}\n\nThis does NOT delete any files on disk."
-        reply = QMessageBox.question(self, "Remove Source", msg)
-        if reply == QMessageBox.Yes:
+            # Custom dialog with scrollable list for many sources
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Remove Sources")
+            dlg.setMinimumWidth(400)
+            layout = QVBoxLayout(dlg)
+
+            layout.addWidget(QLabel(f"Remove {len(indices)} sources from this project?"))
+
+            source_list = QListWidget()
+            source_list.setSelectionMode(QAbstractItemView.NoSelection)
+            source_list.setMaximumHeight(300)
+            for i in indices:
+                source_list.addItem(self.config.watched_sources[i].name)
+            layout.addWidget(source_list)
+
+            layout.addWidget(QLabel("This does NOT delete any files on disk."))
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(dlg.accept)
+            buttons.rejected.connect(dlg.reject)
+            layout.addWidget(buttons)
+
+            confirmed = dlg.exec() == QDialog.Accepted
+        if confirmed:
             for i in sorted(indices, reverse=True):
                 self.config.watched_sources.pop(i)
             if self.config_path:
