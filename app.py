@@ -224,6 +224,35 @@ class UpdateDownloadWorker(QThread):
             self.error.emit(str(e))
 
 
+class ScanWorker(QThread):
+    """Scans all project sources in a background thread."""
+    progress = Signal(int, int, str)  # current_index, total, source_name
+    finished = Signal(dict)           # {source_name: (versions, status_info)}
+    error = Signal(str)
+
+    def __init__(self, config: ProjectConfig, parent=None):
+        super().__init__(parent)
+        self.config = config
+
+    def run(self):
+        try:
+            results = {}
+            total = len(self.config.watched_sources)
+            tc_mode = self.config.timecode_mode
+
+            for i, source in enumerate(self.config.watched_sources):
+                self.progress.emit(i + 1, total, source.name)
+                scanner = VersionScanner(source, self.config.task_tokens)
+                versions = scanner.scan()
+                if tc_mode == "always":
+                    populate_timecodes(versions)
+                results[source.name] = versions
+
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 # ---------------------------------------------------------------------------
 # Version tree with drag-and-drop support for manual version import
 # ---------------------------------------------------------------------------
@@ -1721,6 +1750,7 @@ class DiscoveryWorker(QThread):
     """Runs directory discovery scan in background."""
     finished = Signal(list)   # list of DiscoveryResult
     error = Signal(str)
+    progress = Signal(str, int, int)  # current_path, dirs_scanned, estimated_total
 
     def __init__(self, root_dir: str, max_depth: int = 4, extensions=None,
                  whitelist=None, blacklist=None, parent=None):
@@ -1731,6 +1761,9 @@ class DiscoveryWorker(QThread):
         self.whitelist = whitelist
         self.blacklist = blacklist
 
+    def _on_progress(self, current_path: str, dirs_scanned: int, estimated_total: int):
+        self.progress.emit(current_path, dirs_scanned, estimated_total)
+
     def run(self):
         try:
             results = discover(
@@ -1739,6 +1772,7 @@ class DiscoveryWorker(QThread):
                 extensions=self.extensions,
                 whitelist=self.whitelist,
                 blacklist=self.blacklist,
+                progress_callback=self._on_progress,
             )
             self.finished.emit(results)
         except Exception as e:
@@ -1825,6 +1859,12 @@ class DiscoveryDialog(QDialog):
         filter_row.addStretch()
         layout.addLayout(filter_row)
 
+        # Progress bar (hidden until scan starts)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(True)
+        layout.addWidget(self.progress_bar)
+
         self.status_label = QLabel("Select a directory and click Scan.")
         self.status_label.setStyleSheet("color: #999;")
         layout.addWidget(self.status_label)
@@ -1893,6 +1933,9 @@ class DiscoveryDialog(QDialog):
         self.scan_btn.setEnabled(False)
         self.add_btn.setEnabled(False)
         self.status_label.setText("Scanning...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # indeterminate initially
+        self.progress_bar.setFormat("Estimating scan size...")
 
         # Use project filters if available
         whitelist = self._config.name_whitelist if self._config else None
@@ -1906,6 +1949,7 @@ class DiscoveryDialog(QDialog):
         )
         self._worker.finished.connect(self._on_results)
         self._worker.error.connect(self._on_error)
+        self._worker.progress.connect(self._on_scan_progress)
         self._worker.start()
 
     def _get_existing_source_dirs(self) -> set:
@@ -1921,9 +1965,25 @@ class DiscoveryDialog(QDialog):
         """Check if a discovery result path matches an existing source."""
         return str(Path(result_path).resolve()).lower() in existing_dirs
 
+    def _on_scan_progress(self, current_path: str, dirs_scanned: int, estimated_total: int):
+        """Update progress bar during discovery scan."""
+        if estimated_total > 0 and dirs_scanned > 0:
+            # Switch to determinate mode with percentage
+            self.progress_bar.setRange(0, estimated_total)
+            # Clamp to 95% if we exceed estimate; final 100% comes on completion
+            value = min(dirs_scanned, int(estimated_total * 0.95))
+            self.progress_bar.setValue(value)
+            self.progress_bar.setFormat(f"%p%  ({dirs_scanned}/{estimated_total} directories)")
+        # Show abbreviated path in status label
+        display_path = current_path
+        if len(display_path) > 80:
+            display_path = "..." + display_path[-77:]
+        self.status_label.setText(f"Scanning: {display_path}")
+
     def _on_results(self, results: list):
         self._worker = None
         self.scan_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
         self._results = results
         self._timecodes_populated = False
 
@@ -2070,6 +2130,7 @@ class DiscoveryDialog(QDialog):
     def _on_error(self, msg: str):
         self._worker = None
         self.scan_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
         self.status_label.setText(f"Error: {msg}")
 
     # --- Ignore / context menu ---
@@ -2981,6 +3042,7 @@ class MainWindow(QMainWindow):
         self._batch_promote_index: int = 0
         self._force_promote: bool = False
         self._target_conflicts: dict = {}
+        self._scan_worker: ScanWorker = None
         self._thumb_worker: ThumbnailWorker = None
 
         # File watcher
@@ -4342,9 +4404,108 @@ class MainWindow(QMainWindow):
             self.source_list.setCurrentRow(0)
 
     def _refresh_all(self):
-        """Re-scan all sources."""
+        """Re-scan all sources in background thread."""
+        if not self.config or not self.config.watched_sources:
+            self._reload_ui()
+            return
+
+        # Disable refresh during scan
+        self.btn_refresh.setEnabled(False)
+        self.btn_promote.setEnabled(False)
+        self.btn_promote_all.setEnabled(False)
+        self.statusBar().showMessage("Scanning sources...")
+
+        self._scan_worker = ScanWorker(self.config, parent=self)
+        self._scan_worker.progress.connect(self._on_refresh_progress)
+        self._scan_worker.finished.connect(self._on_refresh_complete)
+        self._scan_worker.error.connect(self._on_refresh_error)
+        self._scan_worker.start()
+
+    def _on_refresh_progress(self, current: int, total: int, source_name: str):
+        self.statusBar().showMessage(f"Scanning source {current}/{total}: {source_name}")
+
+    def _on_refresh_error(self, msg: str):
+        self._scan_worker = None
+        self.btn_refresh.setEnabled(True)
+        self.statusBar().showMessage(f"Scan error: {msg}")
+
+    def _on_refresh_complete(self, scan_results: dict):
+        """Called when background scan finishes. Populate caches and rebuild UI."""
+        self._scan_worker = None
+
+        # Store scanned versions
         self._versions_cache.clear()
-        self._reload_ui()
+        self._scanners.clear()
+        self._promoters.clear()
+        self._manual_versions.clear()
+        self._current_source = None
+        self._source_status = {}
+
+        for source in self.config.watched_sources:
+            versions = scan_results.get(source.name, [])
+            self._scanners[source.name] = VersionScanner(source, self.config.task_tokens)
+            self._versions_cache[source.name] = versions
+
+            current = None
+            status = "no_target"
+            highest_ver = versions[-1].version_string if versions else None
+
+            if source.latest_target:
+                self._promoters[source.name] = Promoter(source, self.config.task_tokens, self.config.project_name)
+                promoter = self._promoters[source.name]
+                current = promoter.get_current_version()
+
+                if not current:
+                    status = "no_version"
+                elif current.version == highest_ver:
+                    integrity = promoter.verify()
+                    if integrity["valid"]:
+                        status = "highest"
+                    elif "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "integrity_fail"
+                elif self._has_newer_versions_since(current, versions):
+                    status = "newer"
+                else:
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "deliberate"
+
+            self._source_status[source.name] = {
+                "current": current,
+                "status": status,
+                "has_overrides": source.has_overrides,
+            }
+
+        # Conflict detection
+        from src.lvm.conflicts import detect_target_conflicts
+        conflicts = detect_target_conflicts(self.config)
+        self._target_conflicts = {}
+        for target, name_a, name_b in conflicts:
+            self._target_conflicts.setdefault(name_a, []).append(name_b)
+            self._target_conflicts.setdefault(name_b, []).append(name_a)
+
+        self.source_list.clear()
+        self.version_tree.clear()
+        self.history_tree.clear()
+
+        enabled = True
+        self.btn_project_settings.setEnabled(enabled)
+        self.btn_manage_groups.setEnabled(enabled)
+        self.btn_refresh.setEnabled(enabled)
+        self.btn_import_version.setEnabled(False)
+        self.watch_toggle.setEnabled(enabled)
+        self.btn_promote.setEnabled(False)
+        self.btn_revert.setEnabled(False)
+        self.btn_promote_all.setEnabled(len(self.config.watched_sources) > 0 and self._worker is None)
+        self.btn_promote_all.setText("Promote All to Latest")
+
+        self._populate_source_list()
+        if self.source_list.count() > 0:
+            self.source_list.setCurrentRow(0)
         self.statusBar().showMessage("Refreshed all sources")
 
     def _export_report(self):
