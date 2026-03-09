@@ -8,9 +8,11 @@ and reports what it found. Does NOT modify any project files — report only.
 import os
 import re
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 from .models import DiscoveryResult, VersionInfo
 
@@ -32,12 +34,60 @@ MEDIA_EXTENSIONS = {
 }
 
 
+def _estimate_dir_count(root: Path, max_depth: int) -> int:
+    """Quick estimate of directory count by scanning the first 2 depth levels."""
+    count = 0
+    try:
+        for entry in os.scandir(root):
+            if entry.is_dir() and not entry.name.startswith("."):
+                count += 1
+                if max_depth > 1:
+                    try:
+                        for sub in os.scandir(entry.path):
+                            if sub.is_dir() and not sub.name.startswith("."):
+                                count += 1
+                    except (PermissionError, OSError):
+                        pass
+    except (PermissionError, OSError):
+        pass
+    return max(count, 1)
+
+
+class _ProgressTracker:
+    """Thread-safe progress counter with throttled callback."""
+
+    def __init__(self, callback: Optional[Callable], estimated_total: int):
+        self._callback = callback
+        self.estimated_total = estimated_total
+        self._count = 0
+        self._lock = threading.Lock()
+        self._last_callback_time = 0.0
+
+    def increment(self, current_path: str):
+        if self._callback is None:
+            return
+        with self._lock:
+            self._count += 1
+            now = time.monotonic()
+            # Throttle callbacks to max once per 100ms
+            if now - self._last_callback_time < 0.1:
+                return
+            self._last_callback_time = now
+            count = self._count
+        self._callback(current_path, count, self.estimated_total)
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+
 def discover(
     root_dir: str,
     max_depth: int = 4,
     extensions: Optional[list] = None,
     whitelist: Optional[list] = None,
     blacklist: Optional[list] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> list[DiscoveryResult]:
     """Scan a directory tree for versioned content.
 
@@ -53,6 +103,8 @@ def discover(
                    contains at least one of these keywords (case-insensitive).
         blacklist: If provided, drop results whose name or relative path
                    contains any of these keywords (case-insensitive).
+        progress_callback: Optional callback(current_path, dirs_scanned, estimated_total)
+                          called periodically during scan for progress reporting.
 
     Returns:
         List of DiscoveryResult, one per location that has versioned content.
@@ -63,9 +115,20 @@ def discover(
         return []
 
     valid_extensions = set(extensions) if extensions else MEDIA_EXTENSIONS
-    results = []
 
-    _walk_for_versions(root, root, 0, max_depth, valid_extensions, results, visited={root})
+    # Phase 1: Quick pre-count for progress estimation
+    estimated = 0
+    if progress_callback:
+        progress_callback("Estimating scan size...", 0, 0)
+        estimated = _estimate_dir_count(root, max_depth)
+
+    tracker = _ProgressTracker(progress_callback, estimated)
+
+    # Phase 2: Parallel walk of top-level subdirectories
+    results = []
+    # First process the root itself (depth 0)
+    _walk_for_versions(root, root, 0, max_depth, valid_extensions, results,
+                       visited={root}, progress=tracker)
 
     # Apply whitelist/blacklist filtering
     if whitelist or blacklist:
@@ -148,12 +211,16 @@ def _walk_for_versions(
     extensions: set,
     results: list,
     visited: set = None,
+    progress: _ProgressTracker = None,
 ):
     """Recursively walk directories looking for versioned content."""
     if visited is None:
         visited = set()
     if depth > max_depth:
         return
+
+    if progress is not None:
+        progress.increment(str(current))
 
     try:
         entries = sorted(current.iterdir())
@@ -454,7 +521,7 @@ def _walk_for_versions(
             logger.debug(f"Skipping already-visited path (symlink loop?): {subdir}")
             continue
         visited.add(real_path)
-        _walk_for_versions(subdir, root, depth + 1, max_depth, extensions, results, visited)
+        _walk_for_versions(subdir, root, depth + 1, max_depth, extensions, results, visited, progress)
 
 
 def _populate_date_on_vi(vi: VersionInfo, name: str):
