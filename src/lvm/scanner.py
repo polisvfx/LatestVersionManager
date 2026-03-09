@@ -23,7 +23,7 @@ class VersionScanner:
 
     # Common frame padding patterns: name.1001.exr, name.%04d.exr, name_1001.exr
     FRAME_PATTERNS = [
-        re.compile(r"[._](\d{3,8})\.\w+$"),        # name.1001.exr or name_1001.exr
+        re.compile(r"[._](\d+)\.\w+$"),        # name.1001.exr or name_1001.exr
     ]
 
     def __init__(self, watched_source: WatchedSource, task_tokens: list[str] = None):
@@ -107,6 +107,8 @@ class VersionScanner:
             return []
 
         versions = []
+        # Collect flat versioned files for grouping by (version_number, date)
+        versioned_files: dict[tuple, dict] = {}  # (ver_num, date_sortable) -> {info, files}
 
         for entry in sorted(source_path.iterdir()):
             version_info = None
@@ -115,13 +117,72 @@ class VersionScanner:
                 if not self._matches_basename(entry.name):
                     continue
                 version_info = self._scan_version_folder(entry)
+                if version_info:
+                    versions.append(version_info)
             elif entry.is_file():
                 if not self._matches_basename(entry.name):
                     continue
-                version_info = self._scan_version_file(entry)
+                # Group flat files by version+date to detect frame sequences
+                if entry.suffix.lower() not in self.source.file_extensions:
+                    continue
+                result = self._extract_version(entry.name)
+                if result is None:
+                    continue
+                ver_str, ver_num, date_str, date_sortable = result
+                group_key = (ver_num, date_sortable)
+                if group_key not in versioned_files:
+                    versioned_files[group_key] = {
+                        "ver_str": ver_str, "ver_num": ver_num,
+                        "date_str": date_str, "date_sortable": date_sortable,
+                        "files": [],
+                    }
+                versioned_files[group_key]["files"].append(entry)
 
-            if version_info:
-                versions.append(version_info)
+        # Process grouped flat files
+        for group_key, group in versioned_files.items():
+            files = group["files"]
+            if len(files) == 1:
+                # Single file — no frame sequence
+                f = files[0]
+                try:
+                    file_size = f.stat().st_size
+                except OSError:
+                    file_size = 0
+                versions.append(VersionInfo(
+                    version_string=group["ver_str"],
+                    version_number=group["ver_num"],
+                    source_path=str(f),
+                    frame_range=None,
+                    frame_count=1,
+                    file_count=1,
+                    total_size_bytes=file_size,
+                    start_timecode=None,
+                    date_string=group["date_str"],
+                    date_sortable=group["date_sortable"],
+                ))
+            else:
+                # Multiple files — detect frame sequences
+                file_paths = [Path(f) for f in files]
+                frame_range, frame_count, sub_sequences = self._detect_frame_range(file_paths)
+                total_size = 0
+                for f in files:
+                    try:
+                        total_size += f.stat().st_size
+                    except OSError:
+                        pass
+                versions.append(VersionInfo(
+                    version_string=group["ver_str"],
+                    version_number=group["ver_num"],
+                    source_path=str(files[0].parent),
+                    frame_range=frame_range,
+                    frame_count=frame_count,
+                    sub_sequences=sub_sequences,
+                    file_count=len(files),
+                    total_size_bytes=total_size,
+                    start_timecode=None,
+                    date_string=group["date_str"],
+                    date_sortable=group["date_sortable"],
+                ))
 
         versions.sort(key=lambda v: (v.date_sortable, v.version_number))
         return versions
@@ -297,7 +358,18 @@ class VersionScanner:
 # ---------------------------------------------------------------------------
 
 # Frame pattern for detecting sequence siblings
-_FRAME_RE = re.compile(r"[._](\d{3,8})\.\w+$")
+_FRAME_RE = re.compile(r"[._](\d+)\.\w+$")
+
+
+def _detect_padding(digit_str: str) -> int:
+    """Return the padding width for a frame number string.
+
+    If the string has leading zeros, padding = len(digit_str).
+    Otherwise padding = 0 (unpadded).
+    """
+    if digit_str.startswith("0") and len(digit_str) > 1:
+        return len(digit_str)
+    return 0
 
 
 def _group_files_by_sequence(
@@ -333,6 +405,7 @@ def _detect_frame_range_for_group(
     """Compute frame range for a single homogeneous sequence group.
 
     Returns (range_string, frame_count).
+    Preserves padding in the range display (e.g. "00991-01120").
     """
     if frame_re is None:
         frame_re = _FRAME_RE
@@ -343,20 +416,32 @@ def _detect_frame_range_for_group(
         return None, 1
 
     frames = []
+    max_digit_width = 0
+    has_leading_zeros = False
     for f in files:
         match = frame_re.search(f.name)
         if match:
-            frames.append(int(match.group(1)))
+            digit_str = match.group(1)
+            max_digit_width = max(max_digit_width, len(digit_str))
+            if digit_str.startswith("0") and len(digit_str) > 1:
+                has_leading_zeros = True
+            frames.append(int(digit_str))
 
     if not frames:
         return None, len(files)
+
+    # Determine padding: use max digit width if any frame has leading zeros
+    padding = max_digit_width if has_leading_zeros else 0
 
     frames.sort()
     first, last = frames[0], frames[-1]
     expected = last - first + 1
     actual = len(frames)
 
-    range_str = f"{first}-{last}"
+    if padding > 0:
+        range_str = f"{str(first).zfill(padding)}-{str(last).zfill(padding)}"
+    else:
+        range_str = f"{first}-{last}"
     if actual != expected:
         range_str += f" ({actual}/{expected} frames, gaps detected)"
 
