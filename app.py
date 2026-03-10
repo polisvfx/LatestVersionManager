@@ -9,6 +9,7 @@ import logging
 import platform
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -240,13 +241,31 @@ class ScanWorker(QThread):
             total = len(self.config.watched_sources)
             tc_mode = self.config.timecode_mode
 
-            for i, source in enumerate(self.config.watched_sources):
-                self.progress.emit(i + 1, total, source.name)
+            def _scan_one(source):
                 scanner = VersionScanner(source, self.config.task_tokens)
                 versions = scanner.scan()
                 if tc_mode == "always":
                     populate_timecodes(versions)
-                results[source.name] = versions
+                return source.name, versions
+
+            worker_count = min(8, total)
+            if worker_count > 1:
+                completed = 0
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    futures = {
+                        executor.submit(_scan_one, s): s
+                        for s in self.config.watched_sources
+                    }
+                    for future in as_completed(futures):
+                        name, versions = future.result()
+                        results[name] = versions
+                        completed += 1
+                        self.progress.emit(completed, total, name)
+            else:
+                for i, source in enumerate(self.config.watched_sources):
+                    self.progress.emit(i + 1, total, source.name)
+                    name, versions = _scan_one(source)
+                    results[name] = versions
 
             self.finished.emit(results)
         except Exception as e:

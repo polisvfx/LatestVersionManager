@@ -124,11 +124,64 @@ def discover(
 
     tracker = _ProgressTracker(progress_callback, estimated)
 
-    # Phase 2: Parallel walk of top-level subdirectories
+    # Phase 2: Walk the directory tree with parallel top-level branches
     results = []
-    # First process the root itself (depth 0)
-    _walk_for_versions(root, root, 0, max_depth, valid_extensions, results,
+    # Process root directory entries (depth 0) — classify into versioned/dated/subdirs
+    root_results = []
+    _walk_for_versions(root, root, 0, 0, valid_extensions, root_results,
                        visited={root}, progress=tracker)
+    results.extend(root_results)
+
+    # Collect top-level non-versioned subdirectories to recurse into
+    top_subdirs = []
+    try:
+        for entry in sorted(root.iterdir()):
+            if entry.name.startswith(".") or not entry.is_dir():
+                continue
+            # Skip versioned/dated dirs (already handled by depth-0 walk above)
+            if VERSION_RE.search(entry.name):
+                continue
+            date_match = DATE_RE.search(entry.name)
+            if date_match and _is_plausible_date(date_match.group(1)):
+                continue
+            top_subdirs.append(entry)
+    except PermissionError:
+        logger.debug(f"Permission denied listing root: {root}")
+
+    # Dispatch top-level subdirectories in parallel
+    if max_depth >= 1 and top_subdirs:
+        worker_count = min(8, len(top_subdirs))
+        if worker_count > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {}
+                for subdir in top_subdirs:
+                    try:
+                        real_path = subdir.resolve()
+                    except OSError:
+                        continue
+                    # Each branch gets its own results list and visited set
+                    branch_results = []
+                    branch_visited = {root, real_path}
+                    future = executor.submit(
+                        _walk_for_versions, subdir, root, 1, max_depth,
+                        valid_extensions, branch_results, branch_visited,
+                        tracker)
+                    futures[future] = branch_results
+                for future in as_completed(futures):
+                    try:
+                        future.result()  # propagate exceptions
+                    except Exception as e:
+                        logger.debug(f"Error in parallel walk branch: {e}")
+                    results.extend(futures[future])
+        else:
+            # Single subdirectory — no thread overhead needed
+            subdir = top_subdirs[0]
+            try:
+                real_path = subdir.resolve()
+            except OSError:
+                real_path = subdir
+            _walk_for_versions(subdir, root, 1, max_depth, valid_extensions,
+                               results, visited={root, real_path}, progress=tracker)
 
     # Apply whitelist/blacklist filtering
     if whitelist or blacklist:
