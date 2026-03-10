@@ -74,6 +74,44 @@ class VersionInfo:
             size /= 1024
         return f"{size:.1f} PB"
 
+    def to_dict(self) -> dict:
+        """Serialize to a JSON-compatible dict."""
+        d = {
+            "version_string": self.version_string,
+            "version_number": self.version_number,
+            "source_path": self.source_path,
+            "frame_count": self.frame_count,
+            "file_count": self.file_count,
+            "total_size_bytes": self.total_size_bytes,
+            "date_sortable": self.date_sortable,
+        }
+        if self.frame_range is not None:
+            d["frame_range"] = self.frame_range
+        if self.sub_sequences:
+            d["sub_sequences"] = self.sub_sequences
+        if self.start_timecode is not None:
+            d["start_timecode"] = self.start_timecode
+        if self.date_string is not None:
+            d["date_string"] = self.date_string
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "VersionInfo":
+        """Deserialize from a dict."""
+        return cls(
+            version_string=data["version_string"],
+            version_number=data["version_number"],
+            source_path=data["source_path"],
+            frame_range=data.get("frame_range"),
+            frame_count=data.get("frame_count", 0),
+            sub_sequences=data.get("sub_sequences", []),
+            file_count=data.get("file_count", 0),
+            total_size_bytes=data.get("total_size_bytes", 0),
+            start_timecode=data.get("start_timecode"),
+            date_string=data.get("date_string"),
+            date_sortable=data.get("date_sortable", 0),
+        )
+
 
 @dataclass
 class HistoryEntry:

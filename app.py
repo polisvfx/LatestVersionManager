@@ -3397,6 +3397,9 @@ class MainWindow(QMainWindow):
         self.log_dock.setVisible(False)
 
         # Status bar
+        self._scan_indicator = QLabel("")
+        self._scan_indicator.setStyleSheet("color: #888; font-size: 11px; margin-right: 8px;")
+        self.statusBar().addPermanentWidget(self._scan_indicator)
         self.statusBar().showMessage("Ready")
 
     def _build_menu(self):
@@ -3627,7 +3630,18 @@ class MainWindow(QMainWindow):
             self.config = load_config(path)
             self.config_path = path
             self._add_to_recent(path)
-            self._reload_ui()
+
+            # Try cache-first for fast startup
+            from src.lvm.scan_cache import load_cache
+            cached = load_cache(path, self.config.watched_sources)
+
+            if cached:
+                self._reload_ui_from_cache(cached)
+                self._trigger_background_rescan()
+            else:
+                self._reload_ui()
+                self._save_scan_cache()
+
             self.project_label.setText(f"{self.config.project_name}")
             self.project_label.setStyleSheet("color: #ccc; font-weight: bold;")
             self.statusBar().showMessage(f"Loaded: {path}")
@@ -4212,6 +4226,116 @@ class MainWindow(QMainWindow):
         if self.source_list.count() > 0:
             self.source_list.setCurrentRow(0)
 
+    def _reload_ui_from_cache(self, cached_versions: dict):
+        """Populate UI from cached version data with live status computation."""
+        self.source_list.clear()
+        self.version_tree.clear()
+        self.history_tree.clear()
+        self._scanners.clear()
+        self._promoters.clear()
+        self._versions_cache.clear()
+        self._manual_versions.clear()
+        self._current_source = None
+
+        enabled = self.config is not None
+        self.btn_project_settings.setEnabled(enabled)
+        self.btn_manage_groups.setEnabled(enabled)
+        self.btn_refresh.setEnabled(enabled)
+        self.btn_import_version.setEnabled(False)
+        self.watch_toggle.setEnabled(enabled)
+        self.btn_promote.setEnabled(False)
+        self.btn_revert.setEnabled(False)
+        has_sources = self.config is not None and len(self.config.watched_sources) > 0
+        self.btn_promote_all.setEnabled(has_sources and self._worker is None)
+        self.btn_promote_all.setText("Promote All to Latest")
+
+        if not self.config:
+            self.current_label.setText("No project loaded")
+            self.integrity_label.setText("")
+            self.btn_promote_all.setEnabled(False)
+            return
+
+        self._source_status: dict[str, dict] = {}
+        tc_mode = self.config.timecode_mode
+
+        for source in self.config.watched_sources:
+            self._scanners[source.name] = VersionScanner(source, self.config.task_tokens)
+            # Use cached versions instead of scanning
+            versions = cached_versions.get(source.name, [])
+            if tc_mode == "always":
+                populate_timecodes(versions)
+            self._versions_cache[source.name] = versions
+
+            current = None
+            status = "no_target"
+            highest_ver = versions[-1].version_string if versions else None
+
+            if source.latest_target:
+                self._promoters[source.name] = Promoter(source, self.config.task_tokens, self.config.project_name)
+                promoter = self._promoters[source.name]
+                current = promoter.get_current_version()
+
+                if not current:
+                    status = "no_version"
+                elif current.version == highest_ver:
+                    integrity = promoter.verify()
+                    if integrity["valid"]:
+                        status = "highest"
+                    elif "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "integrity_fail"
+                elif self._has_newer_versions_since(current, versions):
+                    status = "newer"
+                else:
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "deliberate"
+
+            self._source_status[source.name] = {
+                "current": current,
+                "status": status,
+                "has_overrides": source.has_overrides,
+            }
+
+        # Conflict detection
+        from src.lvm.conflicts import detect_target_conflicts
+        conflicts = detect_target_conflicts(self.config)
+        self._target_conflicts = {}
+        for target, name_a, name_b in conflicts:
+            self._target_conflicts.setdefault(name_a, []).append(name_b)
+            self._target_conflicts.setdefault(name_b, []).append(name_a)
+
+        self._populate_source_list()
+        if self.source_list.count() > 0:
+            self.source_list.setCurrentRow(0)
+
+    def _trigger_background_rescan(self):
+        """Start a background rescan after loading from cache."""
+        if not self.config or not self.config.watched_sources:
+            return
+        if self._scan_worker is not None:
+            return
+        self._scan_indicator.setText("Updating...")
+        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
+        self._scan_worker = ScanWorker(self.config, parent=self)
+        self._scan_worker.progress.connect(self._on_refresh_progress)
+        self._scan_worker.finished.connect(self._on_refresh_complete)
+        self._scan_worker.error.connect(self._on_refresh_error)
+        self._scan_worker.start()
+
+    def _save_scan_cache(self):
+        """Save current _versions_cache to disk."""
+        if not self.config_path or not self.config:
+            return
+        from src.lvm.scan_cache import save_cache
+        try:
+            save_cache(self.config_path, self.config.watched_sources, self._versions_cache)
+        except Exception as e:
+            logging.getLogger(__name__).warning("Failed to save scan cache: %s", e)
+
     def _source_matches_search(self, source: WatchedSource, query: str) -> bool:
         """Check if a source matches the search query (name, filename, task)."""
         if not query:
@@ -4404,6 +4528,8 @@ class MainWindow(QMainWindow):
         self.btn_refresh.setEnabled(False)
         self.btn_promote.setEnabled(False)
         self.btn_promote_all.setEnabled(False)
+        self._scan_indicator.setText("Updating...")
+        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
         self.statusBar().showMessage("Scanning sources...")
 
         self._scan_worker = ScanWorker(self.config, parent=self)
@@ -4418,6 +4544,7 @@ class MainWindow(QMainWindow):
     def _on_refresh_error(self, msg: str):
         self._scan_worker = None
         self.btn_refresh.setEnabled(True)
+        self._scan_indicator.setText("")
         self.statusBar().showMessage(f"Scan error: {msg}")
 
     def _on_refresh_complete(self, scan_results: dict):
@@ -4497,6 +4624,10 @@ class MainWindow(QMainWindow):
         self._populate_source_list()
         if self.source_list.count() > 0:
             self.source_list.setCurrentRow(0)
+
+        # Save scan results to cache and clear indicator
+        self._save_scan_cache()
+        self._scan_indicator.setText("")
         self.statusBar().showMessage("Refreshed all sources")
 
     def _export_report(self):
