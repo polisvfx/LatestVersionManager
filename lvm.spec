@@ -21,6 +21,9 @@ APP_VERSION = _ns.get('__version__', '0.0.0')
 # Collect all PySide6 plugins needed for the app
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
+# Collect the bundled ffmpeg binary from imageio-ffmpeg
+_ffmpeg_binaries = collect_data_files('imageio_ffmpeg', subdir='binaries')
+
 # ── Analysis ──────────────────────────────────────────────────────────────────
 a = Analysis(
     ['app.py'],
@@ -33,7 +36,7 @@ a = Analysis(
         ('resources/mp_logo_256.png', 'resources'),
         # Bundle the src package explicitly (it's a namespace package)
         ('src/lvm/*.py', 'src/lvm'),
-    ],
+    ] + _ffmpeg_binaries,
     hiddenimports=[
         # watchdog uses platform-specific backends selected at runtime
         'watchdog.observers',
@@ -58,7 +61,11 @@ a = Analysis(
         'src.lvm.elevation',
         'src.lvm.task_tokens',
         'src.lvm.timecode',
+        'src.lvm.thumbnail',
         'src.lvm.updater',
+        # Bundled ffmpeg binary provider
+        'imageio_ffmpeg',
+        'imageio_ffmpeg._utils',
     ],
     hookspath=[],
     hooksconfig={},

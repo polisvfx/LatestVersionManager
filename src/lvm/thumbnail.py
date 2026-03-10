@@ -17,6 +17,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _app_dir() -> Optional[Path]:
+    """Return the directory containing the running executable (frozen) or script."""
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return None
+
+
 def _subprocess_kwargs() -> dict:
     """Return platform-specific kwargs to suppress console windows on Windows."""
     kwargs = {}
@@ -41,11 +48,21 @@ _CONTAINER_EXTENSIONS = {".mov", ".mxf", ".mp4", ".avi"}
 
 
 def find_oiiotool() -> Optional[str]:
-    """Locate oiiotool on PATH. Caches result."""
+    """Locate oiiotool on PATH or next to the executable. Caches result."""
     global _oiiotool_path, _oiiotool_checked
     if _oiiotool_checked:
         return _oiiotool_path
     _oiiotool_checked = True
+    # Check next to the executable (portable / manually placed)
+    app_dir = _app_dir()
+    if app_dir:
+        name = "oiiotool.exe" if sys.platform == "win32" else "oiiotool"
+        candidate = app_dir / name
+        if candidate.is_file():
+            _oiiotool_path = str(candidate)
+            logger.debug(f"Found bundled oiiotool: {_oiiotool_path}")
+            return _oiiotool_path
+    # Fall back to system PATH
     _oiiotool_path = shutil.which("oiiotool")
     if _oiiotool_path:
         logger.debug(f"Found oiiotool: {_oiiotool_path}")
@@ -53,11 +70,31 @@ def find_oiiotool() -> Optional[str]:
 
 
 def find_ffmpeg() -> Optional[str]:
-    """Locate ffmpeg on PATH. Caches result."""
+    """Locate ffmpeg: bundled (imageio-ffmpeg) → next to exe → system PATH."""
     global _ffmpeg_path, _ffmpeg_checked
     if _ffmpeg_checked:
         return _ffmpeg_path
     _ffmpeg_checked = True
+    # 1. Try bundled ffmpeg from imageio-ffmpeg package
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+        bundled = get_ffmpeg_exe()
+        if bundled and Path(bundled).is_file():
+            _ffmpeg_path = bundled
+            logger.debug(f"Found bundled ffmpeg (imageio-ffmpeg): {_ffmpeg_path}")
+            return _ffmpeg_path
+    except (ImportError, RuntimeError):
+        pass
+    # 2. Check next to the executable (portable / manually placed)
+    app_dir = _app_dir()
+    if app_dir:
+        name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+        candidate = app_dir / name
+        if candidate.is_file():
+            _ffmpeg_path = str(candidate)
+            logger.debug(f"Found portable ffmpeg: {_ffmpeg_path}")
+            return _ffmpeg_path
+    # 3. Fall back to system PATH
     _ffmpeg_path = shutil.which("ffmpeg")
     if _ffmpeg_path:
         logger.debug(f"Found ffmpeg: {_ffmpeg_path}")
