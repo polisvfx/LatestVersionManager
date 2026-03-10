@@ -3057,11 +3057,14 @@ class MainWindow(QMainWindow):
         self._current_source: WatchedSource = None
         self._worker: PromoteWorker = None
         self._promoting_source_name: str = None
+        self._promoting_version: VersionInfo = None
+        self._fallback_original_mode: str = None  # original link_mode before copy fallback
         self._batch_promote_list: list = []
         self._batch_promote_index: int = 0
         self._force_promote: bool = False
         self._target_conflicts: dict = {}
         self._scan_worker: ScanWorker = None
+        self._refresh_select_source: str = None  # source name to re-select after background refresh
         self._thumb_worker: ThumbnailWorker = None
 
         # File watcher
@@ -3699,7 +3702,7 @@ class MainWindow(QMainWindow):
             self.project_label.setText(f"{self.config.project_name}")
             if self.config_path:
                 self._save_project()
-            self._reload_ui()
+            self._refresh_all_with_selection()
             self.statusBar().showMessage("Project settings updated")
 
     def _open_discover(self):
@@ -4136,9 +4139,9 @@ class MainWindow(QMainWindow):
         """Promote the next source in the batch list."""
         if self._batch_promote_index >= len(self._batch_promote_list):
             # All done
-            self._reload_ui()
             count = len(self._batch_promote_list)
             self._batch_promote_list = []
+            self._refresh_all_with_selection()
             self.statusBar().showMessage(f"Batch promotion complete: {count} source(s)")
             return
 
@@ -4546,10 +4549,21 @@ class MainWindow(QMainWindow):
         if self.source_list.count() > 0:
             self.source_list.setCurrentRow(0)
 
+    def _refresh_all_with_selection(self, select_source: str = None):
+        """Re-scan all sources in background, restoring the given source selection on completion."""
+        if select_source is None and self._current_source:
+            select_source = self._current_source.name
+        self._refresh_select_source = select_source
+        self._refresh_all()
+
     def _refresh_all(self):
         """Re-scan all sources in background thread."""
         if not self.config or not self.config.watched_sources:
             self._reload_ui()
+            return
+
+        # If a scan is already running, let it complete
+        if self._scan_worker is not None:
             return
 
         # Disable refresh during scan
@@ -4650,7 +4664,17 @@ class MainWindow(QMainWindow):
         self.btn_promote_all.setText("Promote All to Latest")
 
         self._populate_source_list()
-        if self.source_list.count() > 0:
+
+        # Restore selection if a specific source was requested
+        restored = False
+        if self._refresh_select_source:
+            for i in range(self.source_list.count()):
+                if self.source_list.item(i).data(Qt.UserRole) == self._refresh_select_source:
+                    self.source_list.setCurrentRow(i)
+                    restored = True
+                    break
+            self._refresh_select_source = None
+        if not restored and self.source_list.count() > 0:
             self.source_list.setCurrentRow(0)
 
         # Save scan results to cache and clear indicator
@@ -5252,6 +5276,7 @@ class MainWindow(QMainWindow):
     def _start_promotion(self, promoter: Promoter, version: VersionInfo):
         """Start the promotion in a background thread, checking link mode availability first."""
         self._promoting_source_name = promoter.source.name
+        self._promoting_version = version
         mode = promoter.source.link_mode
         available, reason = check_link_mode_available(mode)
         if not available and mode == "symlink":
@@ -5305,6 +5330,11 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.btn_cancel_promote.setVisible(False)
 
+        # Restore original link_mode if we fell back to copy
+        if self._fallback_original_mode and self._current_source:
+            self._current_source.link_mode = self._fallback_original_mode
+            self._fallback_original_mode = None
+
         # Check if this is part of a batch promotion
         if hasattr(self, '_batch_promote_list') and self._batch_promote_list:
             self._versions_cache.pop(self._current_source.name, None)
@@ -5319,16 +5349,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Promoted {promoted_name} \u2192 {entry.version}"
         )
-        # Invalidate cache for the promoted source
+        # Invalidate cache for the promoted source and refresh in background
         self._versions_cache.pop(promoted_name, None)
-        # Only reload UI and reselect if the promoted source is currently viewed
-        if self._current_source and self._current_source.name == promoted_name:
-            self._reload_ui()
-            for i in range(self.source_list.count()):
-                item = self.source_list.item(i)
-                if item.data(Qt.UserRole) == promoted_name:
-                    self.source_list.setCurrentRow(i)
-                    break
+        self._refresh_all_with_selection(promoted_name)
 
     def _on_promote_error(self, error_msg):
         self._worker = None
@@ -5336,6 +5359,33 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.btn_cancel_promote.setVisible(False)
         self.btn_promote.setEnabled(True)
+
+        # Restore original link_mode if we fell back to copy
+        if self._fallback_original_mode and self._current_source:
+            self._current_source.link_mode = self._fallback_original_mode
+            self._fallback_original_mode = None
+
+        # Check for symlink/hardlink failure — offer copy fallback
+        if ("Symlink creation failed" in error_msg or "Hardlink creation failed" in error_msg):
+            source = self._current_source
+            version = self._promoting_version
+            if source and version:
+                promoter = self._promoters.get(source.name)
+                if promoter:
+                    mode_label = source.link_mode.title()
+                    reply = QMessageBox.question(
+                        self, "Link Mode Failed",
+                        f"{mode_label} creation failed for '{source.name}'.\n\n"
+                        f"This is common on network/UNC paths where the server "
+                        f"doesn't support {source.link_mode}s.\n\n"
+                        f"Retry this promotion using copy mode?",
+                        QMessageBox.Yes | QMessageBox.No,
+                    )
+                    if reply == QMessageBox.Yes:
+                        self._fallback_original_mode = source.link_mode
+                        source.link_mode = "copy"
+                        self._start_promotion(promoter, version)
+                        return
 
         # If batch promotion, ask whether to continue
         if hasattr(self, '_batch_promote_list') and self._batch_promote_list:
@@ -5350,7 +5400,7 @@ class MainWindow(QMainWindow):
                 self._batch_promote_next()
             else:
                 self._batch_promote_list = []
-                self._reload_ui()
+                self._refresh_all_with_selection()
             return
 
         QMessageBox.critical(self, "Promotion Failed", error_msg)
@@ -5375,12 +5425,8 @@ class MainWindow(QMainWindow):
         logger.info(f"Watcher detected changes in: {source_name}")
         self._versions_cache.pop(source_name, None)
 
-        # If this source is currently selected, refresh it
-        if self._current_source and self._current_source.name == source_name:
-            row = self.source_list.currentRow()
-            self._reload_ui()
-            if row >= 0 and row < self.source_list.count():
-                self.source_list.setCurrentRow(row)
+        # Refresh in background, preserving current selection
+        self._refresh_all_with_selection()
 
         self.statusBar().showMessage(f"New version detected in: {source_name}")
 

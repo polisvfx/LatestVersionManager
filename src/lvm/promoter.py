@@ -33,6 +33,27 @@ _FRAME_EXT_RE = re.compile(r"([._])(\d+)\.(\w+)$")
 _COPY_WORKERS = 4
 
 
+def _resolve_unc_safe(path: Path) -> Path:
+    """Resolve a path without breaking UNC paths on Windows.
+
+    Path.resolve() on Windows converts UNC paths (\\\\server\\share\\...)
+    to extended-length syntax (\\\\?\\UNC\\server\\share\\...) which breaks
+    symlink/hardlink creation over SMB. This resolves the path and then
+    converts back to standard UNC format if needed.
+    """
+    resolved = path.resolve()
+    if platform.system() != "Windows":
+        return resolved
+    s = str(resolved)
+    # Fix \\?\UNC\server\share -> \\server\share
+    if s.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + s[8:])
+    # Fix \\?\C:\... -> C:\... (local extended-length paths)
+    if s.startswith("\\\\?\\"):
+        return Path(s[4:])
+    return resolved
+
+
 class PromotionError(Exception):
     """Raised when a promotion fails."""
     pass
@@ -356,7 +377,7 @@ class Promoter:
     def _create_symlink(self, source: Path, target: Path):
         """Create a symlink, handling platform differences."""
         try:
-            target.symlink_to(source.resolve())
+            target.symlink_to(_resolve_unc_safe(source))
         except OSError as e:
             if platform.system() == "Windows":
                 raise PromotionError(
@@ -369,7 +390,7 @@ class Promoter:
     def _create_hardlink(self, source: Path, target: Path):
         """Create a hardlink. Works on NTFS without elevation, but source and target must be on the same volume."""
         try:
-            os.link(str(source.resolve()), str(target))
+            os.link(str(_resolve_unc_safe(source)), str(target))
         except OSError as e:
             raise PromotionError(
                 f"Hardlink creation failed. Hardlinks require source and target "
