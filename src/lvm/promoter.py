@@ -20,6 +20,7 @@ from .history import HistoryManager
 from .hooks import run_pre_promote_hook, run_post_promote_hook, HookError
 from .task_tokens import derive_source_tokens
 from .config import _expand_group_token
+from .fast_copy import smart_copy
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,7 @@ class Promoter:
             target_file = target_dir / target_name
             if target_file.exists() or target_file.is_symlink():
                 target_file.unlink()
-            shutil.copy2(src_file, target_file)
+            smart_copy(src_file, target_file, cancel_event=self._cancelled)
             completed[0] += 1
             if progress_callback:
                 progress_callback(completed[0], total, src_file.name)
@@ -372,7 +373,7 @@ class Promoter:
         elif mode == "hardlink":
             self._create_hardlink(source, target)
         else:
-            shutil.copy2(source, target)
+            smart_copy(source, target, cancel_event=self._cancelled)
 
     def _create_symlink(self, source: Path, target: Path):
         """Create a symlink, handling platform differences."""
