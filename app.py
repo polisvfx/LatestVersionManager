@@ -231,9 +231,10 @@ class ScanWorker(QThread):
     finished = Signal(dict)           # {source_name: (versions, status_info)}
     error = Signal(str)
 
-    def __init__(self, config: ProjectConfig, parent=None):
+    def __init__(self, config: ProjectConfig, previous_cache: dict[str, list] = None, parent=None):
         super().__init__(parent)
         self.config = config
+        self.previous_cache = previous_cache or {}
 
     def run(self):
         try:
@@ -243,7 +244,8 @@ class ScanWorker(QThread):
 
             def _scan_one(source):
                 scanner = VersionScanner(source, self.config.task_tokens)
-                versions = scanner.scan()
+                prev = self.previous_cache.get(source.name)
+                versions = scanner.scan(previous_versions=prev)
                 if tc_mode == "always":
                     populate_timecodes(versions)
                 return source.name, versions
@@ -4138,10 +4140,14 @@ class MainWindow(QMainWindow):
     def _batch_promote_next(self):
         """Promote the next source in the batch list."""
         if self._batch_promote_index >= len(self._batch_promote_list):
-            # All done
-            count = len(self._batch_promote_list)
+            # All done — rescan only the sources that were promoted
+            batch = self._batch_promote_list
+            promoted_names = [s.name for s, _v in batch]
+            count = len(batch)
             self._batch_promote_list = []
-            self._refresh_all_with_selection()
+            for name in promoted_names:
+                self._versions_cache.pop(name, None)
+            self._refresh_sources_by_name(promoted_names)
             self.statusBar().showMessage(f"Batch promotion complete: {count} source(s)")
             return
 
@@ -4351,7 +4357,7 @@ class MainWindow(QMainWindow):
             return
         self._scan_indicator.setText("Updating...")
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
-        self._scan_worker = ScanWorker(self.config, parent=self)
+        self._scan_worker = ScanWorker(self.config, previous_cache=dict(self._versions_cache), parent=self)
         self._scan_worker.progress.connect(self._on_refresh_progress)
         self._scan_worker.finished.connect(self._on_refresh_complete)
         self._scan_worker.error.connect(self._on_refresh_error)
@@ -4549,6 +4555,99 @@ class MainWindow(QMainWindow):
         if self.source_list.count() > 0:
             self.source_list.setCurrentRow(0)
 
+    def _refresh_sources_by_name(self, source_names: list[str], select_source: str = None):
+        """Re-scan only the given sources (by name) and update the UI in-place.
+
+        Much faster than _refresh_all when only a few sources changed (e.g. after promotion).
+        """
+        if not self.config:
+            return
+
+        tc_mode = self.config.timecode_mode
+
+        for source_name in source_names:
+            source = None
+            for s in self.config.watched_sources:
+                if s.name == source_name:
+                    source = s
+                    break
+            if source is None:
+                continue
+
+            # Rescan this source
+            scanner = VersionScanner(source, self.config.task_tokens)
+            prev = self._versions_cache.get(source.name)
+            versions = scanner.scan(previous_versions=prev)
+            if tc_mode == "always":
+                populate_timecodes(versions)
+
+            self._scanners[source.name] = scanner
+            self._versions_cache[source.name] = versions
+
+            # Rebuild promoter and status
+            highest_ver = versions[-1].version_string if versions else None
+            current = None
+            status = "no_target"
+
+            if source.latest_target:
+                promoter = Promoter(source, self.config.task_tokens, self.config.project_name)
+                self._promoters[source.name] = promoter
+                current = promoter.get_current_version()
+
+                if not current:
+                    status = "no_version"
+                elif current.version == highest_ver:
+                    integrity = promoter.verify()
+                    if integrity["valid"]:
+                        status = "highest"
+                    elif "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "integrity_fail"
+                elif self._has_newer_versions_since(current, versions):
+                    status = "newer"
+                else:
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "deliberate"
+
+            self._source_status[source.name] = {
+                "current": current,
+                "status": status,
+                "has_overrides": source.has_overrides,
+            }
+
+            # Update the source list item in-place
+            for i in range(self.source_list.count()):
+                if self.source_list.item(i).data(Qt.UserRole) == source.name:
+                    new_item = self._make_source_item(source)
+                    old_item = self.source_list.item(i)
+                    old_item.setText(new_item.text())
+                    old_item.setForeground(new_item.foreground())
+                    old_item.setToolTip(new_item.toolTip())
+                    grp_data = new_item.data(SourceItemDelegate.GROUP_ROLE)
+                    if grp_data:
+                        old_item.setData(SourceItemDelegate.GROUP_ROLE, grp_data)
+                    break
+
+        # If the currently selected source was refreshed, re-trigger version display
+        current_row = self.source_list.currentRow()
+        if current_row >= 0:
+            current_item = self.source_list.item(current_row)
+            if current_item and current_item.data(Qt.UserRole) in source_names:
+                self._on_source_selected(current_row)
+
+        # If a specific source should be selected, select it
+        if select_source:
+            for i in range(self.source_list.count()):
+                if self.source_list.item(i).data(Qt.UserRole) == select_source:
+                    self.source_list.setCurrentRow(i)
+                    break
+
+        self._save_scan_cache()
+
     def _refresh_all_with_selection(self, select_source: str = None):
         """Re-scan all sources in background, restoring the given source selection on completion."""
         if select_source is None and self._current_source:
@@ -4574,7 +4673,7 @@ class MainWindow(QMainWindow):
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
         self.statusBar().showMessage("Scanning sources...")
 
-        self._scan_worker = ScanWorker(self.config, parent=self)
+        self._scan_worker = ScanWorker(self.config, previous_cache=dict(self._versions_cache), parent=self)
         self._scan_worker.progress.connect(self._on_refresh_progress)
         self._scan_worker.finished.connect(self._on_refresh_complete)
         self._scan_worker.error.connect(self._on_refresh_error)
@@ -5349,9 +5448,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Promoted {promoted_name} \u2192 {entry.version}"
         )
-        # Invalidate cache for the promoted source and refresh in background
+        # Rescan only the promoted source instead of all sources
         self._versions_cache.pop(promoted_name, None)
-        self._refresh_all_with_selection(promoted_name)
+        self._refresh_sources_by_name([promoted_name], select_source=promoted_name)
 
     def _on_promote_error(self, error_msg):
         self._worker = None
@@ -5421,12 +5520,13 @@ class MainWindow(QMainWindow):
                 self.auto_promote_cb.setEnabled(True)
 
     def _on_watcher_change(self, source_name: str):
-        """A watched source had new files — invalidate cache and refresh."""
+        """A watched source had new files — refresh only that source."""
         logger.info(f"Watcher detected changes in: {source_name}")
         self._versions_cache.pop(source_name, None)
 
-        # Refresh in background, preserving current selection
-        self._refresh_all_with_selection()
+        # Refresh only the changed source instead of all sources
+        if self.config:
+            self._refresh_sources_by_name([source_name])
 
         self.statusBar().showMessage(f"New version detected in: {source_name}")
 
