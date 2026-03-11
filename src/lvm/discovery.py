@@ -88,6 +88,7 @@ def discover(
     whitelist: Optional[list] = None,
     blacklist: Optional[list] = None,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    skip_resolve: bool = True,
 ) -> list[DiscoveryResult]:
     """Scan a directory tree for versioned content.
 
@@ -105,6 +106,9 @@ def discover(
                    contains any of these keywords (case-insensitive).
         progress_callback: Optional callback(current_path, dirs_scanned, estimated_total)
                           called periodically during scan for progress reporting.
+        skip_resolve: Skip Path.resolve() on subdirectories during traversal.
+                     Greatly reduces SMB round-trips since network shares rarely
+                     have symlinks. Disable if you need symlink loop detection.
 
     Returns:
         List of DiscoveryResult, one per location that has versioned content.
@@ -129,14 +133,14 @@ def discover(
     # Process root directory entries (depth 0) — classify into versioned/dated/subdirs
     root_results = []
     _walk_for_versions(root, root, 0, 0, valid_extensions, root_results,
-                       visited={root}, progress=tracker)
+                       visited={root}, progress=tracker, skip_resolve=skip_resolve)
     results.extend(root_results)
 
     # Collect top-level non-versioned subdirectories to recurse into
     top_subdirs = []
     try:
-        for entry in sorted(root.iterdir()):
-            if entry.name.startswith(".") or not entry.is_dir():
+        for entry in os.scandir(root):
+            if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=not skip_resolve):
                 continue
             # Skip versioned/dated dirs (already handled by depth-0 walk above)
             if VERSION_RE.search(entry.name):
@@ -144,7 +148,8 @@ def discover(
             date_match = DATE_RE.search(entry.name)
             if date_match and _is_plausible_date(date_match.group(1)):
                 continue
-            top_subdirs.append(entry)
+            top_subdirs.append(Path(entry.path))
+        top_subdirs.sort()
     except PermissionError:
         logger.debug(f"Permission denied listing root: {root}")
 
@@ -155,17 +160,20 @@ def discover(
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 futures = {}
                 for subdir in top_subdirs:
-                    try:
-                        real_path = subdir.resolve()
-                    except OSError:
-                        continue
+                    if skip_resolve:
+                        real_path = subdir
+                    else:
+                        try:
+                            real_path = subdir.resolve()
+                        except OSError:
+                            continue
                     # Each branch gets its own results list and visited set
                     branch_results = []
                     branch_visited = {root, real_path}
                     future = executor.submit(
                         _walk_for_versions, subdir, root, 1, max_depth,
                         valid_extensions, branch_results, branch_visited,
-                        tracker)
+                        tracker, skip_resolve)
                     futures[future] = branch_results
                 for future in as_completed(futures):
                     try:
@@ -176,12 +184,16 @@ def discover(
         else:
             # Single subdirectory — no thread overhead needed
             subdir = top_subdirs[0]
-            try:
-                real_path = subdir.resolve()
-            except OSError:
+            if skip_resolve:
                 real_path = subdir
+            else:
+                try:
+                    real_path = subdir.resolve()
+                except OSError:
+                    real_path = subdir
             _walk_for_versions(subdir, root, 1, max_depth, valid_extensions,
-                               results, visited={root, real_path}, progress=tracker)
+                               results, visited={root, real_path}, progress=tracker,
+                               skip_resolve=skip_resolve)
 
     # Apply whitelist/blacklist filtering
     if whitelist or blacklist:
@@ -226,24 +238,22 @@ def _apply_filters(
     return filtered
 
 
-def _scan_version_dir(vdir: Path, ver_num: int, extensions: set) -> VersionInfo:
+def _scan_version_dir(vdir: Path, ver_num: int, extensions: set):
     """Scan a single versioned directory for its metadata.
 
     Runs file collection, frame detection, and size computation.
     Timecode extraction is deferred (lazy) - not done during discovery.
+
+    Returns (VersionInfo, found_extensions_set, sample_filename) to avoid
+    re-scanning the directory for extensions or sample filenames.
     """
     ver_str = f"v{ver_num:03d}"
-    files = _collect_media_files(vdir, extensions)
+    files, total_size, found_exts = _collect_media_files_with_stats(vdir, extensions)
     frame_range, frame_count, sub_sequences = _detect_frame_range(files)
 
-    total_size = 0
-    for f in files:
-        try:
-            total_size += f.stat().st_size
-        except OSError:
-            pass
+    sample = files[0].name if files else ""
 
-    return VersionInfo(
+    vi = VersionInfo(
         version_string=ver_str,
         version_number=ver_num,
         source_path=str(vdir),
@@ -254,6 +264,7 @@ def _scan_version_dir(vdir: Path, ver_num: int, extensions: set) -> VersionInfo:
         total_size_bytes=total_size,
         start_timecode=None,  # Lazy: extracted on demand, not during discovery
     )
+    return vi, found_exts, sample
 
 
 def _walk_for_versions(
@@ -265,6 +276,7 @@ def _walk_for_versions(
     results: list,
     visited: set = None,
     progress: _ProgressTracker = None,
+    skip_resolve: bool = True,
 ):
     """Recursively walk directories looking for versioned content."""
     if visited is None:
@@ -275,11 +287,18 @@ def _walk_for_versions(
     if progress is not None:
         progress.increment(str(current))
 
+    # Use os.scandir for faster directory listing — DirEntry caches is_dir/is_file
+    # results from the OS directory listing, avoiding per-entry stat() calls over SMB.
+    raw_entries = []
     try:
-        entries = sorted(current.iterdir())
+        with os.scandir(current) as it:
+            for entry in it:
+                if not entry.name.startswith("."):
+                    raw_entries.append(entry)
     except PermissionError:
         logger.debug(f"Permission denied: {current}")
         return
+    raw_entries.sort(key=lambda e: e.name)
 
     versioned_dirs = []
     versioned_files = []
@@ -287,29 +306,33 @@ def _walk_for_versions(
     dated_files = []      # files with date but no version
     subdirs = []
 
-    for entry in entries:
-        if entry.name.startswith("."):
-            continue
-
-        if entry.is_dir():
+    follow = not skip_resolve
+    for entry in raw_entries:
+        if entry.is_dir(follow_symlinks=follow):
             ver_match = VERSION_RE.search(entry.name)
             if ver_match:
-                versioned_dirs.append((entry, ver_match))
+                versioned_dirs.append((Path(entry.path), ver_match))
             else:
                 date_match = DATE_RE.search(entry.name)
                 if date_match and _is_plausible_date(date_match.group(1)):
-                    dated_dirs.append((entry, date_match))
+                    dated_dirs.append((Path(entry.path), date_match))
                 else:
-                    subdirs.append(entry)
-        elif entry.is_file():
-            if entry.suffix.lower() in extensions:
-                ver_match = VERSION_RE.search(entry.stem)
-                if ver_match:
-                    versioned_files.append((entry, ver_match))
-                else:
-                    date_match = DATE_RE.search(entry.stem)
-                    if date_match and _is_plausible_date(date_match.group(1)):
-                        dated_files.append((entry, date_match))
+                    subdirs.append(Path(entry.path))
+        elif entry.is_file(follow_symlinks=follow):
+            name = entry.name
+            dot_idx = name.rfind(".")
+            if dot_idx >= 0:
+                suffix = name[dot_idx:].lower()
+                if suffix in extensions:
+                    stem = name[:dot_idx]
+                    path = Path(entry.path)
+                    ver_match = VERSION_RE.search(stem)
+                    if ver_match:
+                        versioned_files.append((path, ver_match))
+                    else:
+                        date_match = DATE_RE.search(stem)
+                        if date_match and _is_plausible_date(date_match.group(1)):
+                            dated_files.append((path, date_match))
 
     # If this directory contains versioned subdirectories, report it
     if versioned_dirs:
@@ -323,7 +346,10 @@ def _walk_for_versions(
             first_date_match = None
 
         # Parallel scan of version directories using ThreadPoolExecutor
+        # _scan_version_dir now returns (VersionInfo, found_exts) to avoid
+        # a second os.scandir call just to collect extensions.
         versions = []
+        first_sample = ""
         worker_count = min(8, len(versioned_dirs))
         if worker_count > 1:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -335,13 +361,13 @@ def _walk_for_versions(
 
                 for future in as_completed(future_to_entry):
                     try:
-                        vi = future.result()
-                        # Detect date in this dir name
+                        vi, exts_found, sample = future.result()
                         vdir, vmatch = future_to_entry[future]
                         _populate_date_on_vi(vi, vdir.name)
                         versions.append(vi)
-                        for f in _collect_media_files(vdir, extensions):
-                            found_extensions.add(f.suffix.lower())
+                        found_extensions.update(exts_found)
+                        if not first_sample and sample:
+                            first_sample = sample
                     except Exception as e:
                         vdir = future_to_entry[future][0]
                         logger.debug(f"Error scanning {vdir}: {e}")
@@ -349,11 +375,12 @@ def _walk_for_versions(
             # Single version dir, no need for thread overhead
             for vdir, match in versioned_dirs:
                 ver_num = int(match.group(1))
-                vi = _scan_version_dir(vdir, ver_num, extensions)
+                vi, exts_found, sample = _scan_version_dir(vdir, ver_num, extensions)
                 _populate_date_on_vi(vi, vdir.name)
                 versions.append(vi)
-                for f in _collect_media_files(vdir, extensions):
-                    found_extensions.add(f.suffix.lower())
+                found_extensions.update(exts_found)
+                if not first_sample and sample:
+                    first_sample = sample
 
         versions.sort(key=lambda v: (v.date_sortable, v.version_number))
 
@@ -366,13 +393,7 @@ def _walk_for_versions(
         if first_date_match:
             suggested_date_fmt = _detect_date_format(first_date_match.group(1))
 
-        # Grab a representative filename from the first non-empty version folder
-        sample_filename = ""
-        for vdir, _match in versioned_dirs:
-            sample_files = _collect_media_files(vdir, extensions)
-            if sample_files:
-                sample_filename = sample_files[0].name
-                break
+        sample_filename = first_sample
 
         results.append(DiscoveryResult(
             path=str(current),
@@ -452,6 +473,7 @@ def _walk_for_versions(
         first_date_match = dated_dirs[0][1]
         guessed_fmt = _detect_date_format(first_date_match.group(1))
 
+        first_sample = ""
         for ddir, dmatch in dated_dirs:
             date_str = dmatch.group(1)
             fmt = _detect_date_format(date_str)
@@ -459,17 +481,13 @@ def _walk_for_versions(
             date_sortable = parse_date_to_sortable(date_str, fmt)
             display = format_date_display(date_str, fmt)
 
-            files = _collect_media_files(ddir, extensions)
+            files, total_size, exts_found = _collect_media_files_with_stats(ddir, extensions)
             frame_range, frame_count, sub_sequences = _detect_frame_range(files)
-            total_size = 0
-            for f in files:
-                try:
-                    total_size += f.stat().st_size
-                except OSError:
-                    pass
-                found_extensions.add(f.suffix.lower())
+            found_extensions.update(exts_found)
 
             if files:
+                if not first_sample:
+                    first_sample = files[0].name
                 vi = VersionInfo(
                     version_string=display,
                     version_number=0,
@@ -490,12 +508,7 @@ def _walk_for_versions(
             suggested_pattern = _suggest_pattern(
                 first_dir_name, ver_match=None, date_match=first_date_match)
 
-            sample_filename = ""
-            for ddir_entry, _ in dated_dirs:
-                sample_files = _collect_media_files(ddir_entry, extensions)
-                if sample_files:
-                    sample_filename = sample_files[0].name
-                    break
+            sample_filename = first_sample
 
             results.append(DiscoveryResult(
                 path=str(current),
@@ -564,17 +577,25 @@ def _walk_for_versions(
                 suggested_date_format=guessed_fmt,
             ))
 
-    # Recurse into non-versioned subdirectories (with symlink loop protection)
+    # Recurse into non-versioned subdirectories
     for subdir in subdirs:
-        try:
-            real_path = subdir.resolve()
-        except OSError:
-            continue
-        if real_path in visited:
-            logger.debug(f"Skipping already-visited path (symlink loop?): {subdir}")
-            continue
-        visited.add(real_path)
-        _walk_for_versions(subdir, root, depth + 1, max_depth, extensions, results, visited, progress)
+        if skip_resolve:
+            # Skip resolve() — no symlink loop detection (much faster over SMB)
+            if subdir in visited:
+                continue
+            visited.add(subdir)
+        else:
+            # Full symlink loop protection via resolve()
+            try:
+                real_path = subdir.resolve()
+            except OSError:
+                continue
+            if real_path in visited:
+                logger.debug(f"Skipping already-visited path (symlink loop?): {subdir}")
+                continue
+            visited.add(real_path)
+        _walk_for_versions(subdir, root, depth + 1, max_depth, extensions,
+                           results, visited, progress, skip_resolve)
 
 
 def _populate_date_on_vi(vi: VersionInfo, name: str):
@@ -608,6 +629,39 @@ def _collect_media_files(folder: Path, extensions: set) -> list[Path]:
         pass
     files.sort()
     return files
+
+
+def _collect_media_files_with_stats(
+    folder: Path, extensions: set,
+) -> tuple[list[Path], int, set[str]]:
+    """Collect media files with sizes and extensions in a single os.scandir pass.
+
+    Returns (sorted_file_list, total_size_bytes, found_extensions_set).
+    Uses DirEntry.stat() which on Windows leverages cached stat data from
+    FindFirstFile/FindNextFile — no extra round-trips over SMB.
+    """
+    files = []
+    total_size = 0
+    found_exts = set()
+    try:
+        with os.scandir(folder) as it:
+            for entry in it:
+                if entry.is_file(follow_symlinks=False):
+                    name = entry.name
+                    dot_idx = name.rfind(".")
+                    if dot_idx >= 0:
+                        suffix = name[dot_idx:].lower()
+                        if suffix in extensions:
+                            files.append(Path(entry.path))
+                            found_exts.add(suffix)
+                            try:
+                                total_size += entry.stat(follow_symlinks=False).st_size
+                            except OSError:
+                                pass
+    except PermissionError:
+        pass
+    files.sort()
+    return files, total_size, found_exts
 
 
 def _detect_frame_range(files: list[Path]) -> tuple[Optional[str], int, list]:

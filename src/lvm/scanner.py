@@ -100,6 +100,8 @@ class VersionScanner:
         sorted by version number (ascending).
 
         Timecode extraction is lazy - not performed during scan.
+        Uses os.scandir for faster directory listing — DirEntry caches
+        is_dir/is_file from the OS listing, avoiding per-entry stat() over SMB.
         """
         source_path = Path(self.source.source_dir)
         if not source_path.exists():
@@ -110,22 +112,34 @@ class VersionScanner:
         # Collect flat versioned files for grouping by (version_number, date)
         versioned_files: dict[tuple, dict] = {}  # (ver_num, date_sortable) -> {info, files}
 
-        for entry in sorted(source_path.iterdir()):
-            version_info = None
+        # Use os.scandir instead of Path.iterdir to avoid per-entry stat calls
+        raw_entries = []
+        try:
+            with os.scandir(source_path) as it:
+                for entry in it:
+                    raw_entries.append(entry)
+        except (PermissionError, OSError):
+            return []
+        raw_entries.sort(key=lambda e: e.name)
 
-            if entry.is_dir():
+        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+
+        for entry in raw_entries:
+            if entry.is_dir(follow_symlinks=False):
                 if not self._matches_basename(entry.name):
                     continue
-                version_info = self._scan_version_folder(entry)
+                version_info = self._scan_version_folder(Path(entry.path))
                 if version_info:
                     versions.append(version_info)
-            elif entry.is_file():
+            elif entry.is_file(follow_symlinks=False):
                 if not self._matches_basename(entry.name):
                     continue
                 # Group flat files by version+date to detect frame sequences
-                if entry.suffix.lower() not in self.source.file_extensions:
+                name = entry.name
+                dot_idx = name.rfind(".")
+                if dot_idx < 0 or name[dot_idx:].lower() not in valid_extensions:
                     continue
-                result = self._extract_version(entry.name)
+                result = self._extract_version(name)
                 if result is None:
                     continue
                 ver_str, ver_num, date_str, date_sortable = result
@@ -134,24 +148,25 @@ class VersionScanner:
                     versioned_files[group_key] = {
                         "ver_str": ver_str, "ver_num": ver_num,
                         "date_str": date_str, "date_sortable": date_sortable,
-                        "files": [],
+                        "files": [], "entries": [],
                     }
-                versioned_files[group_key]["files"].append(entry)
+                versioned_files[group_key]["files"].append(Path(entry.path))
+                versioned_files[group_key]["entries"].append(entry)
 
-        # Process grouped flat files
+        # Process grouped flat files — use cached DirEntry.stat() where available
         for group_key, group in versioned_files.items():
             files = group["files"]
+            entries = group.get("entries", [])
             if len(files) == 1:
                 # Single file — no frame sequence
-                f = files[0]
                 try:
-                    file_size = f.stat().st_size
+                    file_size = entries[0].stat(follow_symlinks=False).st_size if entries else files[0].stat().st_size
                 except OSError:
                     file_size = 0
                 versions.append(VersionInfo(
                     version_string=group["ver_str"],
                     version_number=group["ver_num"],
-                    source_path=str(f),
+                    source_path=str(files[0]),
                     frame_range=None,
                     frame_count=1,
                     file_count=1,
@@ -162,12 +177,11 @@ class VersionScanner:
                 ))
             else:
                 # Multiple files — detect frame sequences
-                file_paths = [Path(f) for f in files]
-                frame_range, frame_count, sub_sequences = self._detect_frame_range(file_paths)
+                frame_range, frame_count, sub_sequences = self._detect_frame_range(files)
                 total_size = 0
-                for f in files:
+                for e in entries:
                     try:
-                        total_size += f.stat().st_size
+                        total_size += e.stat(follow_symlinks=False).st_size
                     except OSError:
                         pass
                 versions.append(VersionInfo(
@@ -240,13 +254,12 @@ class VersionScanner:
         version_str, version_num, date_str, date_sortable = result
 
         # Collect files matching our extensions using os.scandir
-        files = self._collect_files(folder)
+        files, total_size = self._collect_files_with_stats(folder)
         if not files:
             logger.debug(f"No matching files in version folder: {folder}")
             return None
 
         frame_range, frame_count, sub_sequences = self._detect_frame_range(files)
-        total_size = sum(f.stat().st_size for f in files)
 
         return VersionInfo(
             version_string=version_str,
@@ -291,8 +304,20 @@ class VersionScanner:
 
         Uses os.scandir for faster directory iteration.
         """
+        files, _ = self._collect_files_with_stats(folder)
+        return files
+
+    def _collect_files_with_stats(self, folder: Path) -> tuple[list[Path], int]:
+        """Collect files and total size in a single os.scandir pass.
+
+        Uses DirEntry.stat() which on Windows leverages cached stat data
+        from FindFirstFile/FindNextFile — no extra round-trips over SMB.
+
+        Returns (sorted_file_list, total_size_bytes).
+        """
         valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
         files = []
+        total_size = 0
         try:
             with os.scandir(folder) as it:
                 for entry in it:
@@ -303,10 +328,14 @@ class VersionScanner:
                             suffix = name[dot_idx:].lower()
                             if suffix in valid_extensions:
                                 files.append(Path(entry.path))
+                                try:
+                                    total_size += entry.stat(follow_symlinks=False).st_size
+                                except OSError:
+                                    pass
         except PermissionError:
             pass
         files.sort()
-        return files
+        return files, total_size
 
     def _detect_frame_range(self, files: list[Path]) -> tuple[Optional[str], int, list[dict]]:
         """

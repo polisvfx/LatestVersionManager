@@ -1201,6 +1201,23 @@ class ProjectSettingsDialog(QDialog):
         self.block_incomplete_cb.setChecked(getattr(config, 'block_incomplete_sequences', False))
         adv.addRow("", self.block_incomplete_cb)
 
+        # Network / SMB performance
+        net_header = QLabel("Network Performance")
+        net_header.setStyleSheet("font-weight: bold; margin-top: 6px;")
+        adv.addRow("", net_header)
+
+        self.skip_resolve_cb = QCheckBox("Skip symlink resolution during discovery (faster over SMB)")
+        self.skip_resolve_cb.setChecked(getattr(config, 'skip_resolve', True))
+        adv.addRow("", self.skip_resolve_cb)
+
+        skip_resolve_help = QLabel(
+            "Skips Path.resolve() on each directory, eliminating extra network\n"
+            "round-trips. Safe for SMB/NFS shares which rarely use symlinks.\n"
+            "Disable only if your source directories contain symlink loops."
+        )
+        skip_resolve_help.setStyleSheet("color: #999; font-size: 11px;")
+        adv.addRow("", skip_resolve_help)
+
         top_layout.addWidget(advanced_section)
 
         # ==================================================================
@@ -1420,6 +1437,9 @@ class ProjectSettingsDialog(QDialog):
 
         # Sequence validation (Feature #11)
         config.block_incomplete_sequences = self.block_incomplete_cb.isChecked()
+
+        # Network performance
+        config.skip_resolve = self.skip_resolve_cb.isChecked()
 
         # Re-apply defaults to non-overridden sources
         apply_project_defaults(config)
@@ -1778,13 +1798,14 @@ class DiscoveryWorker(QThread):
     progress = Signal(str, int, int)  # current_path, dirs_scanned, estimated_total
 
     def __init__(self, root_dir: str, max_depth: int = 4, extensions=None,
-                 whitelist=None, blacklist=None, parent=None):
+                 whitelist=None, blacklist=None, skip_resolve=True, parent=None):
         super().__init__(parent)
         self.root_dir = root_dir
         self.max_depth = max_depth
         self.extensions = extensions
         self.whitelist = whitelist
         self.blacklist = blacklist
+        self.skip_resolve = skip_resolve
 
     def _on_progress(self, current_path: str, dirs_scanned: int, estimated_total: int):
         self.progress.emit(current_path, dirs_scanned, estimated_total)
@@ -1798,6 +1819,7 @@ class DiscoveryWorker(QThread):
                 whitelist=self.whitelist,
                 blacklist=self.blacklist,
                 progress_callback=self._on_progress,
+                skip_resolve=self.skip_resolve,
             )
             self.finished.emit(results)
         except Exception as e:
@@ -1966,10 +1988,13 @@ class DiscoveryDialog(QDialog):
         whitelist = self._config.name_whitelist if self._config else None
         blacklist = self._config.name_blacklist if self._config else None
 
+        skip_resolve = self._config.skip_resolve if self._config else True
+
         self._worker = DiscoveryWorker(
             root_dir,
             whitelist=whitelist or None,
             blacklist=blacklist or None,
+            skip_resolve=skip_resolve,
             parent=self,
         )
         self._worker.finished.connect(self._on_results)

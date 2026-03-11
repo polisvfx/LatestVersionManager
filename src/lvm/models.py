@@ -336,6 +336,9 @@ class ProjectConfig:
     post_promote_cmd: str = ""
     # Explicit project root — when set, overrides project_dir for {project_root} token
     project_root: str = ""
+    # Skip Path.resolve() during discovery — avoids per-directory SMB round-trips
+    # for symlink resolution. Safe for network shares which rarely have symlinks.
+    skip_resolve: bool = True
     # Runtime only — not serialized, set by config loader
     project_dir: str = field(default="", repr=False)
 
@@ -391,6 +394,8 @@ class ProjectConfig:
             d["post_promote_cmd"] = self.post_promote_cmd
         if self.project_root:
             d["project_root"] = self.project_root
+        if not self.skip_resolve:
+            d["skip_resolve"] = False
         return d
 
     @classmethod
@@ -419,6 +424,7 @@ class ProjectConfig:
             pre_promote_cmd=data.get("pre_promote_cmd", ""),
             post_promote_cmd=data.get("post_promote_cmd", ""),
             project_root=data.get("project_root", ""),
+            skip_resolve=data.get("skip_resolve", True),
         )
 
 
