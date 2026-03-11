@@ -4025,8 +4025,9 @@ class MainWindow(QMainWindow):
         """Update Promote All/Selected button based on source list selection."""
         selected = self.source_list.selectedItems()
         has_sources = self.config and len(self.config.watched_sources) > 0
-        if len(selected) > 1:
-            self.btn_promote_all.setText(f"Promote Selected ({len(selected)})")
+        if len(selected) >= 1:
+            label = f"Promote Selected ({len(selected)})" if len(selected) > 1 else "Promote Selected"
+            self.btn_promote_all.setText(label)
             self.btn_promote_all.setEnabled(self._worker is None)
         else:
             self.btn_promote_all.setText("Promote All to Latest")
@@ -4064,7 +4065,7 @@ class MainWindow(QMainWindow):
             self._reload_ui()
 
         selected_items = self.source_list.selectedItems()
-        if len(selected_items) > 1:
+        if len(selected_items) >= 1:
             # Promote selected
             source_names = [item.data(Qt.UserRole) for item in selected_items]
         else:
