@@ -95,6 +95,7 @@ class Promoter:
         user: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         force: bool = False,
+        pinned: bool = False,
     ) -> HistoryEntry:
         """
         Promote a version to be the current "latest".
@@ -167,6 +168,7 @@ class Promoter:
         entry = HistoryEntry.from_version_info(version, user)
         entry.source_mtime = self._get_max_mtime(source_path)
         entry.target_mtime = self._get_max_mtime(target_dir)
+        entry.pinned = pinned
         self.history.record_promotion(entry)
 
         # Run post-promote hook
