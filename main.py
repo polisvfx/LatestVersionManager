@@ -333,6 +333,13 @@ def cmd_promote_all(args):
                 already_current.append(f"{source.name} (already on {highest.version_string})")
                 continue
 
+        # Skip pinned ("Keep") sources unless pin has expired or --force
+        if not args.force and current and getattr(current, 'pinned', False):
+            from src.lvm.history import has_newer_versions_since
+            if not has_newer_versions_since(current, versions):
+                already_current.append(f"{source.name} (pinned on {current.version})")
+                continue
+
         promote_list.append((source, highest, promoter))
 
     if not promote_list:

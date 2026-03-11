@@ -126,6 +126,7 @@ class HistoryEntry:
     start_timecode: Optional[str] = None
     source_mtime: Optional[float] = None   # max mtime of source files at promotion time
     target_mtime: Optional[float] = None   # max mtime of target files right after promotion
+    pinned: bool = False                   # True only for "Keep This Version" operations
 
     def to_dict(self) -> dict:
         d = {
@@ -142,6 +143,8 @@ class HistoryEntry:
             d["source_mtime"] = self.source_mtime
         if self.target_mtime is not None:
             d["target_mtime"] = self.target_mtime
+        if self.pinned:
+            d["pinned"] = True
         return d
 
     @classmethod
@@ -157,6 +160,7 @@ class HistoryEntry:
             start_timecode=data.get("start_timecode"),
             source_mtime=data.get("source_mtime"),
             target_mtime=data.get("target_mtime"),
+            pinned=data.get("pinned", False),
         )
 
     @classmethod

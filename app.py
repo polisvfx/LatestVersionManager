@@ -32,6 +32,7 @@ from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEnt
 from src.lvm.config import load_config, save_config, create_example_config, create_project, apply_project_defaults, _expand_group_token, _resolve_group_root
 from src.lvm.scanner import VersionScanner, detect_sequence_from_file, scan_directory_as_version, create_manual_version
 from src.lvm.promoter import Promoter, PromotionError, generate_report
+from src.lvm.history import has_newer_versions_since
 from src.lvm.elevation import (
     is_admin, can_create_symlinks, can_create_hardlinks,
     restart_elevated, check_link_mode_available, LINK_MODES,
@@ -132,11 +133,12 @@ class PromoteWorker(QThread):
     finished = Signal(object)          # HistoryEntry on success
     error = Signal(str)                # error message
 
-    def __init__(self, promoter: Promoter, version: VersionInfo, parent=None, force=False):
+    def __init__(self, promoter: Promoter, version: VersionInfo, parent=None, force=False, pinned=False):
         super().__init__(parent)
         self.promoter = promoter
         self.version = version
         self.force = force
+        self.pinned = pinned
 
     def cancel(self):
         """Request cancellation of the running promotion."""
@@ -148,6 +150,7 @@ class PromoteWorker(QThread):
                 self.version,
                 progress_callback=self._on_progress,
                 force=self.force,
+                pinned=self.pinned,
             )
             self.finished.emit(entry)
         except PromotionError as e:
@@ -226,20 +229,21 @@ class UpdateDownloadWorker(QThread):
 
 
 class ScanWorker(QThread):
-    """Scans all project sources in a background thread."""
+    """Scans project sources in a background thread."""
     progress = Signal(int, int, str)  # current_index, total, source_name
     finished = Signal(dict)           # {source_name: (versions, status_info)}
     error = Signal(str)
 
-    def __init__(self, config: ProjectConfig, previous_cache: dict[str, list] = None, parent=None):
+    def __init__(self, config: ProjectConfig, sources=None, previous_cache: dict[str, list] = None, parent=None):
         super().__init__(parent)
         self.config = config
+        self._sources = sources or config.watched_sources
         self.previous_cache = previous_cache or {}
 
     def run(self):
         try:
             results = {}
-            total = len(self.config.watched_sources)
+            total = len(self._sources)
             tc_mode = self.config.timecode_mode
 
             def _scan_one(source):
@@ -256,7 +260,7 @@ class ScanWorker(QThread):
                 with ThreadPoolExecutor(max_workers=worker_count) as executor:
                     futures = {
                         executor.submit(_scan_one, s): s
-                        for s in self.config.watched_sources
+                        for s in self._sources
                     }
                     for future in as_completed(futures):
                         name, versions = future.result()
@@ -264,7 +268,7 @@ class ScanWorker(QThread):
                         completed += 1
                         self.progress.emit(completed, total, name)
             else:
-                for i, source in enumerate(self.config.watched_sources):
+                for i, source in enumerate(self._sources):
                     self.progress.emit(i + 1, total, source.name)
                     name, versions = _scan_one(source)
                     results[name] = versions
@@ -3310,11 +3314,15 @@ class MainWindow(QMainWindow):
         self.btn_import_version = QPushButton("Import Version...")
         self.btn_import_version.setEnabled(False)
         self.btn_import_version.clicked.connect(self._import_version)
+        self.btn_refresh_versions = QPushButton("Refresh Versions")
+        self.btn_refresh_versions.setEnabled(False)
+        self.btn_refresh_versions.clicked.connect(self._refresh_current_source)
         self.btn_promote = QPushButton("Promote Selected to Latest")
         self.btn_promote.setStyleSheet(self._PROMOTE_STYLE)
         self.btn_promote.setEnabled(False)
         self.btn_promote.clicked.connect(self._promote_selected)
         promote_row.addWidget(self.btn_import_version)
+        promote_row.addWidget(self.btn_refresh_versions)
         promote_row.addStretch()
         promote_row.addWidget(self.btn_promote)
 
@@ -3846,6 +3854,13 @@ class MainWindow(QMainWindow):
         else:
             menu.addAction(f"Remove {len(selected_indices)} Sources", lambda: self._remove_sources(selected_indices))
 
+        # Refresh selected
+        menu.addSeparator()
+        if len(selected_indices) == 1:
+            menu.addAction("Refresh Source", lambda: self._refresh_selected_sources(selected_indices))
+        else:
+            menu.addAction(f"Refresh {len(selected_indices)} Sources", lambda: self._refresh_selected_sources(selected_indices))
+
         # Reveal in file browser
         menu.addSeparator()
         if len(selected_indices) == 1:
@@ -4027,8 +4042,9 @@ class MainWindow(QMainWindow):
         """Update Promote All/Selected button based on source list selection."""
         selected = self.source_list.selectedItems()
         has_sources = self.config and len(self.config.watched_sources) > 0
-        if len(selected) > 1:
-            self.btn_promote_all.setText(f"Promote Selected ({len(selected)})")
+        if len(selected) >= 1:
+            label = f"Promote Selected ({len(selected)})" if len(selected) > 1 else "Promote Selected"
+            self.btn_promote_all.setText(label)
             self.btn_promote_all.setEnabled(self._worker is None)
         else:
             self.btn_promote_all.setText("Promote All to Latest")
@@ -4066,7 +4082,7 @@ class MainWindow(QMainWindow):
             self._reload_ui()
 
         selected_items = self.source_list.selectedItems()
-        if len(selected_items) > 1:
+        if len(selected_items) >= 1:
             # Promote selected
             source_names = [item.data(Qt.UserRole) for item in selected_items]
         else:
@@ -4107,7 +4123,7 @@ class MainWindow(QMainWindow):
                     already_current.append(f"{name} (already on {highest.version_string})")
                     continue
                 if status == "deliberate":
-                    already_current.append(f"{name} (deliberately on lower version)")
+                    already_current.append(f"{name} (pinned on lower version)")
                     continue
 
             promote_list.append((source, highest))
@@ -4187,6 +4203,7 @@ class MainWindow(QMainWindow):
         self.btn_manage_groups.setEnabled(enabled)
         self.btn_refresh.setEnabled(enabled)
         self.btn_import_version.setEnabled(False)
+        self.btn_refresh_versions.setEnabled(False)
         self.watch_toggle.setEnabled(enabled)
         self.btn_promote.setEnabled(False)
         self.btn_revert.setEnabled(False)
@@ -4233,15 +4250,20 @@ class MainWindow(QMainWindow):
                         status = "stale"
                     else:
                         status = "integrity_fail"
-                elif self._has_newer_versions_since(current, versions):
-                    status = "newer"
-                else:
-                    # Even for deliberate/older versions, check staleness
+                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                    # Pinned via "Keep" and no new versions since → deliberate
                     integrity = promoter.verify()
                     if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
                         status = "stale"
                     else:
                         status = "deliberate"
+                else:
+                    # Unpinned (regular promote of older version) or pin expired
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "newer"
 
             self._source_status[source.name] = {
                 "current": current,
@@ -4279,6 +4301,7 @@ class MainWindow(QMainWindow):
         self.btn_manage_groups.setEnabled(enabled)
         self.btn_refresh.setEnabled(enabled)
         self.btn_import_version.setEnabled(False)
+        self.btn_refresh_versions.setEnabled(False)
         self.watch_toggle.setEnabled(enabled)
         self.btn_promote.setEnabled(False)
         self.btn_revert.setEnabled(False)
@@ -4322,14 +4345,20 @@ class MainWindow(QMainWindow):
                         status = "stale"
                     else:
                         status = "integrity_fail"
-                elif self._has_newer_versions_since(current, versions):
-                    status = "newer"
-                else:
+                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                    # Pinned via "Keep" and no new versions since → deliberate
                     integrity = promoter.verify()
                     if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
                         status = "stale"
                     else:
                         status = "deliberate"
+                else:
+                    # Unpinned (regular promote of older version) or pin expired
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "newer"
 
             self._source_status[source.name] = {
                 "current": current,
@@ -4435,7 +4464,7 @@ class MainWindow(QMainWindow):
             item.setToolTip(f"Source files for {ver_tag} modified since promotion — may have been re-rendered")
         elif status == "deliberate":
             item.setForeground(QColor("#7abbe0"))
-            item.setToolTip(f"Deliberately on {ver_tag} — higher versions existed at promotion time")
+            item.setToolTip(f"Pinned on {ver_tag} (Keep) — batch promote skips until a new version arrives")
         elif status == "highest":
             item.setForeground(QColor("#90ee90"))
             item.setToolTip(f"On latest version: {ver_tag}")
@@ -4655,6 +4684,137 @@ class MainWindow(QMainWindow):
         self._refresh_select_source = select_source
         self._refresh_all()
 
+    def _refresh_current_source(self):
+        """Refresh versions for the currently selected source."""
+        if not self._current_source:
+            return
+        for i, s in enumerate(self.config.watched_sources):
+            if s.name == self._current_source.name:
+                self._refresh_selected_sources([i])
+                return
+
+    def _refresh_selected_sources(self, indices: list[int]):
+        """Re-scan only the specified sources in background thread."""
+        if not self.config or self._scan_worker is not None:
+            return
+        sources = [self.config.watched_sources[i] for i in indices if i < len(self.config.watched_sources)]
+        if not sources:
+            return
+
+        # Remember which source to re-select after refresh
+        self._refresh_select_source = self._current_source.name if self._current_source else None
+
+        self.btn_refresh.setEnabled(False)
+        self.btn_refresh_versions.setEnabled(False)
+        self.btn_promote.setEnabled(False)
+        self.btn_promote_all.setEnabled(False)
+        names = ", ".join(s.name for s in sources)
+        self._scan_indicator.setText("Updating...")
+        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
+        self.statusBar().showMessage(f"Scanning: {names}")
+
+        self._scan_worker = ScanWorker(self.config, sources=sources, parent=self)
+        self._scan_worker.progress.connect(self._on_refresh_progress)
+        self._scan_worker.finished.connect(self._on_partial_refresh_complete)
+        self._scan_worker.error.connect(self._on_refresh_error)
+        self._scan_worker.start()
+
+    def _on_partial_refresh_complete(self, scan_results: dict):
+        """Called when a partial (selected sources) scan finishes. Merge results and rebuild UI."""
+        self._scan_worker = None
+
+        # Update only the scanned sources in caches
+        for source_name, versions in scan_results.items():
+            source = None
+            for s in self.config.watched_sources:
+                if s.name == source_name:
+                    source = s
+                    break
+            if not source:
+                continue
+
+            self._versions_cache[source_name] = versions
+            self._scanners[source_name] = VersionScanner(source, self.config.task_tokens)
+            self._manual_versions.pop(source_name, None)
+
+            # Recompute status for this source
+            current = None
+            status = "no_target"
+            highest_ver = versions[-1].version_string if versions else None
+
+            if source.latest_target:
+                self._promoters[source_name] = Promoter(source, self.config.task_tokens, self.config.project_name)
+                promoter = self._promoters[source_name]
+                current = promoter.get_current_version()
+
+                if not current:
+                    status = "no_version"
+                elif current.version == highest_ver:
+                    integrity = promoter.verify()
+                    if integrity["valid"]:
+                        status = "highest"
+                    elif "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "integrity_fail"
+                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                    # Pinned via "Keep" and no new versions since → deliberate
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "deliberate"
+                else:
+                    # Unpinned (regular promote of older version) or pin expired
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "newer"
+
+            self._source_status[source_name] = {
+                "current": current,
+                "status": status,
+                "has_overrides": source.has_overrides,
+            }
+
+        # Re-run conflict detection
+        from src.lvm.conflicts import detect_target_conflicts
+        conflicts = detect_target_conflicts(self.config)
+        self._target_conflicts = {}
+        for target, name_a, name_b in conflicts:
+            self._target_conflicts.setdefault(name_a, []).append(name_b)
+            self._target_conflicts.setdefault(name_b, []).append(name_a)
+
+        # Rebuild source list and restore selection
+        self.source_list.clear()
+        self.version_tree.clear()
+        self.history_tree.clear()
+
+        self.btn_refresh.setEnabled(True)
+        self.btn_import_version.setEnabled(False)
+        self.btn_refresh_versions.setEnabled(False)
+        self.btn_promote.setEnabled(False)
+        self.btn_revert.setEnabled(False)
+        self.btn_promote_all.setEnabled(len(self.config.watched_sources) > 0 and self._worker is None)
+
+        self._populate_source_list()
+
+        self._scan_indicator.setText("")
+        count = len(scan_results)
+        self.statusBar().showMessage(f"Refreshed {count} source{'s' if count != 1 else ''}", 3000)
+
+        # Restore selection
+        if self._refresh_select_source:
+            for i in range(self.source_list.count()):
+                if self.source_list.item(i).data(Qt.UserRole) == self._refresh_select_source:
+                    self.source_list.setCurrentRow(i)
+                    self._refresh_select_source = None
+                    return
+        self._refresh_select_source = None
+        if self.source_list.count() > 0:
+            self.source_list.setCurrentRow(0)
+
     def _refresh_all(self):
         """Re-scan all sources in background thread."""
         if not self.config or not self.config.watched_sources:
@@ -4667,6 +4827,7 @@ class MainWindow(QMainWindow):
 
         # Disable refresh during scan
         self.btn_refresh.setEnabled(False)
+        self.btn_refresh_versions.setEnabled(False)
         self.btn_promote.setEnabled(False)
         self.btn_promote_all.setEnabled(False)
         self._scan_indicator.setText("Updating...")
@@ -4724,14 +4885,20 @@ class MainWindow(QMainWindow):
                         status = "stale"
                     else:
                         status = "integrity_fail"
-                elif self._has_newer_versions_since(current, versions):
-                    status = "newer"
-                else:
+                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                    # Pinned via "Keep" and no new versions since → deliberate
                     integrity = promoter.verify()
                     if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
                         status = "stale"
                     else:
                         status = "deliberate"
+                else:
+                    # Unpinned (regular promote of older version) or pin expired
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "newer"
 
             self._source_status[source.name] = {
                 "current": current,
@@ -4756,6 +4923,7 @@ class MainWindow(QMainWindow):
         self.btn_manage_groups.setEnabled(enabled)
         self.btn_refresh.setEnabled(enabled)
         self.btn_import_version.setEnabled(False)
+        self.btn_refresh_versions.setEnabled(False)
         self.watch_toggle.setEnabled(enabled)
         self.btn_promote.setEnabled(False)
         self.btn_revert.setEnabled(False)
@@ -4871,6 +5039,7 @@ class MainWindow(QMainWindow):
         self.btn_promote.setEnabled(False)
         self.btn_revert.setEnabled(False)
         self.btn_import_version.setEnabled(False)
+        self.btn_refresh_versions.setEnabled(False)
 
         if row < 0 or not self.config:
             self.current_label.setText("No version loaded")
@@ -4893,6 +5062,7 @@ class MainWindow(QMainWindow):
             return
         self._current_source = source
         self.btn_import_version.setEnabled(True)
+        self.btn_refresh_versions.setEnabled(True)
 
         scanner = self._scanners.get(source.name)
         promoter = self._promoters.get(source.name)
@@ -4938,17 +5108,19 @@ class MainWindow(QMainWindow):
                 self.current_label.setText(f"Current: {current.version}   ({source.name})")
                 self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #90ee90;")
             else:
-                # Determine if higher versions are new (appeared after promotion)
-                # or if the user deliberately chose a lower version
-                has_new = self._has_newer_versions_since(current, versions)
-                if has_new:
-                    # New versions appeared after promotion — dark orange
-                    self.current_label.setText(f"Current: {current.version} \u25bc!   ({source.name})")
-                    self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #cc8833;")
-                else:
-                    # User deliberately promoted a lower version — muted green
+                # Check if this is a pinned (Keep) version with no new versions since
+                is_pinned_deliberate = (
+                    getattr(current, 'pinned', False)
+                    and not has_newer_versions_since(current, versions)
+                )
+                if is_pinned_deliberate:
+                    # Pinned via "Keep" — blue indicator
                     self.current_label.setText(f"Current: {current.version}*   ({source.name})")
                     self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #7abbe0;")
+                else:
+                    # Unpinned or pin expired — newer versions available (orange)
+                    self.current_label.setText(f"Current: {current.version} \u25bc!   ({source.name})")
+                    self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #cc8833;")
             integrity = promoter.verify()
             if integrity["valid"]:
                 self.integrity_label.setText("\u2713 Verified")
@@ -4978,7 +5150,7 @@ class MainWindow(QMainWindow):
         has_new = (
             current is not None
             and current_ver != (versions[-1].version_string if versions else None)
-            and self._has_newer_versions_since(current, versions)
+            and (not getattr(current, 'pinned', False) or has_newer_versions_since(current, versions))
         )
 
         # Populate version tree
@@ -5071,54 +5243,6 @@ class MainWindow(QMainWindow):
                 self.history_tree.addTopLevelItem(item)
 
         self.history_tree.itemSelectionChanged.connect(self._on_history_selected)
-
-    @staticmethod
-    def _has_newer_versions_since(current: HistoryEntry, versions: list) -> bool:
-        """Check if any version higher than the current one appeared after promotion.
-
-        Compares the promotion timestamp against the modification time of
-        higher-version source paths. Returns True if at least one higher
-        version was created/modified *after* the promotion — meaning the
-        user didn't deliberately skip it.
-
-        A 2-second tolerance is applied because set_at is stored with
-        second-level precision while filesystem timestamps have sub-second
-        resolution.
-        """
-        from datetime import datetime, timedelta
-
-        if not current or not current.set_at or not versions:
-            return False
-
-        try:
-            promoted_at = datetime.fromisoformat(current.set_at)
-        except (ValueError, TypeError):
-            return False
-
-        # Add tolerance for timestamp rounding (set_at truncates to seconds)
-        threshold = promoted_at + timedelta(seconds=2)
-
-        current_num = None
-        for v in versions:
-            if v.version_string == current.version:
-                current_num = v.version_number
-                break
-        if current_num is None:
-            return False
-
-        for v in versions:
-            if v.version_number <= current_num:
-                continue
-            # Check when this higher version's source path was last modified
-            try:
-                source_path = Path(v.source_path)
-                mtime = datetime.fromtimestamp(source_path.stat().st_mtime)
-                if mtime > threshold:
-                    return True
-            except (OSError, ValueError):
-                continue
-
-        return False
 
     _PROMOTE_STYLE = (
         "QPushButton { background-color: #2d5a2d; color: white; padding: 8px 16px; "
@@ -5331,6 +5455,7 @@ class MainWindow(QMainWindow):
             if dlg.exec() != QDialog.Accepted:
                 return
 
+        self._pinned_promote = is_keep
         self._start_promotion(promoter, version)
 
     def _revert_selected(self):
@@ -5405,7 +5530,10 @@ class MainWindow(QMainWindow):
         self.btn_cancel_promote.setEnabled(True)
         self.btn_cancel_promote.setText("Cancel")
 
-        self._worker = PromoteWorker(promoter, version, self, force=self._force_promote)
+        pinned = getattr(self, '_pinned_promote', False)
+        self._pinned_promote = False
+
+        self._worker = PromoteWorker(promoter, version, self, force=self._force_promote, pinned=pinned)
         self._worker.progress.connect(self._on_promote_progress)
         self._worker.finished.connect(self._on_promote_finished)
         self._worker.error.connect(self._on_promote_error)
@@ -5464,25 +5592,40 @@ class MainWindow(QMainWindow):
             self._current_source.link_mode = self._fallback_original_mode
             self._fallback_original_mode = None
 
-        # Check for symlink/hardlink failure — offer copy fallback
-        if ("Symlink creation failed" in error_msg or "Hardlink creation failed" in error_msg):
+        # Check for symlink/hardlink failure — offer fallback options
+        symlink_failed = "Symlink creation failed" in error_msg
+        hardlink_failed = "Hardlink creation failed" in error_msg
+        if symlink_failed or hardlink_failed:
             source = self._current_source
             version = self._promoting_version
             if source and version:
                 promoter = self._promoters.get(source.name)
                 if promoter:
                     mode_label = source.link_mode.title()
-                    reply = QMessageBox.question(
-                        self, "Link Mode Failed",
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle("Link Mode Failed")
+                    dlg.setIcon(QMessageBox.Warning)
+                    dlg.setText(
                         f"{mode_label} creation failed for '{source.name}'.\n\n"
                         f"This is common on network/UNC paths where the server "
                         f"doesn't support {source.link_mode}s.\n\n"
-                        f"Retry this promotion using copy mode?",
-                        QMessageBox.Yes | QMessageBox.No,
+                        f"Retry with a different mode?"
                     )
-                    if reply == QMessageBox.Yes:
+                    copy_btn = dlg.addButton("Copy", QMessageBox.AcceptRole)
+                    hardlink_btn = None
+                    if symlink_failed:
+                        hardlink_btn = dlg.addButton("Hardlink", QMessageBox.AcceptRole)
+                    dlg.addButton(QMessageBox.Cancel)
+                    dlg.exec()
+                    clicked = dlg.clickedButton()
+                    fallback_mode = None
+                    if clicked == copy_btn:
+                        fallback_mode = "copy"
+                    elif hardlink_btn and clicked == hardlink_btn:
+                        fallback_mode = "hardlink"
+                    if fallback_mode:
                         self._fallback_original_mode = source.link_mode
-                        source.link_mode = "copy"
+                        source.link_mode = fallback_mode
                         self._start_promotion(promoter, version)
                         return
 

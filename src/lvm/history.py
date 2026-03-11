@@ -7,6 +7,7 @@ maintains a full history of all promotions.
 
 import json
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -176,3 +177,49 @@ class HistoryManager:
             }
 
         return {"valid": True, "message": f"Current: {current.version} - files match."}
+
+
+def has_newer_versions_since(current: HistoryEntry, versions: list) -> bool:
+    """Check if any version higher than the current one appeared after promotion.
+
+    Compares the promotion timestamp against the modification time of
+    higher-version source paths. Returns True if at least one higher
+    version was created/modified *after* the promotion — meaning the
+    user didn't deliberately skip it.
+
+    A 2-second tolerance is applied because set_at is stored with
+    second-level precision while filesystem timestamps have sub-second
+    resolution.
+    """
+    if not current or not current.set_at or not versions:
+        return False
+
+    try:
+        promoted_at = datetime.fromisoformat(current.set_at)
+    except (ValueError, TypeError):
+        return False
+
+    # Add tolerance for timestamp rounding (set_at truncates to seconds)
+    threshold = promoted_at + timedelta(seconds=2)
+
+    current_num = None
+    for v in versions:
+        if v.version_string == current.version:
+            current_num = v.version_number
+            break
+    if current_num is None:
+        return False
+
+    for v in versions:
+        if v.version_number <= current_num:
+            continue
+        # Check when this higher version's source path was last modified
+        try:
+            source_path = Path(v.source_path)
+            mtime = datetime.fromtimestamp(source_path.stat().st_mtime)
+            if mtime > threshold:
+                return True
+        except (OSError, ValueError):
+            continue
+
+    return False
