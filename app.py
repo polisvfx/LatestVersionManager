@@ -5365,25 +5365,40 @@ class MainWindow(QMainWindow):
             self._current_source.link_mode = self._fallback_original_mode
             self._fallback_original_mode = None
 
-        # Check for symlink/hardlink failure — offer copy fallback
-        if ("Symlink creation failed" in error_msg or "Hardlink creation failed" in error_msg):
+        # Check for symlink/hardlink failure — offer fallback options
+        symlink_failed = "Symlink creation failed" in error_msg
+        hardlink_failed = "Hardlink creation failed" in error_msg
+        if symlink_failed or hardlink_failed:
             source = self._current_source
             version = self._promoting_version
             if source and version:
                 promoter = self._promoters.get(source.name)
                 if promoter:
                     mode_label = source.link_mode.title()
-                    reply = QMessageBox.question(
-                        self, "Link Mode Failed",
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle("Link Mode Failed")
+                    dlg.setIcon(QMessageBox.Warning)
+                    dlg.setText(
                         f"{mode_label} creation failed for '{source.name}'.\n\n"
                         f"This is common on network/UNC paths where the server "
                         f"doesn't support {source.link_mode}s.\n\n"
-                        f"Retry this promotion using copy mode?",
-                        QMessageBox.Yes | QMessageBox.No,
+                        f"Retry with a different mode?"
                     )
-                    if reply == QMessageBox.Yes:
+                    copy_btn = dlg.addButton("Copy", QMessageBox.AcceptRole)
+                    hardlink_btn = None
+                    if symlink_failed:
+                        hardlink_btn = dlg.addButton("Hardlink", QMessageBox.AcceptRole)
+                    dlg.addButton(QMessageBox.Cancel)
+                    dlg.exec()
+                    clicked = dlg.clickedButton()
+                    fallback_mode = None
+                    if clicked == copy_btn:
+                        fallback_mode = "copy"
+                    elif hardlink_btn and clicked == hardlink_btn:
+                        fallback_mode = "hardlink"
+                    if fallback_mode:
                         self._fallback_original_mode = source.link_mode
-                        source.link_mode = "copy"
+                        source.link_mode = fallback_mode
                         self._start_promotion(promoter, version)
                         return
 
