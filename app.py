@@ -32,6 +32,7 @@ from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEnt
 from src.lvm.config import load_config, save_config, create_example_config, create_project, apply_project_defaults, _expand_group_token, _resolve_group_root
 from src.lvm.scanner import VersionScanner, detect_sequence_from_file, scan_directory_as_version, create_manual_version
 from src.lvm.promoter import Promoter, PromotionError, generate_report
+from src.lvm.history import has_newer_versions_since
 from src.lvm.elevation import (
     is_admin, can_create_symlinks, can_create_hardlinks,
     restart_elevated, check_link_mode_available, LINK_MODES,
@@ -132,11 +133,12 @@ class PromoteWorker(QThread):
     finished = Signal(object)          # HistoryEntry on success
     error = Signal(str)                # error message
 
-    def __init__(self, promoter: Promoter, version: VersionInfo, parent=None, force=False):
+    def __init__(self, promoter: Promoter, version: VersionInfo, parent=None, force=False, pinned=False):
         super().__init__(parent)
         self.promoter = promoter
         self.version = version
         self.force = force
+        self.pinned = pinned
 
     def cancel(self):
         """Request cancellation of the running promotion."""
@@ -148,6 +150,7 @@ class PromoteWorker(QThread):
                 self.version,
                 progress_callback=self._on_progress,
                 force=self.force,
+                pinned=self.pinned,
             )
             self.finished.emit(entry)
         except PromotionError as e:
@@ -4118,7 +4121,7 @@ class MainWindow(QMainWindow):
                     already_current.append(f"{name} (already on {highest.version_string})")
                     continue
                 if status == "deliberate":
-                    already_current.append(f"{name} (deliberately on lower version)")
+                    already_current.append(f"{name} (pinned on lower version)")
                     continue
 
             promote_list.append((source, highest))
@@ -4241,15 +4244,20 @@ class MainWindow(QMainWindow):
                         status = "stale"
                     else:
                         status = "integrity_fail"
-                elif self._has_newer_versions_since(current, versions):
-                    status = "newer"
-                else:
-                    # Even for deliberate/older versions, check staleness
+                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                    # Pinned via "Keep" and no new versions since → deliberate
                     integrity = promoter.verify()
                     if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
                         status = "stale"
                     else:
                         status = "deliberate"
+                else:
+                    # Unpinned (regular promote of older version) or pin expired
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "newer"
 
             self._source_status[source.name] = {
                 "current": current,
@@ -4331,14 +4339,20 @@ class MainWindow(QMainWindow):
                         status = "stale"
                     else:
                         status = "integrity_fail"
-                elif self._has_newer_versions_since(current, versions):
-                    status = "newer"
-                else:
+                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                    # Pinned via "Keep" and no new versions since → deliberate
                     integrity = promoter.verify()
                     if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
                         status = "stale"
                     else:
                         status = "deliberate"
+                else:
+                    # Unpinned (regular promote of older version) or pin expired
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "newer"
 
             self._source_status[source.name] = {
                 "current": current,
@@ -4444,7 +4458,7 @@ class MainWindow(QMainWindow):
             item.setToolTip(f"Source files for {ver_tag} modified since promotion — may have been re-rendered")
         elif status == "deliberate":
             item.setForeground(QColor("#7abbe0"))
-            item.setToolTip(f"Deliberately on {ver_tag} — higher versions existed at promotion time")
+            item.setToolTip(f"Pinned on {ver_tag} (Keep) — batch promote skips until a new version arrives")
         elif status == "highest":
             item.setForeground(QColor("#90ee90"))
             item.setToolTip(f"On latest version: {ver_tag}")
@@ -4644,14 +4658,20 @@ class MainWindow(QMainWindow):
                         status = "stale"
                     else:
                         status = "integrity_fail"
-                elif self._has_newer_versions_since(current, versions):
-                    status = "newer"
-                else:
+                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                    # Pinned via "Keep" and no new versions since → deliberate
                     integrity = promoter.verify()
                     if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
                         status = "stale"
                     else:
                         status = "deliberate"
+                else:
+                    # Unpinned (regular promote of older version) or pin expired
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "newer"
 
             self._source_status[source_name] = {
                 "current": current,
@@ -4766,14 +4786,20 @@ class MainWindow(QMainWindow):
                         status = "stale"
                     else:
                         status = "integrity_fail"
-                elif self._has_newer_versions_since(current, versions):
-                    status = "newer"
-                else:
+                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                    # Pinned via "Keep" and no new versions since → deliberate
                     integrity = promoter.verify()
                     if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
                         status = "stale"
                     else:
                         status = "deliberate"
+                else:
+                    # Unpinned (regular promote of older version) or pin expired
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "newer"
 
             self._source_status[source.name] = {
                 "current": current,
@@ -4983,17 +5009,19 @@ class MainWindow(QMainWindow):
                 self.current_label.setText(f"Current: {current.version}   ({source.name})")
                 self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #90ee90;")
             else:
-                # Determine if higher versions are new (appeared after promotion)
-                # or if the user deliberately chose a lower version
-                has_new = self._has_newer_versions_since(current, versions)
-                if has_new:
-                    # New versions appeared after promotion — dark orange
-                    self.current_label.setText(f"Current: {current.version} \u25bc!   ({source.name})")
-                    self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #cc8833;")
-                else:
-                    # User deliberately promoted a lower version — muted green
+                # Check if this is a pinned (Keep) version with no new versions since
+                is_pinned_deliberate = (
+                    getattr(current, 'pinned', False)
+                    and not has_newer_versions_since(current, versions)
+                )
+                if is_pinned_deliberate:
+                    # Pinned via "Keep" — blue indicator
                     self.current_label.setText(f"Current: {current.version}*   ({source.name})")
                     self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #7abbe0;")
+                else:
+                    # Unpinned or pin expired — newer versions available (orange)
+                    self.current_label.setText(f"Current: {current.version} \u25bc!   ({source.name})")
+                    self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #cc8833;")
             integrity = promoter.verify()
             if integrity["valid"]:
                 self.integrity_label.setText("\u2713 Verified")
@@ -5023,7 +5051,7 @@ class MainWindow(QMainWindow):
         has_new = (
             current is not None
             and current_ver != (versions[-1].version_string if versions else None)
-            and self._has_newer_versions_since(current, versions)
+            and (not getattr(current, 'pinned', False) or has_newer_versions_since(current, versions))
         )
 
         # Populate version tree
@@ -5116,54 +5144,6 @@ class MainWindow(QMainWindow):
                 self.history_tree.addTopLevelItem(item)
 
         self.history_tree.itemSelectionChanged.connect(self._on_history_selected)
-
-    @staticmethod
-    def _has_newer_versions_since(current: HistoryEntry, versions: list) -> bool:
-        """Check if any version higher than the current one appeared after promotion.
-
-        Compares the promotion timestamp against the modification time of
-        higher-version source paths. Returns True if at least one higher
-        version was created/modified *after* the promotion — meaning the
-        user didn't deliberately skip it.
-
-        A 2-second tolerance is applied because set_at is stored with
-        second-level precision while filesystem timestamps have sub-second
-        resolution.
-        """
-        from datetime import datetime, timedelta
-
-        if not current or not current.set_at or not versions:
-            return False
-
-        try:
-            promoted_at = datetime.fromisoformat(current.set_at)
-        except (ValueError, TypeError):
-            return False
-
-        # Add tolerance for timestamp rounding (set_at truncates to seconds)
-        threshold = promoted_at + timedelta(seconds=2)
-
-        current_num = None
-        for v in versions:
-            if v.version_string == current.version:
-                current_num = v.version_number
-                break
-        if current_num is None:
-            return False
-
-        for v in versions:
-            if v.version_number <= current_num:
-                continue
-            # Check when this higher version's source path was last modified
-            try:
-                source_path = Path(v.source_path)
-                mtime = datetime.fromtimestamp(source_path.stat().st_mtime)
-                if mtime > threshold:
-                    return True
-            except (OSError, ValueError):
-                continue
-
-        return False
 
     _PROMOTE_STYLE = (
         "QPushButton { background-color: #2d5a2d; color: white; padding: 8px 16px; "
@@ -5376,6 +5356,7 @@ class MainWindow(QMainWindow):
             if dlg.exec() != QDialog.Accepted:
                 return
 
+        self._pinned_promote = is_keep
         self._start_promotion(promoter, version)
 
     def _revert_selected(self):
@@ -5450,7 +5431,10 @@ class MainWindow(QMainWindow):
         self.btn_cancel_promote.setEnabled(True)
         self.btn_cancel_promote.setText("Cancel")
 
-        self._worker = PromoteWorker(promoter, version, self, force=self._force_promote)
+        pinned = getattr(self, '_pinned_promote', False)
+        self._pinned_promote = False
+
+        self._worker = PromoteWorker(promoter, version, self, force=self._force_promote, pinned=pinned)
         self._worker.progress.connect(self._on_promote_progress)
         self._worker.finished.connect(self._on_promote_finished)
         self._worker.error.connect(self._on_promote_error)
