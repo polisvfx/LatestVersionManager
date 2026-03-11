@@ -193,6 +193,57 @@ class Promoter:
             pass
         return False
 
+    def _filter_version_files(
+        self, files: list[Path], version: VersionInfo
+    ) -> list[Path]:
+        """Filter files to only those belonging to a specific version.
+
+        When a watched source uses flat versioned files (all versions in the
+        same directory), the file list contains every version's files.  This
+        method keeps only the files whose embedded version/date matches the
+        target *version*.
+        """
+        from .scanner import VersionScanner
+        from .task_tokens import parse_date_to_sortable
+
+        pattern = self.source.version_pattern
+        if not pattern:
+            return files
+
+        date_format = getattr(self.source, "date_format", "")
+        regex = VersionScanner._compile_version_pattern(pattern, date_format)
+
+        has_version = "{version}" in pattern
+        has_date = "{date}" in pattern
+
+        filtered = []
+        for f in files:
+            match = regex.search(f.name)
+            if not match:
+                continue
+            groups = match.groups()
+
+            if has_version and has_date:
+                date_pos = pattern.index("{date}")
+                ver_pos = pattern.index("{version}")
+                if date_pos < ver_pos:
+                    date_str, ver_str = groups[0], groups[1]
+                else:
+                    ver_str, date_str = groups[0], groups[1]
+                if (int(ver_str) != version.version_number
+                        or parse_date_to_sortable(date_str, date_format) != version.date_sortable):
+                    continue
+            elif has_date and not has_version:
+                if parse_date_to_sortable(groups[0], date_format) != version.date_sortable:
+                    continue
+            else:
+                if int(match.group(1)) != version.version_number:
+                    continue
+
+            filtered.append(f)
+
+        return filtered if filtered else files
+
     def _promote_sequence(
         self,
         source_dir: Path,
@@ -206,6 +257,11 @@ class Promoter:
             f for f in source_dir.iterdir()
             if f.is_file() and f.suffix.lower() in valid_extensions
         )
+
+        # When source_dir is the watched source root (flat file layout),
+        # it contains files from ALL versions — filter to only the target version.
+        if source_dir == Path(self.source.source_dir):
+            source_files = self._filter_version_files(source_files, version)
 
         if not source_files:
             raise PromotionError(f"No matching files found in {source_dir}")
