@@ -2232,6 +2232,23 @@ class DiscoveryDialog(QDialog):
         self._ignored_versions.discard(key)
         self._rebuild_tree()
 
+    def _apply_blacklist_keyword(self, keyword: str):
+        """
+        Filter all results that contain the given blacklist keyword.
+        Add matching results to _ignored_paths for immediate filtering.
+        """
+        keyword_lower = keyword.lower()
+        for result in self._results:
+            # Build search text from name and path, similar to discovery._apply_filters
+            parts = [result.name, result.path]
+            if result.sample_filename:
+                parts.append(result.sample_filename)
+            search_text = " ".join(parts).lower()
+
+            # If keyword is found in the result, mark it as ignored
+            if keyword_lower in search_text:
+                self._ignored_paths.add(result.path)
+
     def _add_to_blacklist(self, result):
         """Add a keyword to the project's name_blacklist (persistent)."""
         keyword, ok = QInputDialog.getText(
@@ -2243,7 +2260,8 @@ class DiscoveryDialog(QDialog):
             keyword = keyword.strip()
             if keyword not in self._config.name_blacklist:
                 self._config.name_blacklist.append(keyword)
-            self._ignored_paths.add(result.path)
+            # Apply the blacklist keyword to all results immediately
+            self._apply_blacklist_keyword(keyword)
             self._rebuild_tree()
 
     def _add_selected(self):
