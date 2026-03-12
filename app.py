@@ -248,8 +248,7 @@ class ScanWorker(QThread):
 
             def _scan_one(source):
                 scanner = VersionScanner(source, self.config.task_tokens)
-                prev = self.previous_cache.get(source.name)
-                versions = scanner.scan(previous_versions=prev)
+                versions = scanner.scan()
                 if tc_mode == "always":
                     populate_timecodes(versions)
                 return source.name, versions
@@ -4648,8 +4647,7 @@ class MainWindow(QMainWindow):
 
             # Rescan this source
             scanner = VersionScanner(source, self.config.task_tokens)
-            prev = self._versions_cache.get(source.name)
-            versions = scanner.scan(previous_versions=prev)
+            versions = scanner.scan()
             if tc_mode == "always":
                 populate_timecodes(versions)
 
@@ -4891,6 +4889,7 @@ class MainWindow(QMainWindow):
         self.btn_refresh.setEnabled(True)
         self._scan_indicator.setText("")
         self.statusBar().showMessage(f"Scan error: {msg}")
+        logger.error(f"Scan error: {msg}")
 
     def _on_refresh_complete(self, scan_results: dict):
         """Called when background scan finishes. Populate caches and rebuild UI."""
