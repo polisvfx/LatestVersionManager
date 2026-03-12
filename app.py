@@ -277,6 +277,74 @@ class ScanWorker(QThread):
             self.error.emit(str(e))
 
 
+class StatusWorker(QThread):
+    """Computes source statuses (verify, conflicts) in a background thread.
+
+    Runs Promoter.verify() and conflict detection off the main thread so the
+    UI stays responsive after scanning completes.
+    """
+    finished = Signal(dict, dict, dict, dict)  # source_status, target_conflicts, promoters, scanners
+
+    def __init__(self, config: ProjectConfig, versions_cache: dict, parent=None):
+        super().__init__(parent)
+        self._config = config
+        self._versions_cache = versions_cache
+
+    def run(self):
+        from src.lvm.conflicts import detect_target_conflicts
+        source_status = {}
+        promoters = {}
+        scanners = {}
+        for source in self._config.watched_sources:
+            versions = self._versions_cache.get(source.name, [])
+            scanners[source.name] = VersionScanner(source, self._config.task_tokens)
+            highest_ver = versions[-1].version_string if versions else None
+            current = None
+            status = "no_target"
+
+            if source.latest_target:
+                promoter = Promoter(source, self._config.task_tokens, self._config.project_name)
+                promoters[source.name] = promoter
+                current = promoter.get_current_version()
+
+                if not current:
+                    status = "no_version"
+                elif current.version == highest_ver:
+                    integrity = promoter.verify()
+                    if integrity["valid"]:
+                        status = "highest"
+                    elif "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "integrity_fail"
+                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "deliberate"
+                else:
+                    integrity = promoter.verify()
+                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                        status = "stale"
+                    else:
+                        status = "newer"
+
+            source_status[source.name] = {
+                "current": current,
+                "status": status,
+                "has_overrides": source.has_overrides,
+            }
+
+        conflicts = detect_target_conflicts(self._config)
+        target_conflicts = {}
+        for target, name_a, name_b in conflicts:
+            target_conflicts.setdefault(name_a, []).append(name_b)
+            target_conflicts.setdefault(name_b, []).append(name_a)
+
+        self.finished.emit(source_status, target_conflicts, promoters, scanners)
+
+
 # ---------------------------------------------------------------------------
 # Version tree with drag-and-drop support for manual version import
 # ---------------------------------------------------------------------------
@@ -3112,8 +3180,13 @@ class MainWindow(QMainWindow):
         self._force_promote: bool = False
         self._target_conflicts: dict = {}
         self._scan_worker: ScanWorker = None
+        self._status_worker: StatusWorker = None
+        self._reload_pending: bool = False
+        self._rescan_after_cache: bool = False
+        self._reload_select_source: str = None  # source to select after async _reload_ui
         self._refresh_select_source: str = None  # source name to re-select after background refresh
         self._thumb_worker: ThumbnailWorker = None
+        self._io_executor = ThreadPoolExecutor(max_workers=1)
 
         # File watcher
         self.watcher = SourceWatcher(self)
@@ -3697,11 +3770,14 @@ class MainWindow(QMainWindow):
             cached = load_cache(path, self.config.watched_sources)
 
             if cached:
-                self._reload_ui_from_cache(cached)
-                self._trigger_background_rescan()
+                # Show cached data quickly, then rescan in background.
+                # _reload_ui(cached_versions=...) is async; the background
+                # rescan is triggered in _on_reload_status_complete via
+                # _trigger_background_rescan_after_cache flag.
+                self._rescan_after_cache = True
+                self._reload_ui(cached_versions=cached)
             else:
                 self._reload_ui()
-                self._save_scan_cache()
 
             self.project_label.setText(f"{self.config.project_name}")
             self.project_label.setStyleSheet("color: #ccc; font-weight: bold;")
@@ -3715,11 +3791,41 @@ class MainWindow(QMainWindow):
         if not self.config_path:
             self._save_project_as()
             return
-        try:
-            save_config(self.config, self.config_path)
-            self.statusBar().showMessage(f"Saved: {self.config_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+        # Snapshot config data on the main thread, write in background
+        config_snapshot = self.config.to_dict()
+        config_path = self.config_path
+        project_dir = str(Path(config_path).resolve().parent)
+
+        def _write():
+            try:
+                # Relativise paths (same logic as save_config but on snapshot)
+                for source_data in config_snapshot.get("watched_sources", []):
+                    sd = source_data.get("source_dir", "")
+                    if sd and Path(sd).is_absolute():
+                        source_data["source_dir"] = make_relative(sd, project_dir)
+                    lt = source_data.get("latest_target", "")
+                    if lt and Path(lt).is_absolute():
+                        source_data["latest_target"] = make_relative(lt, project_dir)
+                pr = config_snapshot.get("project_root", "")
+                if pr and Path(pr).is_absolute():
+                    config_snapshot["project_root"] = make_relative(pr, project_dir)
+                for grp_props in config_snapshot.get("groups", {}).values():
+                    rd = grp_props.get("root_dir", "")
+                    if rd and Path(rd).is_absolute():
+                        grp_props["root_dir"] = make_relative(rd, project_dir)
+
+                p = Path(config_path).resolve()
+                p.parent.mkdir(parents=True, exist_ok=True)
+                import json as _json
+                with open(p, "w", encoding="utf-8") as f:
+                    _json.dump(config_snapshot, f, indent=2, ensure_ascii=False)
+                self.config.project_dir = project_dir
+                logger.info(f"Saved project config to {p}")
+            except Exception as e:
+                logger.error(f"Failed to save project: {e}")
+
+        self._io_executor.submit(_write)
+        self.statusBar().showMessage(f"Saved: {self.config_path}")
 
     def _save_project_as(self):
         if not self.config:
@@ -4229,8 +4335,19 @@ class MainWindow(QMainWindow):
 
     # --- UI Updates ---
 
-    def _reload_ui(self):
-        """Refresh everything from current config."""
+    def _reload_ui(self, cached_versions: dict = None):
+        """Refresh everything from current config (non-blocking).
+
+        When *cached_versions* is supplied the scan phase is skipped and the
+        cached data is fed straight into status computation.  Otherwise a
+        background ``ScanWorker`` runs first.
+        """
+        # If an async reload is already in progress, queue this one
+        if self._scan_worker is not None or self._status_worker is not None:
+            self._reload_pending = True
+            return
+
+        # Clear UI immediately so the user sees something is happening
         self.source_list.clear()
         self.version_tree.clear()
         self.history_tree.clear()
@@ -4243,182 +4360,111 @@ class MainWindow(QMainWindow):
         enabled = self.config is not None
         self.btn_project_settings.setEnabled(enabled)
         self.btn_manage_groups.setEnabled(enabled)
-        self.btn_refresh.setEnabled(enabled)
+        self.btn_refresh.setEnabled(False)
         self.btn_import_version.setEnabled(False)
         self.btn_refresh_versions.setEnabled(False)
         self.watch_toggle.setEnabled(enabled)
         self.btn_promote.setEnabled(False)
         self.btn_revert.setEnabled(False)
-        has_sources = self.config is not None and len(self.config.watched_sources) > 0
-        self.btn_promote_all.setEnabled(has_sources and self._worker is None)
+        self.btn_promote_all.setEnabled(False)
         self.btn_promote_all.setText("Promote All to Latest")
 
         if not self.config:
             self.current_label.setText("No project loaded")
             self.integrity_label.setText("")
-            self.btn_promote_all.setEnabled(False)
             return
 
-        # Compute status for each source (used by list + filter)
-        # status: "highest", "newer", "deliberate", "no_version", "no_target", "integrity_fail"
-        self._source_status: dict[str, dict] = {}
+        if not self.config.watched_sources:
+            # Nothing to scan/compute — just populate empty state
+            self._source_status = {}
+            self._target_conflicts = {}
+            self.btn_refresh.setEnabled(True)
+            self._populate_source_list()
+            return
 
-        tc_mode = self.config.timecode_mode
+        self._scan_indicator.setText("Loading...")
+        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
 
-        for source in self.config.watched_sources:
-            self._scanners[source.name] = VersionScanner(source, self.config.task_tokens)
-            versions = self._scanners[source.name].scan()
-            # "always" mode: populate timecodes eagerly during scan
-            if tc_mode == "always":
-                populate_timecodes(versions)
-            self._versions_cache[source.name] = versions
+        if cached_versions is not None:
+            # Skip scan, go straight to status computation
+            self._versions_cache = dict(cached_versions)
+            self._start_status_worker(dict(cached_versions))
+        else:
+            # Phase 1: scan in background
+            self._scan_worker = ScanWorker(self.config, parent=self)
+            self._scan_worker.progress.connect(self._on_refresh_progress)
+            self._scan_worker.finished.connect(self._on_reload_scan_complete)
+            self._scan_worker.error.connect(self._on_reload_error)
+            self._scan_worker.start()
 
-            current = None
-            status = "no_target"
-            highest_ver = versions[-1].version_string if versions else None
+    def _on_reload_scan_complete(self, scan_results: dict):
+        """Phase 1 done — scan results ready, start status computation."""
+        self._scan_worker = None
+        self._versions_cache = dict(scan_results)
+        self._start_status_worker(scan_results)
 
-            if source.latest_target:
-                self._promoters[source.name] = Promoter(source, self.config.task_tokens, self.config.project_name)
-                promoter = self._promoters[source.name]
-                current = promoter.get_current_version()
+    def _on_reload_error(self, msg: str):
+        """Handle errors during reload scan phase."""
+        self._scan_worker = None
+        self.btn_refresh.setEnabled(True)
+        self._scan_indicator.setText("")
+        self.statusBar().showMessage(f"Scan error: {msg}")
+        logger.error(f"Reload scan error: {msg}")
+        self._check_reload_pending()
 
-                if not current:
-                    status = "no_version"
-                elif current.version == highest_ver:
-                    integrity = promoter.verify()
-                    if integrity["valid"]:
-                        status = "highest"
-                    elif "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "integrity_fail"
-                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
-                    # Pinned via "Keep" and no new versions since → deliberate
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "deliberate"
-                else:
-                    # Unpinned (regular promote of older version) or pin expired
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "newer"
+    def _start_status_worker(self, versions_cache: dict):
+        """Phase 2: compute statuses in background thread."""
+        self._status_worker = StatusWorker(self.config, versions_cache, parent=self)
+        self._status_worker.finished.connect(self._on_reload_status_complete)
+        self._status_worker.start()
 
-            self._source_status[source.name] = {
-                "current": current,
-                "status": status,
-                "has_overrides": source.has_overrides,
-            }
+    def _on_reload_status_complete(self, source_status: dict, target_conflicts: dict,
+                                   promoters: dict, scanners: dict):
+        """Phase 2 done — populate caches and rebuild UI."""
+        self._status_worker = None
+        self._source_status = source_status
+        self._target_conflicts = target_conflicts
+        self._promoters = promoters
+        self._scanners = scanners
 
-        # Conflict detection (Feature #3)
-        from src.lvm.conflicts import detect_target_conflicts
-        conflicts = detect_target_conflicts(self.config)
-        self._target_conflicts = {}
-        for target, name_a, name_b in conflicts:
-            self._target_conflicts.setdefault(name_a, []).append(name_b)
-            self._target_conflicts.setdefault(name_b, []).append(name_a)
+        self.btn_refresh.setEnabled(True)
+        has_sources = len(self.config.watched_sources) > 0
+        self.btn_promote_all.setEnabled(has_sources and self._worker is None)
 
         self._populate_source_list()
 
-        # Select first visible source
-        if self.source_list.count() > 0:
+        # Restore selection
+        restored = False
+        if self._reload_select_source:
+            for i in range(self.source_list.count()):
+                if self.source_list.item(i).data(Qt.UserRole) == self._reload_select_source:
+                    self.source_list.setCurrentRow(i)
+                    restored = True
+                    break
+            self._reload_select_source = None
+        if not restored and self.source_list.count() > 0:
             self.source_list.setCurrentRow(0)
 
+        self._save_scan_cache()
+        self._scan_indicator.setText("")
+
+        # If this was a cache-first load, kick off a background rescan now
+        if getattr(self, '_rescan_after_cache', False):
+            self._rescan_after_cache = False
+            self._trigger_background_rescan()
+        else:
+            self._check_reload_pending()
+
+    def _check_reload_pending(self):
+        """If another reload was requested while one was running, start it now."""
+        if self._reload_pending:
+            self._reload_pending = False
+            self._reload_ui()
+
+    # Keep old name as alias for the cache-first load path
     def _reload_ui_from_cache(self, cached_versions: dict):
-        """Populate UI from cached version data with live status computation."""
-        self.source_list.clear()
-        self.version_tree.clear()
-        self.history_tree.clear()
-        self._scanners.clear()
-        self._promoters.clear()
-        self._versions_cache.clear()
-        self._manual_versions.clear()
-        self._current_source = None
-
-        enabled = self.config is not None
-        self.btn_project_settings.setEnabled(enabled)
-        self.btn_manage_groups.setEnabled(enabled)
-        self.btn_refresh.setEnabled(enabled)
-        self.btn_import_version.setEnabled(False)
-        self.btn_refresh_versions.setEnabled(False)
-        self.watch_toggle.setEnabled(enabled)
-        self.btn_promote.setEnabled(False)
-        self.btn_revert.setEnabled(False)
-        has_sources = self.config is not None and len(self.config.watched_sources) > 0
-        self.btn_promote_all.setEnabled(has_sources and self._worker is None)
-        self.btn_promote_all.setText("Promote All to Latest")
-
-        if not self.config:
-            self.current_label.setText("No project loaded")
-            self.integrity_label.setText("")
-            self.btn_promote_all.setEnabled(False)
-            return
-
-        self._source_status: dict[str, dict] = {}
-        tc_mode = self.config.timecode_mode
-
-        for source in self.config.watched_sources:
-            self._scanners[source.name] = VersionScanner(source, self.config.task_tokens)
-            # Use cached versions instead of scanning
-            versions = cached_versions.get(source.name, [])
-            if tc_mode == "always":
-                populate_timecodes(versions)
-            self._versions_cache[source.name] = versions
-
-            current = None
-            status = "no_target"
-            highest_ver = versions[-1].version_string if versions else None
-
-            if source.latest_target:
-                self._promoters[source.name] = Promoter(source, self.config.task_tokens, self.config.project_name)
-                promoter = self._promoters[source.name]
-                current = promoter.get_current_version()
-
-                if not current:
-                    status = "no_version"
-                elif current.version == highest_ver:
-                    integrity = promoter.verify()
-                    if integrity["valid"]:
-                        status = "highest"
-                    elif "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "integrity_fail"
-                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
-                    # Pinned via "Keep" and no new versions since → deliberate
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "deliberate"
-                else:
-                    # Unpinned (regular promote of older version) or pin expired
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "newer"
-
-            self._source_status[source.name] = {
-                "current": current,
-                "status": status,
-                "has_overrides": source.has_overrides,
-            }
-
-        # Conflict detection
-        from src.lvm.conflicts import detect_target_conflicts
-        conflicts = detect_target_conflicts(self.config)
-        self._target_conflicts = {}
-        for target, name_a, name_b in conflicts:
-            self._target_conflicts.setdefault(name_a, []).append(name_b)
-            self._target_conflicts.setdefault(name_b, []).append(name_a)
-
-        self._populate_source_list()
-        if self.source_list.count() > 0:
-            self.source_list.setCurrentRow(0)
+        """Populate UI from cached version data (non-blocking)."""
+        self._reload_ui(cached_versions=cached_versions)
 
     def _trigger_background_rescan(self):
         """Start a background rescan after loading from cache."""
@@ -4435,14 +4481,22 @@ class MainWindow(QMainWindow):
         self._scan_worker.start()
 
     def _save_scan_cache(self):
-        """Save current _versions_cache to disk."""
+        """Save current _versions_cache to disk (background I/O)."""
         if not self.config_path or not self.config:
             return
         from src.lvm.scan_cache import save_cache
-        try:
-            save_cache(self.config_path, self.config.watched_sources, self._versions_cache)
-        except Exception as e:
-            logging.getLogger(__name__).warning("Failed to save scan cache: %s", e)
+        # Snapshot refs for the background thread
+        config_path = self.config_path
+        sources = list(self.config.watched_sources)
+        cache = dict(self._versions_cache)
+
+        def _write():
+            try:
+                save_cache(config_path, sources, cache)
+            except Exception as e:
+                logging.getLogger(__name__).warning("Failed to save scan cache: %s", e)
+
+        self._io_executor.submit(_write)
 
     def _source_matches_search(self, source: WatchedSource, query: str) -> bool:
         """Check if a source matches the search query (name, filename, task)."""
@@ -4627,96 +4681,26 @@ class MainWindow(QMainWindow):
             self.source_list.setCurrentRow(0)
 
     def _refresh_sources_by_name(self, source_names: list[str], select_source: str = None):
-        """Re-scan only the given sources (by name) and update the UI in-place.
+        """Re-scan only the given sources (by name) using the background worker path.
 
-        Much faster than _refresh_all when only a few sources changed (e.g. after promotion).
+        Delegates to _refresh_selected_sources which uses ScanWorker + StatusWorker
+        so the UI stays responsive even on slow network paths.
         """
         if not self.config:
             return
+        if self._scan_worker is not None or self._status_worker is not None:
+            return
 
-        tc_mode = self.config.timecode_mode
+        # Resolve source names to indices
+        indices = []
+        for i, s in enumerate(self.config.watched_sources):
+            if s.name in source_names:
+                indices.append(i)
+        if not indices:
+            return
 
-        for source_name in source_names:
-            source = None
-            for s in self.config.watched_sources:
-                if s.name == source_name:
-                    source = s
-                    break
-            if source is None:
-                continue
-
-            # Rescan this source
-            scanner = VersionScanner(source, self.config.task_tokens)
-            versions = scanner.scan()
-            if tc_mode == "always":
-                populate_timecodes(versions)
-
-            self._scanners[source.name] = scanner
-            self._versions_cache[source.name] = versions
-
-            # Rebuild promoter and status
-            highest_ver = versions[-1].version_string if versions else None
-            current = None
-            status = "no_target"
-
-            if source.latest_target:
-                promoter = Promoter(source, self.config.task_tokens, self.config.project_name)
-                self._promoters[source.name] = promoter
-                current = promoter.get_current_version()
-
-                if not current:
-                    status = "no_version"
-                elif current.version == highest_ver:
-                    integrity = promoter.verify()
-                    if integrity["valid"]:
-                        status = "highest"
-                    elif "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "integrity_fail"
-                elif self._has_newer_versions_since(current, versions):
-                    status = "newer"
-                else:
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "deliberate"
-
-            self._source_status[source.name] = {
-                "current": current,
-                "status": status,
-                "has_overrides": source.has_overrides,
-            }
-
-            # Update the source list item in-place
-            for i in range(self.source_list.count()):
-                if self.source_list.item(i).data(Qt.UserRole) == source.name:
-                    new_item = self._make_source_item(source)
-                    old_item = self.source_list.item(i)
-                    old_item.setText(new_item.text())
-                    old_item.setForeground(new_item.foreground())
-                    old_item.setToolTip(new_item.toolTip())
-                    grp_data = new_item.data(SourceItemDelegate.GROUP_ROLE)
-                    if grp_data:
-                        old_item.setData(SourceItemDelegate.GROUP_ROLE, grp_data)
-                    break
-
-        # If the currently selected source was refreshed, re-trigger version display
-        current_row = self.source_list.currentRow()
-        if current_row >= 0:
-            current_item = self.source_list.item(current_row)
-            if current_item and current_item.data(Qt.UserRole) in source_names:
-                self._on_source_selected(current_row)
-
-        # If a specific source should be selected, select it
-        if select_source:
-            for i in range(self.source_list.count()):
-                if self.source_list.item(i).data(Qt.UserRole) == select_source:
-                    self.source_list.setCurrentRow(i)
-                    break
-
-        self._save_scan_cache()
+        self._refresh_select_source = select_source
+        self._refresh_selected_sources(indices)
 
     def _refresh_all_with_selection(self, select_source: str = None):
         """Re-scan all sources in background, restoring the given source selection on completion."""
@@ -4736,7 +4720,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_selected_sources(self, indices: list[int]):
         """Re-scan only the specified sources in background thread."""
-        if not self.config or self._scan_worker is not None:
+        if not self.config or self._scan_worker is not None or self._status_worker is not None:
             return
         sources = [self.config.watched_sources[i] for i in indices if i < len(self.config.watched_sources)]
         if not sources:
@@ -4761,71 +4745,28 @@ class MainWindow(QMainWindow):
         self._scan_worker.start()
 
     def _on_partial_refresh_complete(self, scan_results: dict):
-        """Called when a partial (selected sources) scan finishes. Merge results and rebuild UI."""
+        """Called when a partial (selected sources) scan finishes. Delegate to StatusWorker."""
         self._scan_worker = None
+        self._partial_scan_count = len(scan_results)
 
-        # Update only the scanned sources in caches
+        # Merge new scan results into the existing versions cache
         for source_name, versions in scan_results.items():
-            source = None
-            for s in self.config.watched_sources:
-                if s.name == source_name:
-                    source = s
-                    break
-            if not source:
-                continue
-
             self._versions_cache[source_name] = versions
-            self._scanners[source_name] = VersionScanner(source, self.config.task_tokens)
             self._manual_versions.pop(source_name, None)
 
-            # Recompute status for this source
-            current = None
-            status = "no_target"
-            highest_ver = versions[-1].version_string if versions else None
+        # Compute statuses for ALL sources in background (needed for conflict detection)
+        self._status_worker = StatusWorker(self.config, dict(self._versions_cache), parent=self)
+        self._status_worker.finished.connect(self._on_partial_status_complete)
+        self._status_worker.start()
 
-            if source.latest_target:
-                self._promoters[source_name] = Promoter(source, self.config.task_tokens, self.config.project_name)
-                promoter = self._promoters[source_name]
-                current = promoter.get_current_version()
-
-                if not current:
-                    status = "no_version"
-                elif current.version == highest_ver:
-                    integrity = promoter.verify()
-                    if integrity["valid"]:
-                        status = "highest"
-                    elif "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "integrity_fail"
-                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
-                    # Pinned via "Keep" and no new versions since → deliberate
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "deliberate"
-                else:
-                    # Unpinned (regular promote of older version) or pin expired
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "newer"
-
-            self._source_status[source_name] = {
-                "current": current,
-                "status": status,
-                "has_overrides": source.has_overrides,
-            }
-
-        # Re-run conflict detection
-        from src.lvm.conflicts import detect_target_conflicts
-        conflicts = detect_target_conflicts(self.config)
-        self._target_conflicts = {}
-        for target, name_a, name_b in conflicts:
-            self._target_conflicts.setdefault(name_a, []).append(name_b)
-            self._target_conflicts.setdefault(name_b, []).append(name_a)
+    def _on_partial_status_complete(self, source_status: dict, target_conflicts: dict,
+                                    promoters: dict, scanners: dict):
+        """Status computation done after partial refresh — rebuild UI."""
+        self._status_worker = None
+        self._source_status = source_status
+        self._target_conflicts = target_conflicts
+        self._promoters = promoters
+        self._scanners = scanners
 
         # Rebuild source list and restore selection
         self.source_list.clear()
@@ -4842,7 +4783,7 @@ class MainWindow(QMainWindow):
         self._populate_source_list()
 
         self._scan_indicator.setText("")
-        count = len(scan_results)
+        count = getattr(self, '_partial_scan_count', 0)
         self.statusBar().showMessage(f"Refreshed {count} source{'s' if count != 1 else ''}", 3000)
 
         # Restore selection
@@ -4862,8 +4803,8 @@ class MainWindow(QMainWindow):
             self._reload_ui()
             return
 
-        # If a scan is already running, let it complete
-        if self._scan_worker is not None:
+        # If a scan or status computation is already running, let it complete
+        if self._scan_worker is not None or self._status_worker is not None:
             return
 
         # Disable refresh during scan
@@ -4892,81 +4833,41 @@ class MainWindow(QMainWindow):
         logger.error(f"Scan error: {msg}")
 
     def _on_refresh_complete(self, scan_results: dict):
-        """Called when background scan finishes. Populate caches and rebuild UI."""
+        """Called when background scan finishes. Delegate to StatusWorker."""
         self._scan_worker = None
 
-        # Store scanned versions
-        self._versions_cache.clear()
+        # Store scanned versions and clear stale caches
+        self._versions_cache = dict(scan_results)
         self._scanners.clear()
         self._promoters.clear()
         self._manual_versions.clear()
         self._current_source = None
         self._source_status = {}
 
-        for source in self.config.watched_sources:
-            versions = scan_results.get(source.name, [])
-            self._scanners[source.name] = VersionScanner(source, self.config.task_tokens)
-            self._versions_cache[source.name] = versions
+        # Phase 2: compute statuses in background
+        self._status_worker = StatusWorker(self.config, scan_results, parent=self)
+        self._status_worker.finished.connect(self._on_refresh_status_complete)
+        self._status_worker.start()
 
-            current = None
-            status = "no_target"
-            highest_ver = versions[-1].version_string if versions else None
-
-            if source.latest_target:
-                self._promoters[source.name] = Promoter(source, self.config.task_tokens, self.config.project_name)
-                promoter = self._promoters[source.name]
-                current = promoter.get_current_version()
-
-                if not current:
-                    status = "no_version"
-                elif current.version == highest_ver:
-                    integrity = promoter.verify()
-                    if integrity["valid"]:
-                        status = "highest"
-                    elif "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "integrity_fail"
-                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
-                    # Pinned via "Keep" and no new versions since → deliberate
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "deliberate"
-                else:
-                    # Unpinned (regular promote of older version) or pin expired
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "newer"
-
-            self._source_status[source.name] = {
-                "current": current,
-                "status": status,
-                "has_overrides": source.has_overrides,
-            }
-
-        # Conflict detection
-        from src.lvm.conflicts import detect_target_conflicts
-        conflicts = detect_target_conflicts(self.config)
-        self._target_conflicts = {}
-        for target, name_a, name_b in conflicts:
-            self._target_conflicts.setdefault(name_a, []).append(name_b)
-            self._target_conflicts.setdefault(name_b, []).append(name_a)
+    def _on_refresh_status_complete(self, source_status: dict, target_conflicts: dict,
+                                    promoters: dict, scanners: dict):
+        """Status computation done after _refresh_all — rebuild UI."""
+        self._status_worker = None
+        self._source_status = source_status
+        self._target_conflicts = target_conflicts
+        self._promoters = promoters
+        self._scanners = scanners
 
         self.source_list.clear()
         self.version_tree.clear()
         self.history_tree.clear()
 
-        enabled = True
-        self.btn_project_settings.setEnabled(enabled)
-        self.btn_manage_groups.setEnabled(enabled)
-        self.btn_refresh.setEnabled(enabled)
+        self.btn_project_settings.setEnabled(True)
+        self.btn_manage_groups.setEnabled(True)
+        self.btn_refresh.setEnabled(True)
         self.btn_import_version.setEnabled(False)
         self.btn_refresh_versions.setEnabled(False)
-        self.watch_toggle.setEnabled(enabled)
+        self.watch_toggle.setEnabled(True)
         self.btn_promote.setEnabled(False)
         self.btn_revert.setEnabled(False)
         self.btn_promote_all.setEnabled(len(self.config.watched_sources) > 0 and self._worker is None)
