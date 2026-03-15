@@ -707,7 +707,7 @@ class TestConfig(unittest.TestCase):
     def test_load_kia_config(self):
         """Load the actual KIA project config."""
         config = load_config(str(KIA_CONFIG))
-        self.assertEqual(config.project_name, "KIATest")
+        self.assertEqual(config.project_name, "KIA Tempomedia")
         self.assertEqual(len(config.watched_sources), 4)
         self.assertEqual(config.task_tokens, ["comp_%%", "comp"])
 
