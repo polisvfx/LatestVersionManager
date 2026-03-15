@@ -337,17 +337,49 @@ class Promoter:
         if progress_callback:
             progress_callback(1, 1, source_file.name)
 
+    def _extract_layer_suffix(self, filename: str) -> str:
+        """Extract the layer suffix from a filename relative to the base source name.
+
+        Compares the file's version-stripped name against the cached base
+        source_name to find additional naming info (like layer/pass names).
+
+        Examples (base source_name="shot010_comp"):
+            shot010_comp_v001.1001.exr           -> ""
+            shot010_comp_alpha_v001.1001.exr      -> "_alpha"
+            shot010_comp_v001_alpha.1001.exr       -> "_alpha"
+        """
+        from .task_tokens import strip_frame_and_ext, strip_version
+
+        fullname = strip_frame_and_ext(filename)
+        file_source_name = strip_version(fullname)
+        base_source_name = self._rename_tokens["source_name"]
+
+        if file_source_name == base_source_name:
+            return ""
+
+        if file_source_name.startswith(base_source_name):
+            return file_source_name[len(base_source_name):]
+
+        # Check if the base is a prefix after case-insensitive comparison
+        if file_source_name.lower().startswith(base_source_name.lower()):
+            return file_source_name[len(base_source_name):]
+
+        return ""
+
     def _remap_filename(self, filename: str) -> str:
         """Remap a versioned filename using the file rename template.
 
         If file_rename_template is set, uses it to build the base name.
         Tokens: {source_title}, {source_name}, {source_basename}, {source_fullname}
         The frame number and extension are always preserved from the original.
+        Layer suffixes (e.g. _alpha) are preserved for non-primary sequences.
 
         Examples (template="{source_name}"):
             hero_comp_v003.1001.exr -> hero_comp.1001.exr
+            hero_comp_alpha_v003.1001.exr -> hero_comp_alpha.1001.exr
         Examples (template="{source_name}_latest"):
             hero_comp_v003.1001.exr -> hero_comp_latest.1001.exr
+            hero_comp_v003_alpha.1001.exr -> hero_comp_alpha_latest.1001.exr
         """
         template = self.source.file_rename_template
         if not template:
@@ -387,13 +419,21 @@ class Promoter:
 
         tokens = self._rename_tokens
 
-        # Expand template tokens
+        # Extract layer suffix for this specific file (e.g. "_alpha")
+        layer_suffix = self._extract_layer_suffix(filename)
+
+        # Expand template tokens, appending layer suffix to each token value
+        # so that "{source_name}_latest" becomes "hero_comp_alpha_latest"
         base = template
-        base = base.replace("{source_title}", tokens["source_title"])
-        base = base.replace("{source_name}", tokens["source_name"])
-        base = base.replace("{source_basename}", tokens["source_basename"])
-        base = base.replace("{source_fullname}", tokens["source_fullname"])
+        base = base.replace("{source_title}", tokens["source_title"] + layer_suffix)
+        base = base.replace("{source_name}", tokens["source_name"] + layer_suffix)
+        base = base.replace("{source_basename}", tokens["source_basename"] + layer_suffix)
+        base = base.replace("{source_fullname}", tokens["source_fullname"] + layer_suffix)
         base = _expand_group_token(base, self.source.group)
+
+        # Clean up double dividers from layer suffix insertion
+        if layer_suffix:
+            base = _DOUBLE_DIVIDER_RE.sub(r"\1", base)
 
         # Reconstruct filename: base + frame + ext
         if frame_num:
