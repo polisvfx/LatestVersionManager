@@ -206,6 +206,7 @@ class WatchedSource:
     post_promote_cmd: str = ""
     override_pre_promote_cmd: bool = False
     override_post_promote_cmd: bool = False
+    added_at: str = ""  # ISO timestamp when source was added to the project
 
     @property
     def use_symlinks(self) -> bool:
@@ -260,6 +261,8 @@ class WatchedSource:
             d["override_pre_promote_cmd"] = True
         if self.override_post_promote_cmd:
             d["override_post_promote_cmd"] = True
+        if self.added_at:
+            d["added_at"] = self.added_at
         return d
 
     @classmethod
@@ -298,6 +301,7 @@ class WatchedSource:
             post_promote_cmd=data.get("post_promote_cmd", ""),
             override_pre_promote_cmd=data.get("override_pre_promote_cmd", False),
             override_post_promote_cmd=data.get("override_post_promote_cmd", False),
+            added_at=data.get("added_at", ""),
         )
 
 
@@ -339,6 +343,9 @@ class ProjectConfig:
     # Skip Path.resolve() during discovery — avoids per-directory SMB round-trips
     # for symlink resolution. Safe for network shares which rarely have symlinks.
     skip_resolve: bool = True
+    # Source list column visibility — list of enabled optional column keys
+    # Default: ["version", "status"]. Optional: "layer_count", "added_on", "last_promoted"
+    source_list_columns: list = field(default_factory=lambda: ["version", "status"])
     # Runtime only — not serialized, set by config loader
     project_dir: str = field(default="", repr=False)
 
@@ -396,6 +403,8 @@ class ProjectConfig:
             d["project_root"] = self.project_root
         if not self.skip_resolve:
             d["skip_resolve"] = False
+        if self.source_list_columns != ["version", "status"]:
+            d["source_list_columns"] = self.source_list_columns
         return d
 
     @classmethod
@@ -425,6 +434,7 @@ class ProjectConfig:
             post_promote_cmd=data.get("post_promote_cmd", ""),
             project_root=data.get("project_root", ""),
             skip_resolve=data.get("skip_resolve", True),
+            source_list_columns=data.get("source_list_columns", ["version", "status"]),
         )
 
 

@@ -2436,6 +2436,7 @@ class DiscoveryDialog(QDialog):
             )
 
             suggested_date_fmt = getattr(result, "suggested_date_format", "")
+            from datetime import datetime as _dt
             source = WatchedSource(
                 name=source_name,
                 source_dir=result.path,
@@ -2447,6 +2448,7 @@ class DiscoveryDialog(QDialog):
                 override_version_pattern=bool(result.suggested_pattern),
                 override_file_extensions=bool(result.suggested_extensions),
                 override_date_format=bool(suggested_date_fmt),
+                added_at=_dt.now().isoformat(timespec="seconds"),
             )
 
             # Compute latest_target from project template if available
@@ -3458,13 +3460,39 @@ class MainWindow(QMainWindow):
         self.group_by_check.toggled.connect(self._apply_source_filter)
         left_layout.addWidget(self.group_by_check)
 
-        self.source_list = QListWidget()
-        self.source_list.setItemDelegate(SourceItemDelegate(self.source_list))
+        # Source list column definitions
+        # key → (header label, column index)
+        self._source_col_keys = ["name", "version", "layer_count", "added_on", "last_promoted", "status"]
+        self._source_col_labels = {
+            "name": "Name", "version": "Version", "layer_count": "Layer Count",
+            "added_on": "Added On", "last_promoted": "Last Promoted", "status": "Status",
+        }
+
+        self.source_list = QTreeWidget()
+        self.source_list.setHeaderLabels([self._source_col_labels[k] for k in self._source_col_keys])
         self.source_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.source_list.currentRowChanged.connect(self._on_source_selected)
+        self.source_list.setRootIsDecorated(False)
+        self.source_list.setAllColumnsShowFocus(True)
+        self.source_list.setSortingEnabled(True)
+        self.source_list.header().setSortIndicatorShown(True)
+        self.source_list.header().setSectionsClickable(True)
+        self.source_list.sortByColumn(0, Qt.AscendingOrder)
+        self.source_list.currentItemChanged.connect(self._on_source_item_changed)
         self.source_list.itemSelectionChanged.connect(self._on_source_selection_changed)
         self.source_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.source_list.customContextMenuRequested.connect(self._source_context_menu)
+        # Header context menu for column visibility
+        self.source_list.header().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.source_list.header().customContextMenuRequested.connect(self._source_header_context_menu)
+        # Default column widths
+        self.source_list.header().resizeSection(0, 200)  # Name
+        self.source_list.header().resizeSection(1, 70)   # Version
+        self.source_list.header().resizeSection(2, 80)   # Layer Count
+        self.source_list.header().resizeSection(3, 140)  # Added On
+        self.source_list.header().resizeSection(4, 140)  # Last Promoted
+        self.source_list.header().resizeSection(5, 100)  # Status
+        self.source_list.header().setStretchLastSection(False)
+        self.source_list.header().setSectionResizeMode(0, QHeaderView.Stretch)
         left_layout.addWidget(self.source_list)
 
         # Promote All / Promote Selected button
@@ -3825,7 +3853,7 @@ class MainWindow(QMainWindow):
         if not selected_items:
             return
         # Use existing remove logic
-        names = [item.data(Qt.UserRole) for item in selected_items]
+        names = [item.data(0, Qt.UserRole) for item in selected_items]
         if len(names) == 1:
             reply = QMessageBox.question(self, "Remove Source", f"Remove '{names[0]}'?")
         else:
@@ -4042,6 +4070,9 @@ class MainWindow(QMainWindow):
                 )
                 continue
             break
+        if not draft.added_at:
+            from datetime import datetime
+            draft.added_at = datetime.now().isoformat(timespec="seconds")
         self.config.watched_sources.append(draft)
         if self.config_path:
             self._save_project()
@@ -4068,6 +4099,10 @@ class MainWindow(QMainWindow):
                 )
                 continue
             break
+        # Preserve original added_at timestamp
+        original = self.config.watched_sources[index]
+        if original.added_at and not draft.added_at:
+            draft.added_at = original.added_at
         self.config.watched_sources[index] = draft
         if self.config_path:
             self._save_project()
@@ -4118,12 +4153,13 @@ class MainWindow(QMainWindow):
                 self._save_project()
             self._reload_ui()
 
-    def _resolve_source_index(self, list_row: int) -> int:
-        """Map a filtered list row to the actual index in config.watched_sources."""
-        item = self.source_list.item(list_row)
+    def _resolve_source_index_from_item(self, item) -> int:
+        """Map a QTreeWidgetItem to the actual index in config.watched_sources."""
         if not item:
             return -1
-        source_name = item.data(Qt.UserRole)
+        source_name = item.data(0, Qt.UserRole)
+        if not source_name:
+            return -1
         for i, s in enumerate(self.config.watched_sources):
             if s.name == source_name:
                 return i
@@ -4135,8 +4171,7 @@ class MainWindow(QMainWindow):
             return
         selected_indices = []
         for item in selected_rows:
-            row = self.source_list.row(item)
-            idx = self._resolve_source_index(row)
+            idx = self._resolve_source_index_from_item(item)
             if idx >= 0:
                 selected_indices.append(idx)
         if not selected_indices:
@@ -4379,7 +4414,7 @@ class MainWindow(QMainWindow):
         selected_items = self.source_list.selectedItems()
         if len(selected_items) >= 1:
             # Promote selected
-            source_names = [item.data(Qt.UserRole) for item in selected_items]
+            source_names = [item.data(0, Qt.UserRole) for item in selected_items]
         else:
             # Promote all
             source_names = [s.name for s in self.config.watched_sources]
@@ -4641,14 +4676,14 @@ class MainWindow(QMainWindow):
         # Restore selection
         restored = False
         if self._reload_select_source:
-            for i in range(self.source_list.count()):
-                if self.source_list.item(i).data(Qt.UserRole) == self._reload_select_source:
-                    self.source_list.setCurrentRow(i)
+            for i in range(self.source_list.topLevelItemCount()):
+                if self.source_list.topLevelItem(i).data(0, Qt.UserRole) == self._reload_select_source:
+                    self.source_list.setCurrentItem(self.source_list.topLevelItem(i))
                     restored = True
                     break
             self._reload_select_source = None
-        if not restored and self.source_list.count() > 0:
-            self.source_list.setCurrentRow(0)
+        if not restored and self.source_list.topLevelItemCount() > 0:
+            self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
 
         self._save_scan_cache()
         self._scan_indicator.setText("")
@@ -4720,8 +4755,8 @@ class MainWindow(QMainWindow):
             return True
         return False
 
-    def _make_source_item(self, source: WatchedSource) -> QListWidgetItem:
-        """Create a QListWidgetItem for a source with status coloring and group tag."""
+    def _make_source_item(self, source: WatchedSource) -> QTreeWidgetItem:
+        """Create a QTreeWidgetItem for a source with status coloring and multi-column data."""
         info = self._source_status.get(source.name, {})
         status = info.get("status", "no_target")
         current = info.get("current")
@@ -4729,79 +4764,107 @@ class MainWindow(QMainWindow):
 
         ver_tag = current.version if current else ""
 
-        # Status markers
-        if status == "newer":
-            text = f"\u25bc! {source.name}  [{ver_tag}]"
-        elif status == "stale":
-            text = f"  \u21bb {source.name}  [{ver_tag}]"
-        elif status == "deliberate":
-            text = f"  * {source.name}  [{ver_tag}]"
-        elif status == "highest":
-            text = f"    {source.name}  [{ver_tag}]"
-        elif status == "integrity_fail":
-            text = f"  \u26a0 {source.name}  [{ver_tag}]"
-        elif current:
-            text = f"    {source.name}  [{ver_tag}]"
-        else:
-            text = f"    {source.name}"
-
-        # Conflict warning indicator (Feature #3)
+        # Status markers for name column
+        status_markers = {
+            "newer": "\u25bc! ", "stale": "\u21bb ", "deliberate": "* ",
+            "integrity_fail": "\u26a0 ",
+        }
+        marker = status_markers.get(status, "")
+        name_text = f"{marker}{source.name}"
         if source.name in self._target_conflicts:
-            text += " [!]"
-
-        # Append group tag
+            name_text += " [!]"
         if source.group:
-            text += f"  \u2022{source.group}"
+            name_text += f"  \u2022{source.group}"
 
-        item = QListWidgetItem(text)
-        item.setData(Qt.UserRole, source.name)
+        # Status display text
+        status_labels = {
+            "newer": "Newer Available", "stale": "Stale", "deliberate": "Pinned",
+            "highest": "Latest", "integrity_fail": "Integrity Fail",
+            "no_version": "Not Promoted", "no_target": "No Target",
+        }
+        status_text = status_labels.get(status, status)
+
+        # Layer count from last promoted version
+        layer_count = str(current.file_count) if current and current.file_count else ""
+
+        # Added on timestamp
+        added_on = ""
+        if source.added_at:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(source.added_at)
+                added_on = dt.strftime("%Y-%m-%d %H:%M")
+            except (ValueError, TypeError):
+                added_on = source.added_at
+
+        # Last promoted timestamp
+        last_promoted = ""
+        if current and current.set_at:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(current.set_at)
+                last_promoted = dt.strftime("%Y-%m-%d %H:%M")
+            except (ValueError, TypeError):
+                last_promoted = current.set_at
+
+        item = QTreeWidgetItem([name_text, ver_tag, layer_count, added_on, last_promoted, status_text])
+        item.setData(0, Qt.UserRole, source.name)
 
         # Color coding
+        color = None
+        tooltip = ""
         if status == "newer":
-            item.setForeground(QColor("#cc8833"))
-            item.setToolTip(f"Newer versions available since {ver_tag} was promoted")
+            color = QColor("#cc8833")
+            tooltip = f"Newer versions available since {ver_tag} was promoted"
         elif status == "stale":
-            item.setForeground(QColor("#e8a040"))
-            item.setToolTip(f"Source files for {ver_tag} modified since promotion — may have been re-rendered")
+            color = QColor("#e8a040")
+            tooltip = f"Source files for {ver_tag} modified since promotion — may have been re-rendered"
         elif status == "deliberate":
-            item.setForeground(QColor("#7abbe0"))
-            item.setToolTip(f"Pinned on {ver_tag} (Keep) — batch promote skips until a new version arrives")
+            color = QColor("#7abbe0")
+            tooltip = f"Pinned on {ver_tag} (Keep) — batch promote skips until a new version arrives"
         elif status == "highest":
-            item.setForeground(QColor("#90ee90"))
-            item.setToolTip(f"On latest version: {ver_tag}")
+            color = QColor("#90ee90")
+            tooltip = f"On latest version: {ver_tag}"
         elif status == "integrity_fail":
-            item.setForeground(QColor("#ffaa00"))
-            item.setToolTip(f"Integrity issue with {ver_tag}")
+            color = QColor("#ffaa00")
+            tooltip = f"Integrity issue with {ver_tag}"
         elif status == "no_version":
-            item.setForeground(QColor("#888888"))
-            item.setToolTip("No version promoted yet")
+            color = QColor("#888888")
+            tooltip = "No version promoted yet"
         else:  # no_target
-            item.setForeground(QColor("#666666"))
-            item.setToolTip("No latest target path configured")
+            color = QColor("#666666")
+            tooltip = "No latest target path configured"
 
         # Override marker (blue tint on top)
         if has_overrides:
-            item.setForeground(QColor("#88aaff"))
-            item.setToolTip(item.toolTip() + " | Custom settings")
+            color = QColor("#88aaff")
+            tooltip += " | Custom settings"
 
-        # Conflict warning (Feature #3)
+        # Conflict warning
         if source.name in self._target_conflicts:
             conflict_names = ", ".join(self._target_conflicts[source.name])
-            item.setForeground(QColor("#ff8c00"))
-            item.setToolTip(item.toolTip() + f" | TARGET CONFLICT with: {conflict_names}")
+            color = QColor("#ff8c00")
+            tooltip += f" | TARGET CONFLICT with: {conflict_names}"
 
         if source.group:
-            item.setToolTip(item.toolTip() + f" | Group: {source.group}")
-            grp_props = self.config.groups.get(source.group, {})
-            grp_color = grp_props.get("color", "#888888")
-            item.setData(SourceItemDelegate.GROUP_ROLE, (source.group, grp_color))
+            tooltip += f" | Group: {source.group}"
+
+        # Apply color to all columns
+        if color:
+            for col in range(len(self._source_col_keys)):
+                item.setForeground(col, color)
+
+        item.setToolTip(0, tooltip)
 
         return item
 
     def _populate_source_list(self):
         """Build source list items based on computed status, active filter, search query, and grouping."""
+        # Temporarily disable sorting while populating to avoid re-sorts on every insert
+        self.source_list.setSortingEnabled(False)
         self.source_list.clear()
         if not self.config:
+            self.source_list.setSortingEnabled(True)
             return
 
         filter_mode = self.source_filter.currentText()
@@ -4841,32 +4904,79 @@ class MainWindow(QMainWindow):
             for grp_name in sorted(grouped.keys()):
                 color = self.config.groups[grp_name].get("color", "#888888")
                 # Group header (non-selectable separator)
-                header = QListWidgetItem(f"\u2500\u2500 {grp_name} \u2500\u2500")
+                header = QTreeWidgetItem([f"\u2500\u2500 {grp_name} \u2500\u2500"])
                 header.setFlags(Qt.NoItemFlags)
-                header.setForeground(QColor(color))
-                font = header.font()
+                for col in range(len(self._source_col_keys)):
+                    header.setForeground(col, QColor(color))
+                font = header.font(0)
                 font.setBold(True)
-                header.setFont(font)
-                self.source_list.addItem(header)
+                header.setFont(0, font)
+                self.source_list.addTopLevelItem(header)
 
                 for source in sorted(grouped[grp_name], key=lambda s: s.name.lower()):
-                    self.source_list.addItem(self._make_source_item(source))
+                    self.source_list.addTopLevelItem(self._make_source_item(source))
 
             if ungrouped:
                 if grouped:
-                    header = QListWidgetItem("\u2500\u2500 Ungrouped \u2500\u2500")
+                    header = QTreeWidgetItem(["\u2500\u2500 Ungrouped \u2500\u2500"])
                     header.setFlags(Qt.NoItemFlags)
-                    header.setForeground(QColor("#666666"))
-                    font = header.font()
+                    for col in range(len(self._source_col_keys)):
+                        header.setForeground(col, QColor("#666666"))
+                    font = header.font(0)
                     font.setBold(True)
-                    header.setFont(font)
-                    self.source_list.addItem(header)
+                    header.setFont(0, font)
+                    self.source_list.addTopLevelItem(header)
                 for source in sorted(ungrouped, key=lambda s: s.name.lower()):
-                    self.source_list.addItem(self._make_source_item(source))
+                    self.source_list.addTopLevelItem(self._make_source_item(source))
         else:
-            # Alphabetical order
+            # Alphabetical order (sorting will handle this once re-enabled)
             for source in sorted(filtered, key=lambda s: s.name.lower()):
-                self.source_list.addItem(self._make_source_item(source))
+                self.source_list.addTopLevelItem(self._make_source_item(source))
+
+        # Apply column visibility
+        self._apply_source_column_visibility()
+        self.source_list.setSortingEnabled(True)
+
+    def _apply_source_column_visibility(self):
+        """Show/hide source list columns based on config."""
+        if not self.config:
+            enabled = ["version", "status"]
+        else:
+            enabled = self.config.source_list_columns
+        for i, key in enumerate(self._source_col_keys):
+            if key == "name":
+                # Name column is always visible
+                self.source_list.setColumnHidden(i, False)
+            else:
+                self.source_list.setColumnHidden(i, key not in enabled)
+
+    def _source_header_context_menu(self, pos):
+        """Show context menu on source list header to toggle column visibility."""
+        menu = QMenu(self)
+        enabled = self.config.source_list_columns if self.config else ["version", "status"]
+        for key in self._source_col_keys:
+            if key == "name":
+                continue  # Name is always visible
+            label = self._source_col_labels[key]
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key in enabled)
+            action.triggered.connect(lambda checked, k=key: self._toggle_source_column(k, checked))
+        menu.exec(self.source_list.header().mapToGlobal(pos))
+
+    def _toggle_source_column(self, key: str, visible: bool):
+        """Toggle visibility of a source list column and persist to config."""
+        if not self.config:
+            return
+        cols = list(self.config.source_list_columns)
+        if visible and key not in cols:
+            cols.append(key)
+        elif not visible and key in cols:
+            cols.remove(key)
+        self.config.source_list_columns = cols
+        self._apply_source_column_visibility()
+        if self.config_path:
+            self._save_project()
 
     def _apply_source_filter(self):
         """Re-filter the source list without full reload."""
@@ -4874,16 +4984,16 @@ class MainWindow(QMainWindow):
             return
         prev_source = None
         if self.source_list.currentItem():
-            prev_source = self.source_list.currentItem().data(Qt.UserRole)
+            prev_source = self.source_list.currentItem().data(0, Qt.UserRole)
         self._populate_source_list()
         # Try to re-select the previously selected source
         if prev_source:
-            for i in range(self.source_list.count()):
-                if self.source_list.item(i).data(Qt.UserRole) == prev_source:
-                    self.source_list.setCurrentRow(i)
+            for i in range(self.source_list.topLevelItemCount()):
+                if self.source_list.topLevelItem(i).data(0, Qt.UserRole) == prev_source:
+                    self.source_list.setCurrentItem(self.source_list.topLevelItem(i))
                     return
-        if self.source_list.count() > 0:
-            self.source_list.setCurrentRow(0)
+        if self.source_list.topLevelItemCount() > 0:
+            self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
 
     def _refresh_sources_by_name(self, source_names: list[str], select_source: str = None):
         """Re-scan only the given sources (by name) using the background worker path.
@@ -5006,14 +5116,14 @@ class MainWindow(QMainWindow):
 
         # Restore selection
         if self._refresh_select_source:
-            for i in range(self.source_list.count()):
-                if self.source_list.item(i).data(Qt.UserRole) == self._refresh_select_source:
-                    self.source_list.setCurrentRow(i)
+            for i in range(self.source_list.topLevelItemCount()):
+                if self.source_list.topLevelItem(i).data(0, Qt.UserRole) == self._refresh_select_source:
+                    self.source_list.setCurrentItem(self.source_list.topLevelItem(i))
                     self._refresh_select_source = None
                     return
         self._refresh_select_source = None
-        if self.source_list.count() > 0:
-            self.source_list.setCurrentRow(0)
+        if self.source_list.topLevelItemCount() > 0:
+            self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
 
     def _refresh_all(self):
         """Re-scan all sources in background thread."""
@@ -5096,14 +5206,14 @@ class MainWindow(QMainWindow):
         # Restore selection if a specific source was requested
         restored = False
         if self._refresh_select_source:
-            for i in range(self.source_list.count()):
-                if self.source_list.item(i).data(Qt.UserRole) == self._refresh_select_source:
-                    self.source_list.setCurrentRow(i)
+            for i in range(self.source_list.topLevelItemCount()):
+                if self.source_list.topLevelItem(i).data(0, Qt.UserRole) == self._refresh_select_source:
+                    self.source_list.setCurrentItem(self.source_list.topLevelItem(i))
                     restored = True
                     break
             self._refresh_select_source = None
-        if not restored and self.source_list.count() > 0:
-            self.source_list.setCurrentRow(0)
+        if not restored and self.source_list.topLevelItemCount() > 0:
+            self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
 
         # Save scan results to cache and clear indicator
         self._save_scan_cache()
@@ -5193,7 +5303,18 @@ class MainWindow(QMainWindow):
                 f"{len(self.config.groups)} group(s)"
             )
 
-    def _on_source_selected(self, row: int):
+    def _on_source_item_changed(self, current, previous):
+        """Bridge for currentItemChanged signal → _on_source_selected."""
+        if current:
+            source_name = current.data(0, Qt.UserRole)
+            if source_name:
+                self._on_source_selected_by_name(source_name)
+            else:
+                self._on_source_selected_by_name(None)
+        else:
+            self._on_source_selected_by_name(None)
+
+    def _on_source_selected_by_name(self, source_name):
         """User selected a source — populate versions and history."""
         self.version_tree.clear()
         self.history_tree.clear()
@@ -5202,18 +5323,11 @@ class MainWindow(QMainWindow):
         self.btn_import_version.setEnabled(False)
         self.btn_refresh_versions.setEnabled(False)
 
-        if row < 0 or not self.config:
+        if not source_name or not self.config:
             self.current_label.setText("No version loaded")
             self.integrity_label.setText("")
             return
 
-        # Look up source by name stored in item data (filter-safe)
-        item = self.source_list.item(row)
-        if not item:
-            self.current_label.setText("No version loaded")
-            self.integrity_label.setText("")
-            return
-        source_name = item.data(Qt.UserRole)
         source = None
         for s in self.config.watched_sources:
             if s.name == source_name:
@@ -5510,9 +5624,11 @@ class MainWindow(QMainWindow):
 
         if added:
             # Refresh the version display
-            row = self.source_list.currentRow()
-            if row >= 0:
-                self._on_source_selected(row)
+            current_item = self.source_list.currentItem()
+            if current_item:
+                source_name = current_item.data(0, Qt.UserRole)
+                if source_name:
+                    self._on_source_selected_by_name(source_name)
             self.statusBar().showMessage(
                 f"Imported {added} manual version{'s' if added != 1 else ''}"
             )
