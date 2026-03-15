@@ -207,6 +207,8 @@ class WatchedSource:
     override_pre_promote_cmd: bool = False
     override_post_promote_cmd: bool = False
     added_at: str = ""  # ISO timestamp when source was added to the project
+    # Manually imported versions (persisted across rescans and restarts)
+    manual_versions: list = field(default_factory=list)  # list of VersionInfo dicts
 
     @property
     def use_symlinks(self) -> bool:
@@ -263,6 +265,8 @@ class WatchedSource:
             d["override_post_promote_cmd"] = True
         if self.added_at:
             d["added_at"] = self.added_at
+        if self.manual_versions:
+            d["manual_versions"] = self.manual_versions
         return d
 
     @classmethod
@@ -302,6 +306,7 @@ class WatchedSource:
             override_pre_promote_cmd=data.get("override_pre_promote_cmd", False),
             override_post_promote_cmd=data.get("override_post_promote_cmd", False),
             added_at=data.get("added_at", ""),
+            manual_versions=data.get("manual_versions", []),
         )
 
 

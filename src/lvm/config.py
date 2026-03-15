@@ -124,6 +124,11 @@ def load_config(config_path: str) -> ProjectConfig:
             source.source_dir = str((path.parent / source.source_dir).resolve())
         if source.latest_target and not Path(source.latest_target).is_absolute():
             source.latest_target = str((path.parent / source.latest_target).resolve())
+        # Resolve relative paths inside persisted manual versions
+        for mv in source.manual_versions:
+            sp = mv.get("source_path", "")
+            if sp and not Path(sp).is_absolute():
+                mv["source_path"] = str((path.parent / sp).resolve())
 
     # Resolve relative group root_dir paths to absolute
     for props in config.groups.values():
@@ -157,6 +162,11 @@ def save_config(config: ProjectConfig, config_path: str):
         lt = source_data.get("latest_target", "")
         if lt and Path(lt).is_absolute():
             source_data["latest_target"] = make_relative(lt, project_dir)
+        # Relativise manual version source_paths
+        for mv in source_data.get("manual_versions", []):
+            sp = mv.get("source_path", "")
+            if sp and Path(sp).is_absolute():
+                mv["source_path"] = make_relative(sp, project_dir)
 
     # Convert project_root to relative
     pr = data.get("project_root", "")

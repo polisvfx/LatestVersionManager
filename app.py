@@ -4595,6 +4595,13 @@ class MainWindow(QMainWindow):
         self._promoters.clear()
         self._versions_cache.clear()
         self._manual_versions.clear()
+        # Restore persisted manual versions from config
+        if self.config:
+            for source in self.config.watched_sources:
+                if source.manual_versions:
+                    self._manual_versions[source.name] = [
+                        VersionInfo.from_dict(mv) for mv in source.manual_versions
+                    ]
         self._current_source = None
 
         enabled = self.config is not None
@@ -5067,7 +5074,6 @@ class MainWindow(QMainWindow):
         # Merge new scan results into the existing versions cache
         for source_name, versions in scan_results.items():
             self._versions_cache[source_name] = versions
-            self._manual_versions.pop(source_name, None)
 
         # Only recompute status for the sources that were actually re-scanned
         changed_sources = [
@@ -5168,7 +5174,6 @@ class MainWindow(QMainWindow):
         self._versions_cache = dict(scan_results)
         self._scanners.clear()
         self._promoters.clear()
-        self._manual_versions.clear()
         self._current_source = None
         self._source_status = {}
 
@@ -5623,6 +5628,8 @@ class MainWindow(QMainWindow):
                 added += 1
 
         if added:
+            # Persist manual versions to project config
+            self._persist_manual_versions(source.name)
             # Refresh the version display
             current_item = self.source_list.currentItem()
             if current_item:
@@ -5632,6 +5639,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Imported {added} manual version{'s' if added != 1 else ''}"
             )
+
+    def _persist_manual_versions(self, source_name: str):
+        """Save manual versions for a source into the project config on disk."""
+        if not self.config or not self.config_path:
+            return
+        manual = self._manual_versions.get(source_name, [])
+        for source in self.config.watched_sources:
+            if source.name == source_name:
+                source.manual_versions = [v.to_dict() for v in manual]
+                break
+        save_config(self.config, self.config_path)
 
     def _import_version(self):
         """Open a file browser to import an external version."""
