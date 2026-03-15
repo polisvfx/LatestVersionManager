@@ -227,7 +227,8 @@ class Promoter:
 
         # Record in history with mtime snapshots
         entry = HistoryEntry.from_version_info(version, user)
-        entry.source_mtime = self._get_max_mtime(source_path)
+        version_files = self._get_version_source_files(source_path, version)
+        entry.source_mtime = self._get_max_mtime(source_path, files=version_files)
         entry.target_mtime = self._get_max_mtime(target_dir)
         entry.pinned = pinned
         self.history.record_promotion(entry)
@@ -649,13 +650,27 @@ class Promoter:
             "link_mode": self.source.link_mode,
         }
 
-    def _get_max_mtime(self, path: Path) -> Optional[float]:
-        """Return the maximum mtime of media files in a directory or single file."""
-        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+    def _get_max_mtime(self, path: Path, files: list[Path] = None) -> Optional[float]:
+        """Return the maximum mtime of media files in a directory or single file.
+
+        When *files* is provided, only those files are checked instead of
+        scanning the entire directory.  This is essential for flat layouts
+        where the directory contains files from multiple versions.
+        """
         max_mt = 0.0
         found = False
         try:
-            if path.is_dir():
+            if files is not None:
+                for f in files:
+                    try:
+                        mt = f.stat().st_mtime
+                        if mt > max_mt:
+                            max_mt = mt
+                        found = True
+                    except OSError:
+                        pass
+            elif path.is_dir():
+                valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
                 with os.scandir(path) as it:
                     for entry in it:
                         if entry.is_file(follow_symlinks=False):
@@ -672,6 +687,28 @@ class Promoter:
         except OSError:
             pass
         return max_mt if found else None
+
+    def _get_version_source_files(self, source_path: Path, version: VersionInfo) -> Optional[list[Path]]:
+        """Return filtered file list for flat layouts, or None for subfolder layouts.
+
+        In a flat layout the source_path equals the watched source directory
+        and contains files from every version.  This method filters to only
+        the files belonging to *version* so that mtime checks are accurate.
+        """
+        if source_path.is_dir() and source_path == Path(self.source.source_dir):
+            valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+            all_files = sorted(
+                f for f in source_path.iterdir()
+                if f.is_file() and f.suffix.lower() in valid_extensions
+            )
+            return self._filter_version_files(all_files, version)
+        return None
+
+    @staticmethod
+    def _extract_version_number(version_str: str) -> Optional[int]:
+        """Extract integer version number from a version string like 'v003'."""
+        m = re.search(r'(\d+)', version_str)
+        return int(m.group(1)) if m else None
 
     def verify(self) -> dict:
         """Check integrity of the latest target vs history.
@@ -702,7 +739,16 @@ class Promoter:
         # Check if source files changed since promotion (re-rendered)
         if current.source_mtime is not None:
             source_path = Path(current.source)
-            current_source_mtime = self._get_max_mtime(source_path)
+            # For flat layouts, filter to only the promoted version's files
+            # so that new versions rendered into the same folder don't
+            # trigger a false stale detection.
+            version_files = None
+            if source_path.is_dir() and source_path == Path(self.source.source_dir):
+                ver_num = self._extract_version_number(current.version)
+                if ver_num is not None:
+                    stub = VersionInfo(current.version, ver_num, current.source)
+                    version_files = self._get_version_source_files(source_path, stub)
+            current_source_mtime = self._get_max_mtime(source_path, files=version_files)
             if current_source_mtime is not None and current_source_mtime > current.source_mtime + 1.0:
                 return {
                     "valid": False,
