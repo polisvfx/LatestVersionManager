@@ -379,7 +379,7 @@ class Promoter:
             hero_comp_alpha_v003.1001.exr -> hero_comp_alpha.1001.exr
         Examples (template="{source_name}_latest"):
             hero_comp_v003.1001.exr -> hero_comp_latest.1001.exr
-            hero_comp_v003_alpha.1001.exr -> hero_comp_alpha_latest.1001.exr
+            hero_comp_v003_alpha.1001.exr -> hero_comp_latest_alpha.1001.exr
         """
         template = self.source.file_rename_template
         if not template:
@@ -422,17 +422,17 @@ class Promoter:
         # Extract layer suffix for this specific file (e.g. "_alpha")
         layer_suffix = self._extract_layer_suffix(filename)
 
-        # Expand template tokens, appending layer suffix to each token value
-        # so that "{source_name}_latest" becomes "hero_comp_alpha_latest"
+        # Expand template tokens
         base = template
-        base = base.replace("{source_title}", tokens["source_title"] + layer_suffix)
-        base = base.replace("{source_name}", tokens["source_name"] + layer_suffix)
-        base = base.replace("{source_basename}", tokens["source_basename"] + layer_suffix)
-        base = base.replace("{source_fullname}", tokens["source_fullname"] + layer_suffix)
+        base = base.replace("{source_title}", tokens["source_title"])
+        base = base.replace("{source_name}", tokens["source_name"])
+        base = base.replace("{source_basename}", tokens["source_basename"])
+        base = base.replace("{source_fullname}", tokens["source_fullname"])
         base = _expand_group_token(base, self.source.group)
 
-        # Clean up double dividers from layer suffix insertion
+        # Append layer suffix after template expansion to preserve original position
         if layer_suffix:
+            base += layer_suffix
             base = _DOUBLE_DIVIDER_RE.sub(r"\1", base)
 
         # Reconstruct filename: base + frame + ext
