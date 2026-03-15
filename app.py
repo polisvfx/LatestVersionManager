@@ -4614,7 +4614,7 @@ class MainWindow(QMainWindow):
                 continue
             if filter_mode == "Stale" and status != "stale":
                 continue
-            if filter_mode == "Not on Highest" and status not in ("newer", "deliberate", "stale"):
+            if filter_mode == "Not on Highest" and status not in ("newer", "deliberate", "stale", "no_version"):
                 continue
 
             # Apply search filter
