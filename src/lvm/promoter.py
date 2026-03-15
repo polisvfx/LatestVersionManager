@@ -21,6 +21,7 @@ from .hooks import run_pre_promote_hook, run_post_promote_hook, HookError
 from .task_tokens import derive_source_tokens
 from .config import _expand_group_token
 from .fast_copy import smart_copy
+from .scanner import _group_files_by_sequence
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,62 @@ class Promoter:
         """Signal that the current promotion should be aborted at the next checkpoint."""
         self._cancelled.set()
 
+    def detect_obsolete_layers(self, version: VersionInfo) -> list[dict]:
+        """Return layers present in the target but absent from the new version.
+
+        A "layer" is a distinct sequence prefix (e.g. ``beauty.``, ``matte.``)
+        as determined by :func:`_group_files_by_sequence`.  If the target
+        directory contains layers that the incoming *version* does not provide,
+        those layers are returned so the caller can ask the user what to do.
+
+        Each returned dict has:
+            ``"name"``    – human-readable display name
+            ``"prefix"``  – raw prefix key for passing to *keep_layers*
+            ``"file_count"`` – number of files belonging to this layer
+        """
+        target_dir = Path(self.source.latest_target)
+        if not target_dir.exists():
+            return []
+
+        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+
+        # Layers currently in the target directory
+        target_files = sorted(
+            f for f in target_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in valid_extensions
+        )
+        if not target_files:
+            return []
+        target_groups = _group_files_by_sequence(target_files)
+        target_layer_names = set(target_groups.keys())
+
+        # Layers in the incoming version
+        source_path = Path(version.source_path)
+        if source_path.is_dir():
+            source_files = sorted(
+                f for f in source_path.iterdir()
+                if f.is_file() and f.suffix.lower() in valid_extensions
+            )
+            if source_path == Path(self.source.source_dir):
+                source_files = self._filter_version_files(source_files, version)
+        else:
+            source_files = [source_path] if source_path.is_file() else []
+
+        if not source_files:
+            return []
+        source_groups = _group_files_by_sequence(source_files)
+        source_layer_names = set(source_groups.keys())
+
+        obsolete_prefixes = target_layer_names - source_layer_names
+        result = []
+        for prefix in sorted(obsolete_prefixes):
+            result.append({
+                "name": prefix.rstrip("._") or "(non-sequence)",
+                "prefix": prefix,
+                "file_count": len(target_groups[prefix]),
+            })
+        return result
+
     def promote(
         self,
         version: VersionInfo,
@@ -96,6 +153,7 @@ class Promoter:
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         force: bool = False,
         pinned: bool = False,
+        keep_layers: Optional[set[str]] = None,
     ) -> HistoryEntry:
         """
         Promote a version to be the current "latest".
@@ -106,6 +164,9 @@ class Promoter:
             progress_callback: Optional callback(current_file, total_files, filename)
                                for UI progress updates.
             force: If True, skip sequence completeness validation.
+            keep_layers: Optional set of raw prefixes whose files should be
+                         preserved in the target directory instead of being
+                         cleared.  Pass ``None`` (default) to clear everything.
 
         Returns:
             The HistoryEntry that was recorded.
@@ -156,7 +217,7 @@ class Promoter:
 
         try:
             if source_path.is_dir():
-                self._promote_sequence(source_path, target_dir, version, progress_callback)
+                self._promote_sequence(source_path, target_dir, version, progress_callback, keep_layers=keep_layers)
             else:
                 self._promote_single_file(source_path, target_dir, progress_callback)
         except PromotionError:
@@ -252,6 +313,7 @@ class Promoter:
         target_dir: Path,
         version: VersionInfo,
         progress_callback: Optional[Callable],
+        keep_layers: Optional[set[str]] = None,
     ):
         """Copy/symlink a folder of frames to the target."""
         valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
@@ -268,8 +330,9 @@ class Promoter:
         if not source_files:
             raise PromotionError(f"No matching files found in {source_dir}")
 
-        # Clear existing files in target (only matching extensions)
-        self._clear_target(target_dir, valid_extensions)
+        # Clear existing files in target (only matching extensions),
+        # but preserve files belonging to layers the user chose to keep.
+        self._clear_target(target_dir, valid_extensions, keep_layers=keep_layers)
 
         total = len(source_files)
         mode = self.source.link_mode
@@ -441,15 +504,34 @@ class Promoter:
         else:
             return f"{base}.{ext}"
 
-    def _clear_target(self, target_dir: Path, valid_extensions: set):
-        """Remove existing media files from the target directory (not the history file)."""
+    def _clear_target(self, target_dir: Path, valid_extensions: set,
+                       keep_layers: Optional[set[str]] = None):
+        """Remove existing media files from the target directory (not the history file).
+
+        When *keep_layers* is provided, files whose sequence prefix (as
+        determined by :func:`_group_files_by_sequence`) is in the set are
+        left untouched.
+        """
         try:
             entries = list(target_dir.iterdir())
         except OSError as e:
             raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
 
+        # Build a set of prefixes to preserve
+        if keep_layers:
+            media_files = [f for f in entries if f.is_file() and f.suffix.lower() in valid_extensions]
+            groups = _group_files_by_sequence(media_files) if media_files else {}
+            keep_files: set[str] = set()
+            for prefix, files in groups.items():
+                if prefix in keep_layers:
+                    keep_files.update(f.name for f in files)
+        else:
+            keep_files = set()
+
         for f in entries:
             if f.is_file() and f.suffix.lower() in valid_extensions:
+                if f.name in keep_files:
+                    continue
                 try:
                     f.unlink()
                 except PermissionError:

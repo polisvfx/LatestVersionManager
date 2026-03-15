@@ -133,12 +133,14 @@ class PromoteWorker(QThread):
     finished = Signal(object)          # HistoryEntry on success
     error = Signal(str)                # error message
 
-    def __init__(self, promoter: Promoter, version: VersionInfo, parent=None, force=False, pinned=False):
+    def __init__(self, promoter: Promoter, version: VersionInfo, parent=None,
+                 force=False, pinned=False, keep_layers=None):
         super().__init__(parent)
         self.promoter = promoter
         self.version = version
         self.force = force
         self.pinned = pinned
+        self.keep_layers = keep_layers
 
     def cancel(self):
         """Request cancellation of the running promotion."""
@@ -151,6 +153,7 @@ class PromoteWorker(QThread):
                 progress_callback=self._on_progress,
                 force=self.force,
                 pinned=self.pinned,
+                keep_layers=self.keep_layers,
             )
             self.finished.emit(entry)
         except PromotionError as e:
@@ -3182,6 +3185,122 @@ class BatchPromoteReviewDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Obsolete Layer Conflict Dialog
+# ---------------------------------------------------------------------------
+
+class ObsoleteLayerDialog(QDialog):
+    """Asks the user what to do when the new version is missing layers
+    that the previously promoted version had in the latest directory.
+
+    The dialog presents the list of obsolete layers and offers three actions:
+    - **Keep**: leave the old layer files in the latest directory
+    - **Delete**: remove them (default promotion behaviour)
+    - **Skip**: do not promote this source at all
+
+    An "Apply to all" checkbox (on by default) lets the user apply the same
+    decision to every subsequent source with a layer conflict in the current
+    batch.
+    """
+
+    # Result codes matching the three buttons
+    KEEP = 1
+    DELETE = 2
+    SKIP = 3
+
+    def __init__(self, source_name: str, version_string: str,
+                 obsolete_layers: list[dict], conflict_count: int,
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Obsolete Layer Conflict")
+        self.setMinimumWidth(480)
+        self.choice = self.DELETE  # default
+
+        layout = QVBoxLayout(self)
+
+        # Header
+        if conflict_count > 1:
+            count_label = QLabel(
+                f"<b>{conflict_count}</b> source(s) in this promotion have layer conflicts."
+            )
+            count_label.setStyleSheet("color: #ffaa00; font-size: 12px; padding-bottom: 4px;")
+            layout.addWidget(count_label)
+
+        header = QLabel(
+            f"<b>{source_name}</b> — promoting to <b>{version_string}</b>"
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        desc = QLabel(
+            "The new version is missing the following layers that are "
+            "currently in the latest directory:"
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("padding: 4px 0;")
+        layout.addWidget(desc)
+
+        # Layer list
+        layer_list = QTreeWidget()
+        layer_list.setHeaderLabels(["Layer", "Files"])
+        layer_list.setRootIsDecorated(False)
+        layer_list.setAlternatingRowColors(True)
+        for layer in obsolete_layers:
+            item = QTreeWidgetItem([layer["name"], str(layer["file_count"])])
+            item.setForeground(0, QColor("#ffaa00"))
+            layer_list.addTopLevelItem(item)
+        layer_list.header().setStretchLastSection(False)
+        layer_list.header().setSectionResizeMode(0, layer_list.header().Stretch)
+        layer_list.header().setSectionResizeMode(1, layer_list.header().ResizeToContents)
+        layer_list.setMaximumHeight(min(30 + len(obsolete_layers) * 26, 200))
+        layout.addWidget(layer_list)
+
+        # Apply to all checkbox
+        self.apply_all_cb = QCheckBox("Apply to all current layer conflicts")
+        self.apply_all_cb.setChecked(True)
+        layout.addWidget(self.apply_all_cb)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        btn_keep = QPushButton("Keep")
+        btn_keep.setToolTip("Leave old layer files in the latest directory")
+        btn_keep.setStyleSheet(
+            "QPushButton { padding: 6px 18px; }"
+        )
+        btn_keep.clicked.connect(lambda: self._finish(self.KEEP))
+        btn_row.addWidget(btn_keep)
+
+        btn_delete = QPushButton("Delete")
+        btn_delete.setToolTip("Remove obsolete layer files from the latest directory")
+        btn_delete.setStyleSheet(
+            "QPushButton { background-color: #8b2500; color: white; padding: 6px 18px; "
+            "border-radius: 3px; }"
+            "QPushButton:hover { background-color: #a83200; }"
+        )
+        btn_delete.clicked.connect(lambda: self._finish(self.DELETE))
+        btn_row.addWidget(btn_delete)
+
+        btn_skip = QPushButton("Skip Promotion")
+        btn_skip.setToolTip("Do not promote this source")
+        btn_skip.setStyleSheet(
+            "QPushButton { padding: 6px 18px; }"
+        )
+        btn_skip.clicked.connect(lambda: self._finish(self.SKIP))
+        btn_row.addWidget(btn_skip)
+
+        layout.addLayout(btn_row)
+
+    @property
+    def apply_to_all(self) -> bool:
+        return self.apply_all_cb.isChecked()
+
+    def _finish(self, choice):
+        self.choice = choice
+        self.accept()
+
+
+# ---------------------------------------------------------------------------
 # Main Window
 # ---------------------------------------------------------------------------
 
@@ -3204,6 +3323,7 @@ class MainWindow(QMainWindow):
         self._fallback_original_mode: str = None  # original link_mode before copy fallback
         self._batch_promote_list: list = []
         self._batch_promote_index: int = 0
+        self._batch_keep_layers: dict = {}
         self._force_promote: bool = False
         self._target_conflicts: dict = {}
         self._scan_worker: ScanWorker = None
@@ -4324,6 +4444,62 @@ class MainWindow(QMainWindow):
         if not promote_list:
             return
 
+        # Detect layer conflicts for all sources and prompt the user
+        self._batch_keep_layers: dict[str, set[str] | None] = {}
+        batch_apply_all_choice = None  # set when user ticks "apply to all"
+
+        # Pre-compute which sources have obsolete layers
+        conflicts: dict[str, list[dict]] = {}
+        for source, version in promote_list:
+            promoter = self._promoters.get(source.name)
+            if not promoter and source.latest_target:
+                promoter = Promoter(source, self.config.task_tokens, self.config.project_name)
+                self._promoters[source.name] = promoter
+            if promoter:
+                obsolete = promoter.detect_obsolete_layers(version)
+                if obsolete:
+                    conflicts[source.name] = obsolete
+        conflict_count = len(conflicts)
+
+        # Prompt for each source with conflicts (unless "apply to all" covers it)
+        skip_sources: set[str] = set()
+        for source, version in promote_list:
+            if source.name not in conflicts:
+                continue
+            if batch_apply_all_choice is not None:
+                # Apply previously chosen action
+                if batch_apply_all_choice == ObsoleteLayerDialog.SKIP:
+                    skip_sources.add(source.name)
+                elif batch_apply_all_choice == ObsoleteLayerDialog.KEEP:
+                    self._batch_keep_layers[source.name] = {
+                        layer["prefix"] for layer in conflicts[source.name]
+                    }
+                # DELETE: keep_layers stays None (default)
+                continue
+
+            dlg = ObsoleteLayerDialog(
+                source.name, version.version_string,
+                conflicts[source.name], conflict_count=conflict_count,
+                parent=self,
+            )
+            if dlg.exec() != QDialog.Accepted:
+                return  # user closed dialog — cancel entire batch
+            if dlg.apply_to_all:
+                batch_apply_all_choice = dlg.choice
+            if dlg.choice == ObsoleteLayerDialog.SKIP:
+                skip_sources.add(source.name)
+            elif dlg.choice == ObsoleteLayerDialog.KEEP:
+                self._batch_keep_layers[source.name] = {
+                    layer["prefix"] for layer in conflicts[source.name]
+                }
+
+        # Remove skipped sources from the promote list
+        if skip_sources:
+            promote_list = [(s, v) for s, v in promote_list if s.name not in skip_sources]
+        if not promote_list:
+            self.statusBar().showMessage("All sources skipped due to layer conflicts.")
+            return
+
         self._batch_promote_list = promote_list
         self._batch_promote_index = 0
         self._batch_promote_next()
@@ -4336,6 +4512,7 @@ class MainWindow(QMainWindow):
             promoted_names = [s.name for s, _v in batch]
             count = len(batch)
             self._batch_promote_list = []
+            self._batch_keep_layers = {}
             for name in promoted_names:
                 self._versions_cache.pop(name, None)
             self._refresh_sources_by_name(promoted_names)
@@ -4358,7 +4535,8 @@ class MainWindow(QMainWindow):
             f"Promoting {self._batch_promote_index + 1}/{len(self._batch_promote_list)}: {source.name}"
         )
         self._current_source = source
-        self._start_promotion(promoter, version)
+        keep_layers = getattr(self, '_batch_keep_layers', {}).get(source.name)
+        self._start_promotion(promoter, version, keep_layers=keep_layers)
 
     # --- UI Updates ---
 
@@ -5446,8 +5624,24 @@ class MainWindow(QMainWindow):
             if dlg.exec() != QDialog.Accepted:
                 return
 
+        # Check for obsolete layers
+        keep_layers = None
+        if not is_keep:
+            obsolete = promoter.detect_obsolete_layers(version)
+            if obsolete:
+                dlg = ObsoleteLayerDialog(
+                    source.name, version.version_string,
+                    obsolete, conflict_count=1, parent=self,
+                )
+                if dlg.exec() != QDialog.Accepted:
+                    return
+                if dlg.choice == ObsoleteLayerDialog.SKIP:
+                    return
+                if dlg.choice == ObsoleteLayerDialog.KEEP:
+                    keep_layers = {layer["prefix"] for layer in obsolete}
+
         self._pinned_promote = is_keep
-        self._start_promotion(promoter, version)
+        self._start_promotion(promoter, version, keep_layers=keep_layers)
 
     def _revert_selected(self):
         """Revert to a version from history by re-scanning and promoting."""
@@ -5488,7 +5682,8 @@ class MainWindow(QMainWindow):
 
         self._start_promotion(promoter, target_version)
 
-    def _start_promotion(self, promoter: Promoter, version: VersionInfo):
+    def _start_promotion(self, promoter: Promoter, version: VersionInfo,
+                          keep_layers: set[str] | None = None):
         """Start the promotion in a background thread, checking link mode availability first."""
         self._promoting_source_name = promoter.source.name
         self._promoting_version = version
@@ -5524,7 +5719,8 @@ class MainWindow(QMainWindow):
         pinned = getattr(self, '_pinned_promote', False)
         self._pinned_promote = False
 
-        self._worker = PromoteWorker(promoter, version, self, force=self._force_promote, pinned=pinned)
+        self._worker = PromoteWorker(promoter, version, self, force=self._force_promote,
+                                     pinned=pinned, keep_layers=keep_layers)
         self._worker.progress.connect(self._on_promote_progress)
         self._worker.finished.connect(self._on_promote_finished)
         self._worker.error.connect(self._on_promote_error)
@@ -5633,6 +5829,7 @@ class MainWindow(QMainWindow):
                 self._batch_promote_next()
             else:
                 self._batch_promote_list = []
+                self._batch_keep_layers = {}
                 self._refresh_all_with_selection()
             return
 
@@ -5739,6 +5936,18 @@ class MainWindow(QMainWindow):
             msg = (
                 f"Auto-promote skipped for {source_name}: "
                 f"frame range changed ({prev_range} \u2192 {new_range})"
+            )
+            logger.info(msg)
+            self.statusBar().showMessage(msg)
+            return
+
+        # Check for obsolete layers (cannot show interactive dialog in auto path)
+        obsolete = promoter.detect_obsolete_layers(highest)
+        if obsolete:
+            layer_names = ", ".join(l["name"] for l in obsolete)
+            msg = (
+                f"Auto-promote skipped for {source_name}: "
+                f"obsolete layers in target ({layer_names})"
             )
             logger.info(msg)
             self.statusBar().showMessage(msg)
