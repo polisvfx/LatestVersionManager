@@ -1511,6 +1511,45 @@ class TestPromoter(unittest.TestCase):
         entry = promoter.promote(vi, user="x", pinned=True)
         self.assertTrue(entry.pinned)
 
+    def test_verify_flat_layout_no_false_stale(self):
+        """New versions rendered into a flat folder must not falsely flag
+        the promoted version as stale."""
+        # Create flat EXR sequences (all versions in source_dir directly)
+        _make_exr_sequence(self.source_dir, "shot", "v001", 1001, 1003)
+        _make_exr_sequence(self.source_dir, "shot", "v002", 1001, 1003)
+
+        source = self._make_source()
+        promoter = Promoter(source)
+        # source_path is the source_dir itself for flat layouts
+        vi = VersionInfo("v002", 2, self.source_dir, frame_count=3, file_count=3)
+        promoter.promote(vi, user="x")
+
+        # Verify should be clean right after promotion
+        result = promoter.verify()
+        self.assertTrue(result["valid"], f"Expected clean verify, got: {result}")
+
+        # Simulate rendering v003 into the same flat folder (newer mtime)
+        v003_files = _make_exr_sequence(self.source_dir, "shot", "v003", 1001, 1003)
+        future_time = time.time() + 3600
+        for f in v003_files:
+            os.utime(f, (future_time, future_time))
+
+        # Verify should still be clean — v003 files must not affect v002 check
+        result = promoter.verify()
+        self.assertTrue(result["valid"], f"False stale from new version: {result}")
+
+        # But if v002's own files are re-rendered, verify should detect stale
+        v002_files = sorted(
+            f for f in Path(self.source_dir).iterdir()
+            if f.is_file() and "_v002." in f.name
+        )
+        for f in v002_files:
+            os.utime(f, (future_time, future_time))
+
+        result = promoter.verify()
+        self.assertFalse(result["valid"])
+        self.assertIn("modified since promotion", result["message"])
+
 
 class TestRemapFilename(unittest.TestCase):
     """Test Promoter._remap_filename."""
