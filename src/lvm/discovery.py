@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional, Callable
 
 from .models import DiscoveryResult, VersionInfo
+from .task_tokens import strip_version as _strip_version
 
 logger = logging.getLogger(__name__)
 
@@ -334,22 +335,14 @@ def _walk_for_versions(
                         if date_match and _is_plausible_date(date_match.group(1)):
                             dated_files.append((path, date_match))
 
-    # If this directory contains versioned subdirectories, report it
+    # If this directory contains versioned subdirectories, report it.
+    # Group by source name (version-stripped dir name) so that different
+    # shots sharing a parent folder become separate DiscoveryResults.
     if versioned_dirs:
-        found_extensions = set()
-
-        # Check if versioned dirs also contain date patterns
-        first_dir_name = versioned_dirs[0][0].name
-        first_ver_match = versioned_dirs[0][1]
-        first_date_match = DATE_RE.search(first_dir_name)
-        if first_date_match and not _is_plausible_date(first_date_match.group(1)):
-            first_date_match = None
-
         # Parallel scan of version directories using ThreadPoolExecutor
         # _scan_version_dir now returns (VersionInfo, found_exts) to avoid
         # a second os.scandir call just to collect extensions.
-        versions = []
-        first_sample = ""
+        scan_results = []  # list of (vdir, match, vi, exts, sample)
         worker_count = min(8, len(versioned_dirs))
         if worker_count > 1:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -364,46 +357,63 @@ def _walk_for_versions(
                         vi, exts_found, sample = future.result()
                         vdir, vmatch = future_to_entry[future]
                         _populate_date_on_vi(vi, vdir.name)
-                        versions.append(vi)
-                        found_extensions.update(exts_found)
-                        if not first_sample and sample:
-                            first_sample = sample
+                        scan_results.append((vdir, vmatch, vi, exts_found, sample))
                     except Exception as e:
                         vdir = future_to_entry[future][0]
                         logger.debug(f"Error scanning {vdir}: {e}")
         else:
-            # Single version dir, no need for thread overhead
             for vdir, match in versioned_dirs:
                 ver_num = int(match.group(1))
                 vi, exts_found, sample = _scan_version_dir(vdir, ver_num, extensions)
                 _populate_date_on_vi(vi, vdir.name)
+                scan_results.append((vdir, match, vi, exts_found, sample))
+
+        # Group scanned results by source name (dir name with version stripped)
+        groups = {}  # source_name -> list of (vdir, match, vi, exts, sample)
+        for entry in scan_results:
+            source_name = _strip_version(entry[0].name)
+            groups.setdefault(source_name, []).append(entry)
+
+        # Use parent dir name when all dirs share the same source name
+        single_group = len(groups) == 1
+
+        for source_name, group in groups.items():
+            found_extensions = set()
+            versions = []
+            first_sample = ""
+            for vdir, match, vi, exts_found, sample in group:
                 versions.append(vi)
                 found_extensions.update(exts_found)
                 if not first_sample and sample:
                     first_sample = sample
 
-        versions.sort(key=lambda v: (v.date_sortable, v.version_number))
+            versions.sort(key=lambda v: (v.date_sortable, v.version_number))
 
-        # Suggest a version pattern (with possible date token)
-        suggested_pattern = _suggest_pattern(
-            first_dir_name, ver_match=first_ver_match, date_match=first_date_match)
+            # Use first dir in group for pattern suggestion
+            first_dir_name = group[0][0].name
+            first_ver_match = group[0][1]
+            first_date_match = DATE_RE.search(first_dir_name)
+            if first_date_match and not _is_plausible_date(first_date_match.group(1)):
+                first_date_match = None
 
-        # Detect date format if date was found
-        suggested_date_fmt = ""
-        if first_date_match:
-            suggested_date_fmt = _detect_date_format(first_date_match.group(1))
+            suggested_pattern = _suggest_pattern(
+                first_dir_name, ver_match=first_ver_match, date_match=first_date_match)
 
-        sample_filename = first_sample
+            suggested_date_fmt = ""
+            if first_date_match:
+                suggested_date_fmt = _detect_date_format(first_date_match.group(1))
 
-        results.append(DiscoveryResult(
-            path=str(current),
-            name=current.name,
-            versions_found=versions,
-            suggested_pattern=suggested_pattern,
-            suggested_extensions=sorted(found_extensions),
-            sample_filename=sample_filename,
-            suggested_date_format=suggested_date_fmt,
-        ))
+            result_name = current.name if single_group else source_name
+
+            results.append(DiscoveryResult(
+                path=str(current),
+                name=result_name,
+                versions_found=versions,
+                suggested_pattern=suggested_pattern,
+                suggested_extensions=sorted(found_extensions),
+                sample_filename=first_sample,
+                suggested_date_format=suggested_date_fmt,
+            ))
 
     # If this directory contains versioned single files, report it
     if versioned_files and not versioned_dirs:
