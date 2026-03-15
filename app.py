@@ -281,30 +281,32 @@ class StatusWorker(QThread):
     """Computes source statuses (verify, conflicts) in a background thread.
 
     Runs Promoter.verify() and conflict detection off the main thread so the
-    UI stays responsive after scanning completes.
+    UI stays responsive after scanning completes.  Per-source work is
+    parallelised with a ThreadPoolExecutor for I/O-bound speedup.
     """
     finished = Signal(dict, dict, dict, dict)  # source_status, target_conflicts, promoters, scanners
 
-    def __init__(self, config: ProjectConfig, versions_cache: dict, parent=None):
+    def __init__(self, config: ProjectConfig, versions_cache: dict,
+                 sources=None, parent=None):
         super().__init__(parent)
         self._config = config
         self._versions_cache = versions_cache
+        self._sources = sources or config.watched_sources
 
     def run(self):
         from src.lvm.conflicts import detect_target_conflicts
-        source_status = {}
-        promoters = {}
-        scanners = {}
-        for source in self._config.watched_sources:
+
+        def _compute_one(source):
             versions = self._versions_cache.get(source.name, [])
-            scanners[source.name] = VersionScanner(source, self._config.task_tokens)
+            scanner = VersionScanner(source, self._config.task_tokens)
             highest_ver = versions[-1].version_string if versions else None
             current = None
             status = "no_target"
+            integrity = None
+            promoter = None
 
             if source.latest_target:
                 promoter = Promoter(source, self._config.task_tokens, self._config.project_name)
-                promoters[source.name] = promoter
                 current = promoter.get_current_version()
 
                 if not current:
@@ -330,11 +332,36 @@ class StatusWorker(QThread):
                     else:
                         status = "newer"
 
-            source_status[source.name] = {
+            status_info = {
                 "current": current,
                 "status": status,
                 "has_overrides": source.has_overrides,
+                "integrity": integrity,
             }
+            return source.name, status_info, promoter, scanner
+
+        source_status = {}
+        promoters = {}
+        scanners = {}
+
+        sources = self._sources
+        worker_count = min(8, len(sources))
+        if worker_count > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {executor.submit(_compute_one, s): s for s in sources}
+                for future in as_completed(futures):
+                    name, status_info, promoter, scanner = future.result()
+                    source_status[name] = status_info
+                    if promoter:
+                        promoters[name] = promoter
+                    scanners[name] = scanner
+        else:
+            for source in sources:
+                name, status_info, promoter, scanner = _compute_one(source)
+                source_status[name] = status_info
+                if promoter:
+                    promoters[name] = promoter
+                scanners[name] = scanner
 
         conflicts = detect_target_conflicts(self._config)
         target_conflicts = {}
@@ -4754,8 +4781,14 @@ class MainWindow(QMainWindow):
             self._versions_cache[source_name] = versions
             self._manual_versions.pop(source_name, None)
 
-        # Compute statuses for ALL sources in background (needed for conflict detection)
-        self._status_worker = StatusWorker(self.config, dict(self._versions_cache), parent=self)
+        # Only recompute status for the sources that were actually re-scanned
+        changed_sources = [
+            s for s in self.config.watched_sources if s.name in scan_results
+        ]
+        self._status_worker = StatusWorker(
+            self.config, dict(self._versions_cache),
+            sources=changed_sources, parent=self,
+        )
         self._status_worker.finished.connect(self._on_partial_status_complete)
         self._status_worker.start()
 
@@ -4763,10 +4796,17 @@ class MainWindow(QMainWindow):
                                     promoters: dict, scanners: dict):
         """Status computation done after partial refresh — rebuild UI."""
         self._status_worker = None
-        self._source_status = source_status
-        self._target_conflicts = target_conflicts
-        self._promoters = promoters
-        self._scanners = scanners
+        # Merge partial results into existing caches (not replace)
+        self._source_status.update(source_status)
+        self._promoters.update(promoters)
+        self._scanners.update(scanners)
+        # Recompute conflicts for all sources (cheap — just path comparison)
+        from src.lvm.conflicts import detect_target_conflicts
+        conflicts = detect_target_conflicts(self.config)
+        self._target_conflicts = {}
+        for target, name_a, name_b in conflicts:
+            self._target_conflicts.setdefault(name_a, []).append(name_b)
+            self._target_conflicts.setdefault(name_b, []).append(name_a)
 
         # Rebuild source list and restore selection
         self.source_list.clear()
@@ -5031,7 +5071,10 @@ class MainWindow(QMainWindow):
         # "always" — already populated during scan (see _reload_ui)
         # "never"  — leave as None
 
-        current = promoter.get_current_version() if promoter else None
+        # Use cached status from StatusWorker to avoid redundant I/O
+        status_info = self._source_status.get(source.name, {})
+        current = status_info.get("current") if status_info else (
+            promoter.get_current_version() if promoter else None)
         current_ver = current.version if current else None
 
         # Update banner
@@ -5064,7 +5107,12 @@ class MainWindow(QMainWindow):
                     # Unpinned or pin expired — newer versions available (orange)
                     self.current_label.setText(f"Current: {current.version} \u25bc!   ({source.name})")
                     self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #cc8833;")
-            integrity = promoter.verify()
+            # Use cached integrity from StatusWorker; fallback to live call if not yet computed
+            integrity = status_info.get("integrity") if status_info else None
+            if integrity is None and promoter:
+                integrity = promoter.verify()
+            if not integrity:
+                integrity = {"valid": True, "message": ""}
             if integrity["valid"]:
                 self.integrity_label.setText("\u2713 Verified")
                 self.integrity_label.setStyleSheet("font-size: 11px; color: #90ee90;")
