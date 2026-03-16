@@ -3462,9 +3462,9 @@ class MainWindow(QMainWindow):
 
         # Source list column definitions
         # key → (header label, column index)
-        self._source_col_keys = ["name", "version", "layer_count", "added_on", "last_promoted", "status"]
+        self._source_col_keys = ["name", "group", "version", "layer_count", "added_on", "last_promoted", "status"]
         self._source_col_labels = {
-            "name": "Name", "version": "Version", "layer_count": "Layer Count",
+            "name": "Name", "group": "Group", "version": "Version", "layer_count": "Layer Count",
             "added_on": "Added On", "last_promoted": "Last Promoted", "status": "Status",
         }
 
@@ -3486,12 +3486,15 @@ class MainWindow(QMainWindow):
         self.source_list.header().customContextMenuRequested.connect(self._source_header_context_menu)
         # Default column widths
         self.source_list.header().resizeSection(0, 200)  # Name
-        self.source_list.header().resizeSection(1, 70)   # Version
-        self.source_list.header().resizeSection(2, 80)   # Layer Count
-        self.source_list.header().resizeSection(3, 140)  # Added On
-        self.source_list.header().resizeSection(4, 140)  # Last Promoted
-        self.source_list.header().resizeSection(5, 100)  # Status
+        self.source_list.header().resizeSection(1, 100)  # Group
+        self.source_list.header().resizeSection(2, 70)   # Version
+        self.source_list.header().resizeSection(3, 80)   # Layer Count
+        self.source_list.header().resizeSection(4, 140)  # Added On
+        self.source_list.header().resizeSection(5, 140)  # Last Promoted
+        self.source_list.header().resizeSection(6, 100)  # Status
         self.source_list.header().setStretchLastSection(False)
+        # All columns are user-resizable (Interactive); Name stretches to fill remaining space
+        self.source_list.header().setSectionResizeMode(QHeaderView.Interactive)
         self.source_list.header().setSectionResizeMode(0, QHeaderView.Stretch)
         left_layout.addWidget(self.source_list)
 
@@ -3751,7 +3754,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         quit_action = QAction("&Quit", self)
-        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.setShortcut(QKeySequence("Ctrl+Q"))
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
@@ -4780,8 +4783,7 @@ class MainWindow(QMainWindow):
         name_text = f"{marker}{source.name}"
         if source.name in self._target_conflicts:
             name_text += " [!]"
-        if source.group:
-            name_text += f"  \u2022{source.group}"
+        group_text = source.group if source.group else ""
 
         # Status display text
         status_labels = {
@@ -4814,7 +4816,7 @@ class MainWindow(QMainWindow):
             except (ValueError, TypeError):
                 last_promoted = current.set_at
 
-        item = QTreeWidgetItem([name_text, ver_tag, layer_count, added_on, last_promoted, status_text])
+        item = QTreeWidgetItem([name_text, group_text, ver_tag, layer_count, added_on, last_promoted, status_text])
         item.setData(0, Qt.UserRole, source.name)
 
         # Color coding
@@ -4857,9 +4859,17 @@ class MainWindow(QMainWindow):
             tooltip += f" | Group: {source.group}"
 
         # Apply color to all columns
+        group_col_idx = self._source_col_keys.index("group")
         if color:
             for col in range(len(self._source_col_keys)):
+                if col == group_col_idx:
+                    continue  # Group column gets its own color
                 item.setForeground(col, color)
+
+        # Color the group column with the group's own color
+        if source.group and self.config and source.group in self.config.groups:
+            grp_color = self.config.groups[source.group].get("color", "#888888")
+            item.setForeground(group_col_idx, QColor(grp_color))
 
         item.setToolTip(0, tooltip)
 
@@ -4949,7 +4959,11 @@ class MainWindow(QMainWindow):
         if not self.config:
             enabled = ["version", "status"]
         else:
-            enabled = self.config.source_list_columns
+            enabled = list(self.config.source_list_columns)
+            # Auto-show group column when groups exist
+            if self.config.groups and "group" not in enabled:
+                enabled.append("group")
+                self.config.source_list_columns = enabled
         for i, key in enumerate(self._source_col_keys):
             if key == "name":
                 # Name column is always visible
