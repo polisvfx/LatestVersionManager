@@ -124,6 +124,9 @@ class HistoryEntry:
     frame_count: int = 0
     file_count: int = 0
     start_timecode: Optional[str] = None
+    sub_sequences: list = field(default_factory=list)  # layer info from promoted version
+    file_type: str = ""                    # primary file extension (e.g. ".exr", ".mov")
+    clip_frame_count: int = 0             # frame count extracted from container (MOV/MXF)
     source_mtime: Optional[float] = None   # max mtime of source files at promotion time
     target_mtime: Optional[float] = None   # max mtime of target files right after promotion
     pinned: bool = False                   # True only for "Keep This Version" operations
@@ -139,6 +142,12 @@ class HistoryEntry:
             "file_count": self.file_count,
             "start_timecode": self.start_timecode,
         }
+        if self.sub_sequences:
+            d["sub_sequences"] = self.sub_sequences
+        if self.file_type:
+            d["file_type"] = self.file_type
+        if self.clip_frame_count:
+            d["clip_frame_count"] = self.clip_frame_count
         if self.source_mtime is not None:
             d["source_mtime"] = self.source_mtime
         if self.target_mtime is not None:
@@ -158,6 +167,9 @@ class HistoryEntry:
             frame_count=data.get("frame_count", 0),
             file_count=data.get("file_count", 0),
             start_timecode=data.get("start_timecode"),
+            sub_sequences=data.get("sub_sequences", []),
+            file_type=data.get("file_type", ""),
+            clip_frame_count=data.get("clip_frame_count", 0),
             source_mtime=data.get("source_mtime"),
             target_mtime=data.get("target_mtime"),
             pinned=data.get("pinned", False),
@@ -165,6 +177,24 @@ class HistoryEntry:
 
     @classmethod
     def from_version_info(cls, version_info: "VersionInfo", user: str) -> "HistoryEntry":
+        # Determine primary file extension from source path
+        source_p = Path(version_info.source_path)
+        file_type = ""
+        if source_p.suffix and source_p.suffix.lower() in (
+            ".exr", ".dpx", ".tiff", ".tif", ".png", ".jpg",
+            ".mov", ".mxf", ".mp4", ".avi",
+        ):
+            # Single versioned file (e.g. hero_comp_v003.mov)
+            file_type = source_p.suffix.lower()
+        elif source_p.is_dir():
+            # Version directory — infer from first matching file
+            try:
+                for entry in sorted(source_p.iterdir()):
+                    if entry.is_file() and entry.suffix:
+                        file_type = entry.suffix.lower()
+                        break
+            except OSError:
+                pass
         return cls(
             version=version_info.version_string,
             source=version_info.source_path,
@@ -174,6 +204,8 @@ class HistoryEntry:
             frame_count=version_info.frame_count,
             file_count=version_info.file_count,
             start_timecode=version_info.start_timecode,
+            sub_sequences=list(version_info.sub_sequences),
+            file_type=file_type,
         )
 
 
@@ -349,7 +381,7 @@ class ProjectConfig:
     # for symlink resolution. Safe for network shares which rarely have symlinks.
     skip_resolve: bool = True
     # Source list column visibility — list of enabled optional column keys
-    # Default: ["version", "status"]. Optional: "layer_count", "added_on", "last_promoted"
+    # Default: ["version", "status"]. Optional: "layers", "frames", "filetype", "added_on", "last_promoted"
     source_list_columns: list = field(default_factory=lambda: ["version", "status"])
     # Runtime only — not serialized, set by config loader
     project_dir: str = field(default="", repr=False)
@@ -439,7 +471,10 @@ class ProjectConfig:
             post_promote_cmd=data.get("post_promote_cmd", ""),
             project_root=data.get("project_root", ""),
             skip_resolve=data.get("skip_resolve", True),
-            source_list_columns=data.get("source_list_columns", ["version", "status"]),
+            source_list_columns=[
+                "layers" if c == "layer_count" else c
+                for c in data.get("source_list_columns", ["version", "status"])
+            ],
         )
 
 

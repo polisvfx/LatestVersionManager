@@ -277,7 +277,7 @@ class TestProjectConfig(unittest.TestCase):
         self.assertFalse(restored.block_incomplete_sequences)
         self.assertEqual(restored.project_root, "/projects/root")
         self.assertFalse(restored.skip_resolve)
-        self.assertEqual(restored.source_list_columns, ["version", "status", "layer_count"])
+        self.assertEqual(restored.source_list_columns, ["version", "status", "layers"])
 
     def test_compact_serialization(self):
         """Default values omitted from serialized dict."""

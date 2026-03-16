@@ -231,6 +231,13 @@ class Promoter:
         entry.source_mtime = self._get_max_mtime(source_path, files=version_files)
         entry.target_mtime = self._get_max_mtime(target_dir)
         entry.pinned = pinned
+        # Extract clip frame count for container files
+        if source_path.is_file() and source_path.suffix.lower() in (".mov", ".mxf", ".mp4", ".avi"):
+            try:
+                from .timecode import extract_clip_frame_count
+                entry.clip_frame_count = extract_clip_frame_count(source_path)
+            except Exception:
+                pass
         self.history.record_promotion(entry)
 
         # Run post-promote hook

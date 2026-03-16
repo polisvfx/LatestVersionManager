@@ -258,6 +258,82 @@ def _extract_timecode_ffprobe(file_path: Path) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Clip frame count extraction (for container formats)
+# ---------------------------------------------------------------------------
+
+_CONTAINER_EXTENSIONS_TC = {".mov", ".mxf", ".mp4", ".avi"}
+
+
+def extract_clip_frame_count(file_path: Path) -> int:
+    """Extract the number of video frames from a container file using ffprobe.
+
+    Uses a fast metadata query first (nb_frames, duration*fps).
+    Falls back to -count_frames (slow, decodes every frame) only if needed.
+
+    Returns the frame count as an integer, or 0 if extraction fails.
+    """
+    ffprobe = find_ffprobe()
+    if ffprobe is None:
+        return 0
+
+    def _query(extra_args: list[str]) -> dict:
+        try:
+            result = subprocess.run(
+                [ffprobe, "-v", "quiet", "-select_streams", "v:0",
+                 *extra_args,
+                 "-show_entries", "stream=nb_read_frames,nb_frames,duration,r_frame_rate",
+                 "-print_format", "json", str(file_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return {}
+            data = json.loads(result.stdout)
+            streams = data.get("streams", [])
+            return streams[0] if streams else {}
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+            logger.debug(f"ffprobe frame count error for {file_path}: {e}")
+            return {}
+
+    def _parse_count(stream: dict) -> int:
+        # nb_frames (fast, available for most MOV/MP4)
+        nb = stream.get("nb_frames")
+        if nb and nb != "N/A":
+            try:
+                return int(nb)
+            except (ValueError, TypeError):
+                pass
+        # nb_read_frames (only present with -count_frames)
+        nb = stream.get("nb_read_frames")
+        if nb and nb != "N/A":
+            try:
+                return int(nb)
+            except (ValueError, TypeError):
+                pass
+        # duration * fps fallback
+        duration = stream.get("duration")
+        fps_str = stream.get("r_frame_rate")
+        if duration and fps_str and duration != "N/A" and fps_str != "N/A":
+            try:
+                dur = float(duration)
+                num, den = fps_str.split("/")
+                fps = float(num) / float(den)
+                return round(dur * fps)
+            except (ValueError, ZeroDivisionError):
+                pass
+        return 0
+
+    # Fast attempt (metadata only)
+    stream = _query([])
+    count = _parse_count(stream)
+    if count > 0:
+        return count
+
+    # Slow fallback: decode all frames (needed for some MXF)
+    stream = _query(["-count_frames"])
+    return _parse_count(stream)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
