@@ -3498,21 +3498,45 @@ class MainWindow(QMainWindow):
         self.source_list.header().setSectionResizeMode(0, QHeaderView.Stretch)
         left_layout.addWidget(self.source_list)
 
-        # Promote All / Promote Selected button
-        self.btn_promote_all = QPushButton("Promote All to Latest")
-        self.btn_promote_all.setStyleSheet(
+        # Promote All / Promote Selected button(s)
+        promote_style_main = (
             "QPushButton { background-color: #2d5a2d; color: white; padding: 8px 16px; "
             "border-radius: 4px; font-weight: bold; }"
             "QPushButton:hover { background-color: #3a7a3a; }"
             "QPushButton:disabled { background-color: #444; color: #888; }"
         )
+        promote_style_secondary = (
+            "QPushButton { background-color: #2d5a2d; color: white; padding: 8px 10px; "
+            "border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #3a7a3a; }"
+            "QPushButton:disabled { background-color: #444; color: #888; }"
+        )
+        self.promote_container = QWidget()
+        promote_layout = QHBoxLayout(self.promote_container)
+        promote_layout.setContentsMargins(0, 0, 0, 0)
+        promote_layout.setSpacing(2)
+
+        self.btn_promote_all = QPushButton("Promote All to Latest")
+        self.btn_promote_all.setStyleSheet(promote_style_main)
         self.btn_promote_all.setEnabled(False)
         self.btn_promote_all.setToolTip(
             "Promotes sources that are not on their highest version.\n"
             "Hold Shift to force re-promote all sources."
         )
         self.btn_promote_all.clicked.connect(self._promote_all_or_selected)
-        left_layout.addWidget(self.btn_promote_all)
+        promote_layout.addWidget(self.btn_promote_all, stretch=1)
+
+        self.btn_promote_split_all = QPushButton("All")
+        self.btn_promote_split_all.setStyleSheet(promote_style_secondary)
+        self.btn_promote_split_all.setToolTip(
+            "Promote all sources to latest.\n"
+            "Hold Shift to force re-promote all sources."
+        )
+        self.btn_promote_split_all.clicked.connect(self._promote_all_forced)
+        self.btn_promote_split_all.setVisible(False)
+        promote_layout.addWidget(self.btn_promote_split_all, stretch=0)
+
+        left_layout.addWidget(self.promote_container)
 
         splitter.addWidget(left_panel)
 
@@ -3761,7 +3785,7 @@ class MainWindow(QMainWindow):
         tools_menu = menubar.addMenu("&Tools")
 
         discover_action = QAction("&Discover Versions...", self)
-        discover_action.setShortcut(QKeySequence("Ctrl+D"))
+        discover_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
         discover_action.triggered.connect(self._open_discover)
         tools_menu.addAction(discover_action)
 
@@ -3840,6 +3864,12 @@ class MainWindow(QMainWindow):
         delete_sc.setShortcut(QKeySequence(Qt.Key_Delete))
         delete_sc.triggered.connect(self._delete_selected_sources)
         self.addAction(delete_sc)
+
+        # Ctrl+D: Deselect all sources
+        deselect_sc = QAction(self)
+        deselect_sc.setShortcut(QKeySequence("Ctrl+D"))
+        deselect_sc.triggered.connect(self.source_list.clearSelection)
+        self.addAction(deselect_sc)
 
     def _promote_selected_if_version_focused(self):
         if self.version_tree.hasFocus() and self.version_tree.selectedItems():
@@ -4379,9 +4409,12 @@ class MainWindow(QMainWindow):
             label = f"Promote Selected ({len(selected)})" if len(selected) > 1 else "Promote Selected"
             self.btn_promote_all.setText(label)
             self.btn_promote_all.setEnabled(self._worker is None)
+            self.btn_promote_split_all.setVisible(True)
+            self.btn_promote_split_all.setEnabled(has_sources and self._worker is None)
         else:
             self.btn_promote_all.setText("Promote All to Latest")
             self.btn_promote_all.setEnabled(has_sources and self._worker is None)
+            self.btn_promote_split_all.setVisible(False)
 
     def _promote_all_or_selected(self):
         """Promote highest version of all or selected sources.
@@ -4542,6 +4575,11 @@ class MainWindow(QMainWindow):
         self._batch_promote_index = 0
         self._batch_promote_next()
 
+    def _promote_all_forced(self):
+        """Promote all sources regardless of selection (used by split 'All' button)."""
+        self.source_list.clearSelection()
+        self._promote_all_or_selected()
+
     def _batch_promote_next(self):
         """Promote the next source in the batch list."""
         if self._batch_promote_index >= len(self._batch_promote_list):
@@ -4618,6 +4656,7 @@ class MainWindow(QMainWindow):
         self.btn_revert.setEnabled(False)
         self.btn_promote_all.setEnabled(False)
         self.btn_promote_all.setText("Promote All to Latest")
+        self.btn_promote_split_all.setVisible(False)
 
         if not self.config:
             self.current_label.setText("No project loaded")
@@ -5069,6 +5108,7 @@ class MainWindow(QMainWindow):
         self.btn_refresh_versions.setEnabled(False)
         self.btn_promote.setEnabled(False)
         self.btn_promote_all.setEnabled(False)
+        self.btn_promote_split_all.setEnabled(False)
         names = ", ".join(s.name for s in sources)
         self._scan_indicator.setText("Updating...")
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
@@ -5160,6 +5200,7 @@ class MainWindow(QMainWindow):
         self.btn_refresh_versions.setEnabled(False)
         self.btn_promote.setEnabled(False)
         self.btn_promote_all.setEnabled(False)
+        self.btn_promote_split_all.setEnabled(False)
         self._scan_indicator.setText("Updating...")
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
         self.statusBar().showMessage("Scanning sources...")
@@ -5219,6 +5260,7 @@ class MainWindow(QMainWindow):
         self.btn_revert.setEnabled(False)
         self.btn_promote_all.setEnabled(len(self.config.watched_sources) > 0 and self._worker is None)
         self.btn_promote_all.setText("Promote All to Latest")
+        self.btn_promote_split_all.setVisible(False)
 
         self._populate_source_list()
 
