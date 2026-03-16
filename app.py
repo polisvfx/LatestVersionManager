@@ -2099,18 +2099,27 @@ class DiscoveryDialog(QDialog):
         self._worker.progress.connect(self._on_scan_progress)
         self._worker.start()
 
-    def _get_existing_source_dirs(self) -> set:
-        """Return a set of resolved source_dir paths already in the project."""
+    def _get_existing_sources(self) -> set:
+        """Return a set of (resolved_source_dir, source_name) tuples already in the project."""
         existing = set()
         if self._config:
             for src in self._config.watched_sources:
                 if src.source_dir:
-                    existing.add(str(Path(src.source_dir).resolve()).lower())
+                    existing.add((str(Path(src.source_dir).resolve()).lower(), src.name.lower()))
         return existing
 
-    def _is_existing(self, result_path: str, existing_dirs: set) -> bool:
-        """Check if a discovery result path matches an existing source."""
-        return str(Path(result_path).resolve()).lower() in existing_dirs
+    def _is_existing(self, result_path: str, existing_sources: set, result_name: str = "") -> bool:
+        """Check if a discovery result matches an existing source.
+
+        Compares both the source directory path AND the result name to handle
+        multi-shot directories where multiple sources share the same parent.
+        """
+        resolved = str(Path(result_path).resolve()).lower()
+        # Check if this specific (path, name) combination exists
+        if (resolved, result_name.lower()) in existing_sources:
+            return True
+        # Also check path-only match for backward compatibility (single-shot dirs)
+        return any(d == resolved for d, _ in existing_sources) and not result_name
 
     def _on_scan_progress(self, current_path: str, dirs_scanned: int, estimated_total: int):
         """Update progress bar during discovery scan."""
@@ -2157,7 +2166,7 @@ class DiscoveryDialog(QDialog):
         root_dir = self.dir_combo.currentText().strip()
         root = Path(root_dir).resolve() if root_dir else None
 
-        existing_dirs = self._get_existing_source_dirs()
+        existing_sources = self._get_existing_sources()
         hide_existing = self.hide_existing_cb.isChecked()
         show_ignored = self.show_ignored_cb.isChecked()
 
@@ -2165,7 +2174,7 @@ class DiscoveryDialog(QDialog):
         hidden = 0
 
         for i, result in enumerate(self._results):
-            is_existing = self._is_existing(result.path, existing_dirs)
+            is_existing = self._is_existing(result.path, existing_sources, result.name)
             is_ignored = result.path in self._ignored_paths
 
             if is_existing and hide_existing:
@@ -5194,10 +5203,13 @@ class MainWindow(QMainWindow):
                 if self.source_list.topLevelItem(i).data(0, Qt.UserRole) == self._refresh_select_source:
                     self.source_list.setCurrentItem(self.source_list.topLevelItem(i))
                     self._refresh_select_source = None
+                    self._check_reload_pending()
                     return
         self._refresh_select_source = None
         if self.source_list.topLevelItemCount() > 0:
             self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
+
+        self._check_reload_pending()
 
     def _refresh_all(self):
         """Re-scan all sources in background thread."""
@@ -5234,6 +5246,8 @@ class MainWindow(QMainWindow):
         self._scan_indicator.setText("")
         self.statusBar().showMessage(f"Scan error: {msg}")
         logger.error(f"Scan error: {msg}")
+
+        self._check_reload_pending()
 
     def _on_refresh_complete(self, scan_results: dict):
         """Called when background scan finishes. Delegate to StatusWorker."""
@@ -5294,6 +5308,8 @@ class MainWindow(QMainWindow):
         self._save_scan_cache()
         self._scan_indicator.setText("")
         self.statusBar().showMessage("Refreshed all sources")
+
+        self._check_reload_pending()
 
     def _export_report(self):
         """Export a promotion report for the current source."""
