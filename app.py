@@ -3260,8 +3260,8 @@ class ObsoleteLayerDialog(QDialog):
             item.setForeground(0, QColor("#ffaa00"))
             layer_list.addTopLevelItem(item)
         layer_list.header().setStretchLastSection(False)
-        layer_list.header().setSectionResizeMode(0, layer_list.header().Stretch)
-        layer_list.header().setSectionResizeMode(1, layer_list.header().ResizeToContents)
+        layer_list.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        layer_list.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         layer_list.setMaximumHeight(min(30 + len(obsolete_layers) * 26, 200))
         layout.addWidget(layer_list)
 
@@ -3337,6 +3337,7 @@ class MainWindow(QMainWindow):
         self._batch_keep_layers: dict = {}
         self._force_promote: bool = False
         self._target_conflicts: dict = {}
+        self._deferred_refresh_results: dict = None  # scan results deferred due to promotion in progress
         self._scan_worker: ScanWorker = None
         self._status_worker: StatusWorker = None
         self._reload_pending: bool = False
@@ -4413,6 +4414,11 @@ class MainWindow(QMainWindow):
             self._reload_ui()
             self.statusBar().showMessage("Groups updated")
 
+    @property
+    def _is_promotion_active(self) -> bool:
+        """Return True if a promotion is currently in progress."""
+        return self._worker is not None or bool(self._batch_promote_list)
+
     def _on_source_selection_changed(self):
         """Update Promote All/Selected button based on source list selection."""
         selected = self.source_list.selectedItems()
@@ -4603,7 +4609,7 @@ class MainWindow(QMainWindow):
             self._batch_keep_layers = {}
             for name in promoted_names:
                 self._versions_cache.pop(name, None)
-            self._refresh_sources_by_name(promoted_names)
+            self._process_deferred_or_refresh(promoted_names)
             self.statusBar().showMessage(f"Batch promotion complete: {count} source(s)")
             return
 
@@ -4772,6 +4778,9 @@ class MainWindow(QMainWindow):
         if not self.config or not self.config.watched_sources:
             return
         if self._scan_worker is not None:
+            return
+        if self._is_promotion_active:
+            logger.debug("Deferring background rescan — promotion in progress")
             return
         self._scan_indicator.setText("Updating...")
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
@@ -5087,6 +5096,11 @@ class MainWindow(QMainWindow):
         if not self.config:
             return
         if self._scan_worker is not None or self._status_worker is not None:
+            # A worker is already running — schedule a full refresh once it finishes
+            # rather than silently dropping this request.
+            logger.debug("Refresh worker busy — scheduling full rescan after current worker")
+            self._rescan_after_cache = True
+            self._refresh_select_source = select_source
             return
 
         # Resolve source names to indices
@@ -5250,9 +5264,24 @@ class MainWindow(QMainWindow):
         self._check_reload_pending()
 
     def _on_refresh_complete(self, scan_results: dict):
-        """Called when background scan finishes. Delegate to StatusWorker."""
+        """Called when background scan finishes. Delegate to StatusWorker.
+
+        If a promotion is currently running, defer processing these results
+        until the promotion completes.  Clearing _promoters/_scanners/
+        _current_source while a PromoteWorker is active would corrupt the
+        promotion state and silently break subsequent promotions.
+        """
         self._scan_worker = None
 
+        if self._is_promotion_active:
+            logger.debug("Deferring refresh results — promotion in progress")
+            self._deferred_refresh_results = scan_results
+            return
+
+        self._apply_refresh_results(scan_results)
+
+    def _apply_refresh_results(self, scan_results: dict):
+        """Apply full refresh scan results: update caches and start StatusWorker."""
         # Store scanned versions and clear stale caches
         self._versions_cache = dict(scan_results)
         self._scanners.clear()
@@ -5310,6 +5339,27 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Refreshed all sources")
 
         self._check_reload_pending()
+
+    def _process_deferred_or_refresh(self, source_names: list[str],
+                                      select_source: str = None):
+        """After promotion completes, apply deferred scan results or do a targeted refresh.
+
+        If a full background scan completed while the promotion was running,
+        its results were stashed in ``_deferred_refresh_results``.  Applying
+        them now gives us a complete, up-to-date view without another scan.
+
+        Otherwise fall back to ``_refresh_sources_by_name`` which rescans only
+        the named sources.
+        """
+        deferred = self._deferred_refresh_results
+        self._deferred_refresh_results = None
+
+        if deferred is not None:
+            logger.debug("Applying deferred refresh results after promotion")
+            self._refresh_select_source = select_source
+            self._apply_refresh_results(deferred)
+        else:
+            self._refresh_sources_by_name(source_names, select_source=select_source)
 
     def _export_report(self):
         """Export a promotion report for the current source."""
@@ -5971,7 +6021,13 @@ class MainWindow(QMainWindow):
 
         # Check if this is part of a batch promotion
         if hasattr(self, '_batch_promote_list') and self._batch_promote_list:
-            self._versions_cache.pop(self._current_source.name, None)
+            # Guard: _current_source may have been cleared by a concurrent
+            # background refresh — use _promoting_source_name as fallback.
+            source_name = (
+                self._current_source.name if self._current_source
+                else self._promoting_source_name or "unknown"
+            )
+            self._versions_cache.pop(source_name, None)
             self._batch_promote_index += 1
             self._batch_promote_next()
             return
@@ -5985,10 +6041,11 @@ class MainWindow(QMainWindow):
         )
         # Rescan only the promoted source instead of all sources
         self._versions_cache.pop(promoted_name, None)
-        self._refresh_sources_by_name([promoted_name], select_source=promoted_name)
+        self._process_deferred_or_refresh([promoted_name], select_source=promoted_name)
 
     def _on_promote_error(self, error_msg):
         self._worker = None
+        error_source_name = self._promoting_source_name
         self._promoting_source_name = None
         self.progress_bar.setVisible(False)
         self.btn_cancel_promote.setVisible(False)
@@ -6038,7 +6095,10 @@ class MainWindow(QMainWindow):
 
         # If batch promotion, ask whether to continue
         if hasattr(self, '_batch_promote_list') and self._batch_promote_list:
-            source_name = self._current_source.name if self._current_source else "Unknown"
+            source_name = (
+                self._current_source.name if self._current_source
+                else error_source_name or "Unknown"
+            )
             reply = QMessageBox.warning(
                 self, "Promotion Failed",
                 f"Failed to promote {source_name}:\n{error_msg}\n\nContinue with remaining sources?",
@@ -6050,10 +6110,13 @@ class MainWindow(QMainWindow):
             else:
                 self._batch_promote_list = []
                 self._batch_keep_layers = {}
-                self._refresh_all_with_selection()
+                self._process_deferred_or_refresh([], select_source=None)
             return
 
         QMessageBox.critical(self, "Promotion Failed", error_msg)
+        # Apply any deferred refresh results that accumulated during the failed promotion
+        if self._deferred_refresh_results is not None:
+            self._process_deferred_or_refresh([], select_source=None)
 
     # --- File Watcher ---
 
