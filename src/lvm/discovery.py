@@ -400,7 +400,7 @@ def _walk_for_versions(
                 first_dir_name, ver_match=first_ver_match, date_match=first_date_match)
 
             suggested_date_fmt = ""
-            if first_date_match:
+            if first_date_match and "{date}" in suggested_pattern:
                 suggested_date_fmt = _detect_date_format(first_date_match.group(1))
 
             result_name = current.name if single_group else source_name
@@ -461,7 +461,7 @@ def _walk_for_versions(
             first_file_stem, ver_match=first_ver_match, date_match=first_date_match)
 
         suggested_date_fmt = ""
-        if first_date_match:
+        if first_date_match and "{date}" in suggested_pattern:
             suggested_date_fmt = _detect_date_format(first_date_match.group(1))
 
         results.append(DiscoveryResult(
@@ -767,21 +767,28 @@ def _suggest_pattern(name: str, ver_match: re.Match = None,
     - Date only: "_{date}" or "{date}_" depending on position
     """
     if ver_match and date_match:
-        # Both present — build pattern with both tokens
-        ver_prefix = name[ver_match.start():ver_match.start(1)]
-        date_start = date_match.start(1)
-        # Find the divider before the date (if any)
-        if date_start > 0 and name[date_start - 1] in "_.-":
-            date_prefix = name[date_start - 1]
-        else:
-            date_prefix = ""
-
+        # Check if date and version are adjacent (only a divider between them).
+        # Non-adjacent tokens (e.g. ARRI clip names with camera metadata between
+        # the date and version) produce a compound regex that can never match.
         if date_match.start() < ver_match.start():
-            # Date comes before version: {date}_..._v{version}
-            return date_prefix + "{date}" + ver_prefix + "{version}"
+            gap = name[date_match.end():ver_match.start()]
         else:
-            # Version comes before date
-            return ver_prefix + "{version}" + date_prefix + "{date}"
+            gap = name[ver_match.end():date_match.start(1)]
+
+        if len(gap) <= 1:
+            # Adjacent — build compound pattern with both tokens
+            ver_prefix = name[ver_match.start():ver_match.start(1)]
+            date_start = date_match.start(1)
+            if date_start > 0 and name[date_start - 1] in "_.-":
+                date_prefix = name[date_start - 1]
+            else:
+                date_prefix = ""
+
+            if date_match.start() < ver_match.start():
+                return date_prefix + "{date}" + ver_prefix + "{version}"
+            else:
+                return ver_prefix + "{version}" + date_prefix + "{date}"
+        # else: not adjacent — fall through to version-only or date-only below
 
     elif date_match and not ver_match:
         # Date only
