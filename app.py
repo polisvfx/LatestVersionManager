@@ -3462,9 +3462,10 @@ class MainWindow(QMainWindow):
 
         # Source list column definitions
         # key → (header label, column index)
-        self._source_col_keys = ["name", "group", "version", "layer_count", "added_on", "last_promoted", "status"]
+        self._source_col_keys = ["name", "group", "version", "layers", "frames", "filetype", "added_on", "last_promoted", "status"]
         self._source_col_labels = {
-            "name": "Name", "group": "Group", "version": "Version", "layer_count": "Layer Count",
+            "name": "Name", "group": "Group", "version": "Version", "layers": "Layers",
+            "frames": "Frames", "filetype": "Filetype",
             "added_on": "Added On", "last_promoted": "Last Promoted", "status": "Status",
         }
 
@@ -3488,10 +3489,12 @@ class MainWindow(QMainWindow):
         self.source_list.header().resizeSection(0, 200)  # Name
         self.source_list.header().resizeSection(1, 100)  # Group
         self.source_list.header().resizeSection(2, 70)   # Version
-        self.source_list.header().resizeSection(3, 80)   # Layer Count
-        self.source_list.header().resizeSection(4, 140)  # Added On
-        self.source_list.header().resizeSection(5, 140)  # Last Promoted
-        self.source_list.header().resizeSection(6, 100)  # Status
+        self.source_list.header().resizeSection(3, 55)   # Layers
+        self.source_list.header().resizeSection(4, 65)   # Frames
+        self.source_list.header().resizeSection(5, 65)   # Filetype
+        self.source_list.header().resizeSection(6, 140)  # Added On
+        self.source_list.header().resizeSection(7, 140)  # Last Promoted
+        self.source_list.header().resizeSection(8, 100)  # Status
         self.source_list.header().setStretchLastSection(False)
         # All columns are user-resizable (Interactive); Name stretches to fill remaining space
         self.source_list.header().setSectionResizeMode(QHeaderView.Interactive)
@@ -4832,8 +4835,19 @@ class MainWindow(QMainWindow):
         }
         status_text = status_labels.get(status, status)
 
-        # Layer count from last promoted version
-        layer_count = str(current.file_count) if current and current.file_count else ""
+        # Layers: number of additional layers (sub_sequences) in the promoted version
+        layers = str(len(current.sub_sequences)) if current and current.sub_sequences else ""
+
+        # Frames: frame count or clip length for containers
+        frames = ""
+        if current:
+            if current.clip_frame_count:
+                frames = str(current.clip_frame_count)
+            elif current.frame_count:
+                frames = str(current.frame_count)
+
+        # Filetype: primary file extension
+        filetype = current.file_type.lstrip(".").upper() if current and current.file_type else ""
 
         # Added on timestamp
         added_on = ""
@@ -4855,7 +4869,7 @@ class MainWindow(QMainWindow):
             except (ValueError, TypeError):
                 last_promoted = current.set_at
 
-        item = QTreeWidgetItem([name_text, group_text, ver_tag, layer_count, added_on, last_promoted, status_text])
+        item = QTreeWidgetItem([name_text, group_text, ver_tag, layers, frames, filetype, added_on, last_promoted, status_text])
         item.setData(0, Qt.UserRole, source.name)
 
         # Color coding
