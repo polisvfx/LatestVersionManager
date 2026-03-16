@@ -133,7 +133,13 @@ class Promoter:
 
         if not source_files:
             return []
-        source_groups = _group_files_by_sequence(source_files)
+        # Remap source filenames to match target naming (strip version/date)
+        # so that layer prefixes are comparable between source and target.
+        remapped_source_files = [
+            f.with_name(self._remap_filename(f.name))
+            for f in source_files
+        ]
+        source_groups = _group_files_by_sequence(remapped_source_files)
         source_layer_names = set(source_groups.keys())
 
         obsolete_prefixes = target_layer_names - source_layer_names
