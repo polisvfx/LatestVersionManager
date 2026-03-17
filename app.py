@@ -782,12 +782,10 @@ class ProjectSetupDialog(QDialog):
         filter_label.setStyleSheet("color: #999; font-size: 11px; margin-top: 6px;")
         layout.addRow("", filter_label)
 
-        self.whitelist_edit = QLineEdit()
-        self.whitelist_edit.setPlaceholderText("comp, grade, final")
+        self.whitelist_edit = TagInputWidget(placeholder="Type and press comma to add...")
         layout.addRow("Whitelist:", self.whitelist_edit)
 
-        self.blacklist_edit = QLineEdit()
-        self.blacklist_edit.setPlaceholderText("denoise, prerender, wip, temp")
+        self.blacklist_edit = TagInputWidget(placeholder="Type and press comma to add...")
         layout.addRow("Blacklist:", self.blacklist_edit)
 
         # Task tokens
@@ -845,8 +843,8 @@ class ProjectSetupDialog(QDialog):
             self.save_edit.setText(d)
 
     def get_project_info(self) -> dict:
-        wl = [kw.strip() for kw in self.whitelist_edit.text().split(",") if kw.strip()]
-        bl = [kw.strip() for kw in self.blacklist_edit.text().split(",") if kw.strip()]
+        wl = self.whitelist_edit.tags()
+        bl = self.blacklist_edit.tags()
         tasks = [t.strip() for t in self.tasks_edit.text().split(",") if t.strip()]
         root = self.root_edit.text().strip()
         save = self.save_edit.text().strip() or root
@@ -948,6 +946,8 @@ class TagInputWidget(QWidget):
     Typing a comma converts the preceding text into a tag.
     """
 
+    tagsChanged = Signal()  # Emitted when tags are added or removed
+
     def __init__(self, initial_tags: list[str] = None, placeholder: str = "", parent=None):
         super().__init__(parent)
         self._tags: list[str] = []
@@ -995,6 +995,7 @@ class TagInputWidget(QWidget):
         tag_w.removed.connect(self._remove_tag)
         self._flow.addWidget(tag_w)
         self._update_container_visibility()
+        self.tagsChanged.emit()
 
     def _remove_tag(self, text: str):
         if text in self._tags:
@@ -1008,6 +1009,7 @@ class TagInputWidget(QWidget):
                         if sub.widget().text == text:
                             self._flow.removeWidget(sub.widget())
                             self._update_container_visibility()
+                            self.tagsChanged.emit()
                             return
 
     def _update_container_visibility(self):
@@ -1938,6 +1940,8 @@ class DiscoveryDialog(QDialog):
         self._timecodes_populated = False
         self._ignored_paths: set[str] = set()          # ignored source directory paths
         self._ignored_versions: set[tuple[str, int]] = set()  # (path, version_number)
+        self._filtered_by_whitelist: set[str] = set()  # paths filtered by whitelist
+        self._filtered_by_blacklist: set[str] = set()  # paths filtered by blacklist
 
         layout = QVBoxLayout(self)
 
@@ -1970,6 +1974,23 @@ class DiscoveryDialog(QDialog):
         self.scan_btn.clicked.connect(self._start_scan)
         pick_row.addWidget(self.scan_btn)
         layout.addLayout(pick_row)
+
+        # Whitelist/Blacklist filters (live filtering)
+        filters_section = CollapsibleSection("Filters", collapsed=True)
+        filters_layout = filters_section.content_layout()
+        filters_layout.setSpacing(6)
+
+        # Whitelist label and input
+        self.discovery_whitelist = TagInputWidget(placeholder="Type and press comma to add...")
+        filters_layout.addRow("Whitelist (include only):", self.discovery_whitelist)
+        self.discovery_whitelist.tagsChanged.connect(self._on_discovery_filters_changed)
+
+        # Blacklist label and input
+        self.discovery_blacklist = TagInputWidget(placeholder="Type and press comma to add...")
+        filters_layout.addRow("Blacklist (exclude):", self.discovery_blacklist)
+        self.discovery_blacklist.tagsChanged.connect(self._on_discovery_filters_changed)
+
+        layout.addWidget(filters_section)
 
         # Results tree (multi-select)
         self.result_tree = QTreeWidget()
@@ -2176,12 +2197,19 @@ class DiscoveryDialog(QDialog):
         for i, result in enumerate(self._results):
             is_existing = self._is_existing(result.path, existing_sources, result.name)
             is_ignored = result.path in self._ignored_paths
+            is_filtered_whitelist = result.path in self._filtered_by_whitelist
+            is_filtered_blacklist = result.path in self._filtered_by_blacklist
 
             if is_existing and hide_existing:
                 hidden += 1
                 continue
 
             if is_ignored and not show_ignored:
+                hidden += 1
+                continue
+
+            # Apply whitelist/blacklist filters (always hide, not subject to show_ignored)
+            if is_filtered_whitelist or is_filtered_blacklist:
                 hidden += 1
                 continue
 
@@ -2363,6 +2391,43 @@ class DiscoveryDialog(QDialog):
 
     def _unignore_version(self, key: tuple):
         self._ignored_versions.discard(key)
+        self._rebuild_tree()
+
+    def _on_discovery_filters_changed(self):
+        """Handle live filtering when whitelist/blacklist tags change."""
+        # Recalculate filtered sets based on current tags
+        self._filtered_by_whitelist.clear()
+        self._filtered_by_blacklist.clear()
+
+        whitelist_tags = self.discovery_whitelist.tags()
+        blacklist_tags = self.discovery_blacklist.tags()
+
+        # Apply whitelist: only include results that match at least one whitelist tag
+        if whitelist_tags:
+            for result in self._results:
+                parts = [result.name, result.path]
+                if result.sample_filename:
+                    parts.append(result.sample_filename)
+                search_text = " ".join(parts).lower()
+
+                # Check if any whitelist tag is in the search text
+                matches_whitelist = any(tag.lower() in search_text for tag in whitelist_tags)
+                if not matches_whitelist:
+                    self._filtered_by_whitelist.add(result.path)
+
+        # Apply blacklist: exclude results that match any blacklist tag
+        if blacklist_tags:
+            for result in self._results:
+                parts = [result.name, result.path]
+                if result.sample_filename:
+                    parts.append(result.sample_filename)
+                search_text = " ".join(parts).lower()
+
+                # Check if any blacklist tag is in the search text
+                matches_blacklist = any(tag.lower() in search_text for tag in blacklist_tags)
+                if matches_blacklist:
+                    self._filtered_by_blacklist.add(result.path)
+
         self._rebuild_tree()
 
     def _apply_blacklist_keyword(self, keyword: str):
