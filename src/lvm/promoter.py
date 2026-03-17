@@ -31,8 +31,8 @@ _DATE_RE = re.compile(r"(?:^|(?<=[._\-]))(\d{6}|\d{8})(?=[._\-]|$)")
 _DOUBLE_DIVIDER_RE = re.compile(r"([_.\-]){2,}")
 _FRAME_EXT_RE = re.compile(r"([._])(\d+)\.(\w+)$")
 
-# Number of threads for parallel file copy operations
-_COPY_WORKERS = 4
+# Number of threads for parallel file copy operations — adapts to CPU count
+_COPY_WORKERS = min(os.cpu_count() or 4, 8)
 
 
 def _resolve_unc_safe(path: Path) -> Path:
@@ -82,6 +82,10 @@ class Promoter:
         self.history = HistoryManager(
             os.path.join(watched_source.latest_target, watched_source.history_filename)
         )
+        # Cache valid extensions once — immutable for this Promoter's lifetime
+        self._valid_extensions = frozenset(
+            ext.lower() for ext in watched_source.file_extensions
+        )
         # Cache derived tokens for file renaming
         self._rename_tokens = None
         self._cancelled = threading.Event()
@@ -107,7 +111,7 @@ class Promoter:
         if not target_dir.exists():
             return []
 
-        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+        valid_extensions = self._valid_extensions
 
         # Layers currently in the target directory
         target_files = sorted(
@@ -212,9 +216,12 @@ class Promoter:
         # Create target directory if needed
         target_dir.mkdir(parents=True, exist_ok=True)
 
+        # Scan target directory once — reuse for locked-file and clear checks
+        target_entries = self._scan_target_media(target_dir)
+
         # Smart locked file detection: only check if target has files
-        if self._target_has_media_files(target_dir):
-            locked = self._check_locked_files(target_dir)
+        if self._target_has_media_files(target_dir, cached_entries=target_entries):
+            locked = self._check_locked_files(target_dir, cached_entries=target_entries)
             if locked:
                 raise PromotionError(
                     f"Cannot overwrite - these files appear to be locked/in use:\n"
@@ -252,19 +259,41 @@ class Promoter:
         logger.info(f"Promotion complete: {version.version_string}")
         return entry
 
-    def _target_has_media_files(self, target_dir: Path) -> bool:
-        """Quick check if target directory contains any media files.
+    def _scan_target_media(self, target_dir: Path) -> list:
+        """Single os.scandir pass to collect media DirEntry objects from target.
 
-        Uses os.scandir for fast iteration and returns early on first match.
+        Returns a list of os.DirEntry filtered to files matching valid extensions.
+        Reuse this result instead of scanning the target directory multiple times.
         """
-        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+        entries = []
         try:
             with os.scandir(target_dir) as it:
                 for entry in it:
                     if entry.is_file(follow_symlinks=False):
                         name = entry.name
                         dot_idx = name.rfind(".")
-                        if dot_idx >= 0 and name[dot_idx:].lower() in valid_extensions:
+                        if dot_idx >= 0 and name[dot_idx:].lower() in self._valid_extensions:
+                            entries.append(entry)
+        except (PermissionError, OSError):
+            pass
+        return entries
+
+    def _target_has_media_files(self, target_dir: Path, cached_entries: list = None) -> bool:
+        """Quick check if target directory contains any media files.
+
+        When *cached_entries* is provided, uses the pre-scanned list instead
+        of hitting the filesystem again.
+        """
+        if cached_entries is not None:
+            return len(cached_entries) > 0
+        # Fallback: quick scan with early exit
+        try:
+            with os.scandir(target_dir) as it:
+                for entry in it:
+                    if entry.is_file(follow_symlinks=False):
+                        name = entry.name
+                        dot_idx = name.rfind(".")
+                        if dot_idx >= 0 and name[dot_idx:].lower() in self._valid_extensions:
                             return True
         except (PermissionError, OSError):
             pass
@@ -330,7 +359,7 @@ class Promoter:
         keep_layers: Optional[set[str]] = None,
     ):
         """Copy/symlink a folder of frames to the target."""
-        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+        valid_extensions = self._valid_extensions
         source_files = sorted(
             f for f in source_dir.iterdir()
             if f.is_file() and f.suffix.lower() in valid_extensions
@@ -593,17 +622,26 @@ class Promoter:
                 f"Error: {e}"
             ) from e
 
-    def _check_locked_files(self, target_dir: Path) -> list[str]:
+    def _check_locked_files(self, target_dir: Path, cached_entries: list = None) -> list[str]:
         """
         Check for locked files in the target directory.
         Returns a list of filenames that appear to be locked.
+
+        When *cached_entries* is provided (list of os.DirEntry from
+        _scan_target_media), uses those instead of re-scanning.
         """
         locked = []
-        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
 
-        for f in target_dir.iterdir():
-            if not f.is_file() or f.suffix.lower() not in valid_extensions:
-                continue
+        if cached_entries is not None:
+            files = [Path(e.path) for e in cached_entries]
+        else:
+            valid_extensions = self._valid_extensions
+            files = [
+                f for f in target_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in valid_extensions
+            ]
+
+        for f in files:
             try:
                 # Try to open for writing - if it fails, the file is locked
                 with open(f, "a"):
@@ -629,7 +667,7 @@ class Promoter:
         """
         source_path = Path(version.source_path)
         target_dir = Path(self.source.latest_target)
-        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+        valid_extensions = self._valid_extensions
 
         if source_path.is_dir():
             source_files = sorted(
@@ -683,7 +721,7 @@ class Promoter:
                     except OSError:
                         pass
             elif path.is_dir():
-                valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+                valid_extensions = self._valid_extensions
                 with os.scandir(path) as it:
                     for entry in it:
                         if entry.is_file(follow_symlinks=False):
@@ -709,7 +747,7 @@ class Promoter:
         the files belonging to *version* so that mtime checks are accurate.
         """
         if source_path.is_dir() and source_path == Path(self.source.source_dir):
-            valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+            valid_extensions = self._valid_extensions
             all_files = sorted(
                 f for f in source_path.iterdir()
                 if f.is_file() and f.suffix.lower() in valid_extensions
@@ -728,16 +766,17 @@ class Promoter:
 
         Checks file count, source staleness (re-rendered since promotion),
         and target staleness (externally overwritten).
+
+        Scans the target directory once and reuses the results for both
+        the file-count integrity check and the mtime staleness check.
         """
         target_dir = Path(self.source.latest_target)
         if not target_dir.exists():
             return {"valid": True, "message": "Target directory doesn't exist yet."}
 
-        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
-        actual_files = [
-            f.name for f in target_dir.iterdir()
-            if f.is_file() and f.suffix.lower() in valid_extensions
-        ]
+        # Single scan of target directory — reuse for file list and mtime
+        target_entries = self._scan_target_media(target_dir)
+        actual_files = [e.name for e in target_entries]
 
         # Basic file count check
         basic = self.history.verify_integrity(actual_files)
@@ -769,9 +808,17 @@ class Promoter:
                                f"— may have been re-rendered.",
                 }
 
-        # Check if target files were overwritten externally
+        # Check if target files were overwritten externally — use cached entries
         if current.target_mtime is not None:
-            current_target_mtime = self._get_max_mtime(target_dir)
+            max_mt = 0.0
+            for entry in target_entries:
+                try:
+                    mt = entry.stat(follow_symlinks=False).st_mtime
+                    if mt > max_mt:
+                        max_mt = mt
+                except OSError:
+                    pass
+            current_target_mtime = max_mt if target_entries else None
             if current_target_mtime is not None and abs(current_target_mtime - current.target_mtime) > 1.0:
                 return {
                     "valid": False,
