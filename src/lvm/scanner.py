@@ -6,6 +6,11 @@ Handles both:
 - Single files (e.g. hero_comp_v003.mov)
 """
 
+__all__ = [
+    "VersionScanner", "detect_sequence_from_file",
+    "scan_directory_as_version", "create_manual_version",
+]
+
 import os
 import re
 import logging
@@ -472,9 +477,52 @@ def _detect_frame_range_for_group(
     else:
         range_str = f"{first}-{last}"
     if actual != expected:
-        range_str += f" ({actual}/{expected} frames, gaps detected)"
+        # Compute which frames are missing for diagnostic detail
+        frame_set = set(frames)
+        missing = sorted(set(range(first, last + 1)) - frame_set)
+        missing_str = _format_frame_gaps(missing, padding, max_items=10)
+        range_str += f" ({actual}/{expected} frames, gaps detected"
+        if missing_str:
+            range_str += f"; missing: {missing_str}"
+        range_str += ")"
 
     return range_str, actual
+
+
+def _format_frame_gaps(missing: list[int], padding: int = 0, max_items: int = 10) -> str:
+    """Format a list of missing frame numbers as compact ranges.
+
+    Examples: "1005-1008, 1020" or "01005-01008, 01020" with padding.
+    Limits output to *max_items* ranges to avoid huge strings.
+    """
+    if not missing:
+        return ""
+
+    def _fmt(n: int) -> str:
+        return str(n).zfill(padding) if padding else str(n)
+
+    ranges = []
+    start = missing[0]
+    end = missing[0]
+    for n in missing[1:]:
+        if n == end + 1:
+            end = n
+        else:
+            ranges.append((start, end))
+            start = end = n
+    ranges.append((start, end))
+
+    parts = []
+    for s, e in ranges[:max_items]:
+        if s == e:
+            parts.append(_fmt(s))
+        else:
+            parts.append(f"{_fmt(s)}-{_fmt(e)}")
+
+    result = ", ".join(parts)
+    if len(ranges) > max_items:
+        result += f", ... ({len(ranges) - max_items} more)"
+    return result
 
 
 def detect_sequence_from_file(

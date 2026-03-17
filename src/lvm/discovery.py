@@ -5,6 +5,8 @@ Finds directories or files that contain version patterns (v01, v002, v0051, etc.
 and reports what it found. Does NOT modify any project files — report only.
 """
 
+__all__ = ["discover", "format_discovery_report", "MEDIA_EXTENSIONS"]
+
 import os
 import re
 import logging
@@ -14,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Callable
 
-from .models import DiscoveryResult, VersionInfo
+from .models import DiscoveryResult, VersionInfo, has_media_extension
 from .task_tokens import strip_version as _strip_version
 
 logger = logging.getLogger(__name__)
@@ -628,13 +630,8 @@ def _collect_media_files(folder: Path, extensions: set) -> list[Path]:
     try:
         with os.scandir(folder) as it:
             for entry in it:
-                if entry.is_file(follow_symlinks=False):
-                    name = entry.name
-                    dot_idx = name.rfind(".")
-                    if dot_idx >= 0:
-                        suffix = name[dot_idx:].lower()
-                        if suffix in extensions:
-                            files.append(Path(entry.path))
+                if entry.is_file(follow_symlinks=False) and has_media_extension(entry.name, extensions):
+                    files.append(Path(entry.path))
     except PermissionError:
         pass
     files.sort()

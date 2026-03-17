@@ -5,6 +5,8 @@ Detects when multiple watched sources share the same resolved latest_target
 directory, which would cause promotions to silently overwrite each other.
 """
 
+__all__ = ["detect_target_conflicts", "check_target_ownership"]
+
 import logging
 from pathlib import Path
 from typing import Optional

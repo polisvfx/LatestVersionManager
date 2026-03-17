@@ -5,6 +5,8 @@ Tracks which version is currently promoted to "latest" and
 maintains a full history of all promotions.
 """
 
+__all__ = ["HistoryManager", "has_newer_versions_since", "MAX_HISTORY_ENTRIES"]
+
 import json
 import logging
 from datetime import datetime, timedelta

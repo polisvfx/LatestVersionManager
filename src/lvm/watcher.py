@@ -5,6 +5,8 @@ Emits Qt signals when new version folders or files appear so the GUI
 can update without manual refresh.
 """
 
+__all__ = ["SourceWatcher"]
+
 import logging
 from pathlib import Path
 

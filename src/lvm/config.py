@@ -6,6 +6,11 @@ At load time, project_dir is computed and stored on ProjectConfig so that
 other modules can resolve relative paths to absolute ones.
 """
 
+__all__ = [
+    "load_config", "save_config", "create_project",
+    "create_example_config", "apply_project_defaults",
+]
+
 import json
 import logging
 import re

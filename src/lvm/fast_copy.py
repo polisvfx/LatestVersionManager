@@ -18,6 +18,8 @@ All paths fall back gracefully to shutil.copy2() if native APIs are
 unavailable or fail.
 """
 
+__all__ = ["smart_copy", "CopyCancelled", "is_same_smb_server"]
+
 import os
 import re
 import sys

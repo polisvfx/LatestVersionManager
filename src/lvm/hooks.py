@@ -5,6 +5,8 @@ Hooks are shell commands that run before and after file promotion.
 Environment variables are passed to give hooks context about the operation.
 """
 
+__all__ = ["HookError", "run_hook", "run_pre_promote_hook", "run_post_promote_hook"]
+
 import logging
 import os
 import subprocess
