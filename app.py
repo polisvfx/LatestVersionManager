@@ -3506,9 +3506,9 @@ class MainWindow(QMainWindow):
         self.source_list.header().resizeSection(7, 140)  # Last Promoted
         self.source_list.header().resizeSection(8, 100)  # Status
         self.source_list.header().setStretchLastSection(False)
-        # All columns are user-resizable (Interactive); Name stretches to fill remaining space
+        # All columns are user-resizable (Interactive); last column stretches to fill remaining space
         self.source_list.header().setSectionResizeMode(QHeaderView.Interactive)
-        self.source_list.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.source_list.header().setSectionResizeMode(len(self._source_col_keys) - 1, QHeaderView.Stretch)
         left_layout.addWidget(self.source_list)
 
         # Promote All / Promote Selected button(s)
