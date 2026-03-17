@@ -85,6 +85,10 @@ jobs:
         run: |
           python -m unittest tests.test_date_versions -v
           python -m unittest tests.test_timecode -v
+          python -m unittest tests.test_fast_copy -v
+          python -m unittest tests.test_core -v
+          python -m unittest tests.test_untested_modules -v
+          python -m unittest tests.test_blacklist_filter -v
 
       # ── Inject release version into package ─────────────────────────────
       # When triggered by a published release (tag e.g. v1.2.3), patch
