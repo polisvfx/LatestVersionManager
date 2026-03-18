@@ -13,6 +13,11 @@ import sys
 import tempfile
 import time
 import unittest
+
+# On headless CI (Linux without DISPLAY), set offscreen Qt platform
+# before any PySide6 import to avoid xcb plugin crash.
+if os.name != "nt" and not os.environ.get("DISPLAY") and not os.environ.get("QT_QPA_PLATFORM"):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -422,7 +427,7 @@ class TestSourceWatcher(unittest.TestCase):
 
     def test_is_running_initial(self):
         """Watcher should not be running before start()."""
-        # This requires a QApplication for QObject, so we do a minimal check
+        # This requires a QApplication for QObject, so we do a minimal check.
         try:
             from PySide6.QtWidgets import QApplication
             app = QApplication.instance() or QApplication([])
