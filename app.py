@@ -437,11 +437,11 @@ class DryRunDialog(QDialog):
             f"({dry_run_data['total_files']} files, "
             f"{version.total_size_human}, {dry_run_data['link_mode']} mode)"
         )
-        header.setStyleSheet("font-size: 13px; padding: 4px;")
+        header.setStyleSheet("font-size: 13pt; padding: 4px;")
         layout.addWidget(header)
 
         target_label = QLabel(f"Target: {dry_run_data['target_dir']}")
-        target_label.setStyleSheet("color: #aaa; font-size: 11px; padding: 0 4px 4px;")
+        target_label.setStyleSheet("color: #aaa; font-size: 11pt; padding: 0 4px 4px;")
         layout.addWidget(target_label)
 
         # Frame range mismatch warning
@@ -473,7 +473,7 @@ class DryRunDialog(QDialog):
             warn_layout.setContentsMargins(8, 4, 8, 4)
             for w in self._warnings:
                 warn_label = QLabel(f"\u26a0 {w}")
-                warn_label.setStyleSheet("color: #ffaa00; font-size: 12px;")
+                warn_label.setStyleSheet("color: #ffaa00; font-size: 12pt;")
                 warn_layout.addWidget(warn_label)
             layout.addWidget(warn_frame)
 
@@ -512,7 +512,7 @@ class DryRunDialog(QDialog):
             replace_label = QLabel(
                 f"This will replace the current version ({current.version})."
             )
-            replace_label.setStyleSheet("color: #cc8833; font-size: 11px; padding: 4px;")
+            replace_label.setStyleSheet("color: #cc8833; font-size: 11pt; padding: 4px;")
             layout.addWidget(replace_label)
 
         # Buttons
@@ -559,7 +559,7 @@ class SourceDialog(QDialog):
 
         # --- Overrideable fields ---
         override_label = QLabel("Fields below inherit project defaults unless overridden:")
-        override_label.setStyleSheet("color: #999; font-size: 11px; margin-top: 8px;")
+        override_label.setStyleSheet("color: #999; font-size: 11pt; margin-top: 8px;")
         layout.addRow("", override_label)
 
         # Latest target
@@ -746,7 +746,7 @@ class ProjectSetupDialog(QDialog):
         root_row.addWidget(self.root_edit, 1)
         root_row.addWidget(self.root_browse_btn)
         root_help = QLabel("The root directory of the project (used for {project_root} token).")
-        root_help.setStyleSheet("color: #999; font-size: 11px;")
+        root_help.setStyleSheet("color: #999; font-size: 11pt;")
         layout.addRow("Project Root:", root_row)
         layout.addRow("", root_help)
 
@@ -759,7 +759,7 @@ class ProjectSetupDialog(QDialog):
         save_row.addWidget(self.save_edit, 1)
         save_row.addWidget(self.save_browse_btn)
         save_help = QLabel("Where the project file (.json) is saved. Defaults to Project Root.")
-        save_help.setStyleSheet("color: #999; font-size: 11px;")
+        save_help.setStyleSheet("color: #999; font-size: 11pt;")
         self._save_label = self.save_label
         self._save_row_widget = QWidget()
         self._save_row_widget.setLayout(save_row)
@@ -779,7 +779,7 @@ class ProjectSetupDialog(QDialog):
             "Whitelist: only include folders matching these keywords.\n"
             "Blacklist: skip folders matching these keywords."
         )
-        filter_label.setStyleSheet("color: #999; font-size: 11px; margin-top: 6px;")
+        filter_label.setStyleSheet("color: #999; font-size: 11pt; margin-top: 6px;")
         layout.addRow("", filter_label)
 
         self.whitelist_edit = TagInputWidget(placeholder="Type and press comma to add...")
@@ -797,7 +797,7 @@ class ProjectSetupDialog(QDialog):
             "Common task names in your pipeline that can be stripped\n"
             "from filenames. Use % as a counted wildcard (e.g. comp_%% matches comp_mp)."
         )
-        task_help.setStyleSheet("color: #999; font-size: 11px;")
+        task_help.setStyleSheet("color: #999; font-size: 11pt;")
         layout.addRow("", task_help)
 
         self.tasks_edit = QLineEdit()
@@ -926,7 +926,7 @@ class TagWidget(QFrame):
         close_btn.setStyleSheet(
             "QPushButton {"
             "  background: transparent; border: none; color: #aaa;"
-            "  font-size: 13px; font-weight: bold; padding: 0; margin: 0;"
+            "  font-size: 13pt; font-weight: bold; padding: 0; margin: 0;"
             "}"
             "QPushButton:hover { color: #ff6b6b; }"
         )
@@ -1047,7 +1047,7 @@ class CollapsibleSection(QWidget):
         self._toggle_btn.setChecked(not collapsed)
         self._toggle_btn.setArrowType(Qt.DownArrow if not collapsed else Qt.RightArrow)
         self._toggle_btn.setStyleSheet(
-            "QToolButton { border: none; font-weight: bold; font-size: 12px;"
+            "QToolButton { border: none; font-weight: bold; font-size: 12pt;"
             " padding: 6px 4px; color: #ddd; }"
             "QToolButton:hover { color: #fff; background: #3a3a3a; }"
         )
@@ -1134,7 +1134,7 @@ class ProjectSettingsDialog(QDialog):
         root_row.addWidget(self.root_edit, 1)
         root_row.addWidget(self.root_browse_btn)
         root_help = QLabel("The root directory of the project (used for {project_root} token).")
-        root_help.setStyleSheet("color: #999; font-size: 11px;")
+        root_help.setStyleSheet("color: #999; font-size: 11pt;")
         general_form.addRow("Project Root:", root_row)
         general_form.addRow("", root_help)
 
@@ -1155,7 +1155,7 @@ class ProjectSettingsDialog(QDialog):
             "{source_title} is the source's in-project display name.\n"
             "Examples: {group_root}/online/{source_name}  |  latest/{group}/{source_basename}_latest"
         )
-        template_help.setStyleSheet("color: #999; font-size: 11px;")
+        template_help.setStyleSheet("color: #999; font-size: 11pt;")
         paths.addRow("", template_help)
 
         self.latest_template_edit = QLineEdit(config.latest_path_template)
@@ -1167,7 +1167,7 @@ class ProjectSettingsDialog(QDialog):
             "Controls the output filename (without frame/ext).\n"
             "Tokens: {source_title}, {source_name}, {source_basename}, {source_fullname}, {group}"
         )
-        rename_help.setStyleSheet("color: #999; font-size: 11px;")
+        rename_help.setStyleSheet("color: #999; font-size: 11pt;")
         paths.addRow("", rename_help)
 
         self.rename_template_edit = QLineEdit(config.default_file_rename_template)
@@ -1176,7 +1176,7 @@ class ProjectSettingsDialog(QDialog):
         paths.addRow("File Rename Template:", self.rename_template_edit)
 
         self.path_preview_label = QLabel("")
-        self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
+        self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11pt;")
         self.path_preview_label.setWordWrap(True)
         self.path_preview_label.setMinimumWidth(50)
         self.path_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -1207,7 +1207,7 @@ class ProjectSettingsDialog(QDialog):
             "Task names stripped from filenames to produce cleaner source names.\n"
             "Each % matches one character (e.g. comp_%% matches comp_mp). Bounded by: _ - ."
         )
-        task_help.setStyleSheet("color: #999; font-size: 11px;")
+        task_help.setStyleSheet("color: #999; font-size: 11pt;")
         naming.addRow("", task_help)
 
         self.tasks_edit = QLineEdit(", ".join(config.task_tokens))
@@ -1267,7 +1267,7 @@ class ProjectSettingsDialog(QDialog):
             "Lazy: read on demand when a source is viewed (fast scan)\n"
             "Never: skip timecode extraction entirely (fastest)"
         )
-        tc_help.setStyleSheet("color: #999; font-size: 11px;")
+        tc_help.setStyleSheet("color: #999; font-size: 11pt;")
         adv.addRow("Timecode Mode:", self.timecode_combo)
         adv.addRow("", tc_help)
 
@@ -1280,7 +1280,7 @@ class ProjectSettingsDialog(QDialog):
             "Shell commands to run before/after each promotion.\n"
             "Leave empty to disable. Tokens: {source_name}, {version}, {target_dir}"
         )
-        hooks_help.setStyleSheet("color: #999; font-size: 11px;")
+        hooks_help.setStyleSheet("color: #999; font-size: 11pt;")
         adv.addRow("", hooks_help)
 
         self.pre_promote_edit = QLineEdit(getattr(config, 'pre_promote_cmd', '') or '')
@@ -1314,7 +1314,7 @@ class ProjectSettingsDialog(QDialog):
             "round-trips. Safe for SMB/NFS shares which rarely use symlinks.\n"
             "Disable only if your source directories contain symlink loops."
         )
-        skip_resolve_help.setStyleSheet("color: #999; font-size: 11px;")
+        skip_resolve_help.setStyleSheet("color: #999; font-size: 11pt;")
         adv.addRow("", skip_resolve_help)
 
         top_layout.addWidget(advanced_section)
@@ -1352,7 +1352,7 @@ class ProjectSettingsDialog(QDialog):
         rename_tpl = self.rename_template_edit.text().strip() or "{source_basename}_latest"
         if not tpl:
             self.path_preview_label.setText("(no template set)")
-            self.path_preview_label.setStyleSheet("color: #888; font-size: 11px;")
+            self.path_preview_label.setStyleSheet("color: #888; font-size: 11pt;")
             return
 
         config = self._config
@@ -1433,7 +1433,7 @@ class ProjectSettingsDialog(QDialog):
             return p.replace("/", "/\u200b").replace("\\", "\\\u200b")
 
         self.path_preview_label.setText("\n".join(_path_wrappable(p) for p in previews))
-        self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
+        self.path_preview_label.setStyleSheet("color: #88cc88; font-size: 11pt;")
 
     def _browse_root(self):
         start = self.root_edit.text().strip()
@@ -1445,7 +1445,7 @@ class ProjectSettingsDialog(QDialog):
         """Format the naming rule label with a human-readable description."""
         if not rule:
             self.naming_label.setText("Not configured yet — will be set on first ingest")
-            self.naming_label.setStyleSheet("color: #999; font-size: 11px;")
+            self.naming_label.setStyleSheet("color: #999; font-size: 11pt;")
             return
 
         descriptions = {
@@ -1580,14 +1580,14 @@ class LatestPathDialog(QDialog):
 
         # Header
         header = QLabel("A latest path template is required before promotion.")
-        header.setStyleSheet("font-size: 14px; font-weight: bold; margin-bottom: 4px;")
+        header.setStyleSheet("font-size: 14pt; font-weight: bold; margin-bottom: 4px;")
         layout.addWidget(header)
 
         desc = QLabel(
             "This defines where promoted files are placed. The template is applied\n"
             "to each source, so you can use tokens to create unique paths per source."
         )
-        desc.setStyleSheet("color: #999; font-size: 11px; margin-bottom: 8px;")
+        desc.setStyleSheet("color: #999; font-size: 11pt; margin-bottom: 8px;")
         layout.addWidget(desc)
 
         # Template input
@@ -1602,7 +1602,7 @@ class LatestPathDialog(QDialog):
             "{source_title} is the source's in-project display name.\n"
             "Examples: ../online  |  {group_root}/latest/{source_name}  |  online/{group}/{source_name}"
         )
-        token_help.setStyleSheet("color: #999; font-size: 11px;")
+        token_help.setStyleSheet("color: #999; font-size: 11pt;")
         form.addRow("", token_help)
 
         default_template = config.latest_path_template or "{source_dir}/../{source_name}_latest"
@@ -1624,7 +1624,7 @@ class LatestPathDialog(QDialog):
             "Controls the output filename (frame number and extension are preserved).\n"
             "Tokens: {source_title}, {source_name}, {source_basename}, {source_fullname}"
         )
-        rename_help.setStyleSheet("color: #999; font-size: 11px;")
+        rename_help.setStyleSheet("color: #999; font-size: 11pt;")
         form.addRow("", rename_help)
 
         default_rename = config.default_file_rename_template or "{source_basename}_latest"
@@ -1641,7 +1641,7 @@ class LatestPathDialog(QDialog):
         layout.addWidget(preview_header)
 
         self.preview_label = QLabel("")
-        self.preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
+        self.preview_label.setStyleSheet("color: #88cc88; font-size: 11pt;")
         self.preview_label.setWordWrap(True)
         self.preview_label.setMinimumHeight(60)
         layout.addWidget(self.preview_label)
@@ -1675,7 +1675,7 @@ class LatestPathDialog(QDialog):
         self.ok_btn.setEnabled(bool(tpl))
         if not tpl:
             self.preview_label.setText("(enter a template above)")
-            self.preview_label.setStyleSheet("color: #888; font-size: 11px;")
+            self.preview_label.setStyleSheet("color: #888; font-size: 11pt;")
             return
 
         config = self._config
@@ -1764,7 +1764,7 @@ class LatestPathDialog(QDialog):
             previews.append(str(Path(dir_str) / sample_file))
 
         self.preview_label.setText("\n".join(previews))
-        self.preview_label.setStyleSheet("color: #88cc88; font-size: 11px;")
+        self.preview_label.setStyleSheet("color: #88cc88; font-size: 11pt;")
 
     def get_template(self) -> str:
         return self.template_edit.text().strip()
@@ -1796,20 +1796,20 @@ class NamingRuleDialog(QDialog):
 
         # Header
         header = QLabel("How should discovered sources be named?")
-        header.setStyleSheet("font-size: 14px; font-weight: bold; margin-bottom: 8px;")
+        header.setStyleSheet("font-size: 14pt; font-weight: bold; margin-bottom: 8px;")
         layout.addWidget(header)
 
         # Show example path from first result
         if results:
             result = results[0]
             path_label = QLabel(f"Example path: {result.path}")
-            path_label.setStyleSheet("color: #999; font-size: 11px;")
+            path_label.setStyleSheet("color: #999; font-size: 11pt;")
             path_label.setWordWrap(True)
             layout.addWidget(path_label)
 
             if result.sample_filename:
                 file_label = QLabel(f"Example file: {result.sample_filename}")
-                file_label.setStyleSheet("color: #999; font-size: 11px;")
+                file_label.setStyleSheet("color: #999; font-size: 11pt;")
                 layout.addWidget(file_label)
 
         # Radio buttons for naming options
@@ -2607,7 +2607,12 @@ class SourceItemDelegate(QStyledItemDelegate):
         text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
 
         tag_font = QFont(font)
-        tag_font.setPointSize(max(font.pointSize() - 1, 7))
+        base_size = font.pointSize()
+        if base_size <= 0:
+            base_size = font.pixelSize()
+            if base_size <= 0:
+                base_size = 9
+        tag_font.setPointSize(max(base_size - 1, 7))
         tag_fm = QFontMetrics(tag_font)
         tag_width = tag_fm.horizontalAdvance(f" {group_name} ") + 6
         tag_height = tag_fm.height() + 2
@@ -2695,7 +2700,7 @@ class ManageGroupsDialog(QDialog):
             "{group_root} token resolves to the group's root directory.\n"
             "If unset, {group_root} falls back to {project_root}."
         )
-        root_help.setStyleSheet("color: #999; font-size: 11px;")
+        root_help.setStyleSheet("color: #999; font-size: 11pt;")
         layout.addWidget(root_help)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -2848,7 +2853,7 @@ class UpdateDialog(QDialog):
 
         # Header
         self._header = QLabel(f"<b>{APP_NAME}</b> &mdash; v{APP_VERSION}")
-        self._header.setStyleSheet("font-size: 14px; padding: 4px;")
+        self._header.setStyleSheet("font-size: 14pt; padding: 4px;")
         layout.addWidget(self._header)
 
         # Status label
@@ -2873,7 +2878,7 @@ class UpdateDialog(QDialog):
 
         # Size label
         self._size_label = QLabel()
-        self._size_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        self._size_label.setStyleSheet("color: #aaa; font-size: 11pt;")
         self._size_label.setVisible(False)
         layout.addWidget(self._size_label)
 
@@ -3164,7 +3169,7 @@ class BatchPromoteReviewDialog(QDialog):
         layout = QVBoxLayout(self)
 
         summary = QLabel(f"<b>{len(promote_list)}</b> source(s) will be promoted")
-        summary.setStyleSheet("font-size: 13px; padding: 4px;")
+        summary.setStyleSheet("font-size: 13pt; padding: 4px;")
         layout.addWidget(summary)
 
         self.tree = QTreeWidget()
@@ -3219,7 +3224,7 @@ class BatchPromoteReviewDialog(QDialog):
             if skipped:
                 info_parts.append(f"{len(skipped)} skipped")
             info_label = QLabel(", ".join(info_parts))
-            info_label.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
+            info_label.setStyleSheet("color: #888; font-size: 11pt; padding: 4px;")
             layout.addWidget(info_label)
 
         btn_row = QHBoxLayout()
@@ -3298,7 +3303,7 @@ class ObsoleteLayerDialog(QDialog):
             count_label = QLabel(
                 f"<b>{conflict_count}</b> source(s) in this promotion have layer conflicts."
             )
-            count_label.setStyleSheet("color: #ffaa00; font-size: 12px; padding-bottom: 4px;")
+            count_label.setStyleSheet("color: #ffaa00; font-size: 12pt; padding-bottom: 4px;")
             layout.addWidget(count_label)
 
         header = QLabel(
@@ -3511,7 +3516,7 @@ class MainWindow(QMainWindow):
         header_row = QHBoxLayout()
         header_row.setSpacing(6)
         sources_label = QLabel("Sources")
-        sources_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        sources_label.setStyleSheet("font-weight: bold; font-size: 13pt;")
         header_row.addWidget(sources_label)
         header_row.addStretch()
         self.source_filter = QComboBox()
@@ -3632,10 +3637,10 @@ class MainWindow(QMainWindow):
         banner_layout = QHBoxLayout(self.current_banner)
         banner_layout.setContentsMargins(12, 8, 12, 8)
         self.current_label = QLabel("No version loaded")
-        self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #90ee90;")
+        self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #90ee90;")
         banner_layout.addWidget(self.current_label)
         self.integrity_label = QLabel("")
-        self.integrity_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        self.integrity_label.setStyleSheet("font-size: 11pt; color: #aaa;")
         self.integrity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         banner_layout.addWidget(self.integrity_label)
         right_layout.addWidget(self.current_banner)
@@ -3803,7 +3808,7 @@ class MainWindow(QMainWindow):
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumBlockCount(1000)
-        self.log_text.setStyleSheet("QPlainTextEdit { font-family: 'Consolas', 'Monaco', monospace; font-size: 11px; }")
+        self.log_text.setStyleSheet("QPlainTextEdit { font-family: 'Consolas', 'Monaco', monospace; font-size: 11pt; }")
         log_layout.addWidget(self.log_text)
 
         self.log_dock.setWidget(log_widget)
@@ -3812,7 +3817,7 @@ class MainWindow(QMainWindow):
 
         # Status bar
         self._scan_indicator = QLabel("")
-        self._scan_indicator.setStyleSheet("color: #888; font-size: 11px; margin-right: 8px;")
+        self._scan_indicator.setStyleSheet("color: #888; font-size: 11pt; margin-right: 8px;")
         self.statusBar().addPermanentWidget(self._scan_indicator)
         self.statusBar().showMessage("Ready")
 
@@ -4755,7 +4760,7 @@ class MainWindow(QMainWindow):
             return
 
         self._scan_indicator.setText("Loading...")
-        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
+        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
 
         if cached_versions is not None:
             # Skip scan, go straight to status computation
@@ -4848,7 +4853,7 @@ class MainWindow(QMainWindow):
             logger.debug("Deferring background rescan — promotion in progress")
             return
         self._scan_indicator.setText("Updating...")
-        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
+        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
         self._scan_worker = ScanWorker(self.config, previous_cache=dict(self._versions_cache), parent=self)
         self._scan_worker.progress.connect(self._on_refresh_progress)
         self._scan_worker.finished.connect(self._on_refresh_complete)
@@ -5213,7 +5218,7 @@ class MainWindow(QMainWindow):
         self.btn_promote_split_all.setEnabled(False)
         names = ", ".join(s.name for s in sources)
         self._scan_indicator.setText("Updating...")
-        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
+        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
         self.statusBar().showMessage(f"Scanning: {names}")
 
         self._scan_worker = ScanWorker(self.config, sources=sources, parent=self)
@@ -5307,7 +5312,7 @@ class MainWindow(QMainWindow):
         self.btn_promote_all.setEnabled(False)
         self.btn_promote_split_all.setEnabled(False)
         self._scan_indicator.setText("Updating...")
-        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11px; margin-right: 8px;")
+        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
         self.statusBar().showMessage("Scanning sources...")
 
         self._scan_worker = ScanWorker(self.config, previous_cache=dict(self._versions_cache), parent=self)
@@ -5578,7 +5583,7 @@ class MainWindow(QMainWindow):
         # Update banner
         if not promoter:
             self.current_label.setText(f"No latest target set   ({source.name})")
-            self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #ff8888;")
+            self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #ff8888;")
             self.integrity_label.setText("")
             self.current_banner.setStyleSheet(
                 "QFrame { background-color: #3a2020; border: 1px solid #5a3030; "
@@ -5590,7 +5595,7 @@ class MainWindow(QMainWindow):
             is_highest = (current.version == highest_ver)
             if is_highest:
                 self.current_label.setText(f"Current: {current.version}   ({source.name})")
-                self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #90ee90;")
+                self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #90ee90;")
             else:
                 # Check if this is a pinned (Keep) version with no new versions since
                 is_pinned_deliberate = (
@@ -5600,11 +5605,11 @@ class MainWindow(QMainWindow):
                 if is_pinned_deliberate:
                     # Pinned via "Keep" — blue indicator
                     self.current_label.setText(f"Current: {current.version}*   ({source.name})")
-                    self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #7abbe0;")
+                    self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #7abbe0;")
                 else:
                     # Unpinned or pin expired — newer versions available (orange)
                     self.current_label.setText(f"Current: {current.version} \u25bc!   ({source.name})")
-                    self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #cc8833;")
+                    self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #cc8833;")
             # Use cached integrity from StatusWorker; fallback to live call if not yet computed
             integrity = status_info.get("integrity") if status_info else None
             if integrity is None and promoter:
@@ -5613,21 +5618,21 @@ class MainWindow(QMainWindow):
                 integrity = {"valid": True, "message": ""}
             if integrity["valid"]:
                 self.integrity_label.setText("\u2713 Verified")
-                self.integrity_label.setStyleSheet("font-size: 11px; color: #90ee90;")
+                self.integrity_label.setStyleSheet("font-size: 11pt; color: #90ee90;")
                 self.current_banner.setStyleSheet(
                     "QFrame { background-color: #1a3a1a; border: 1px solid #2d5a2d; "
                     "border-radius: 4px; padding: 8px; }"
                 )
             else:
                 self.integrity_label.setText(f"\u26a0 {integrity['message']}")
-                self.integrity_label.setStyleSheet("font-size: 11px; color: #ffaa00;")
+                self.integrity_label.setStyleSheet("font-size: 11pt; color: #ffaa00;")
                 self.current_banner.setStyleSheet(
                     "QFrame { background-color: #3a3a1a; border: 1px solid #5a5a2d; "
                     "border-radius: 4px; padding: 8px; }"
                 )
         else:
             self.current_label.setText(f"No version loaded   ({source.name})")
-            self.current_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #888;")
+            self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #888;")
             self.integrity_label.setText("")
             self.current_banner.setStyleSheet(
                 "QFrame { background-color: #2a2a2a; border: 1px solid #444; "
@@ -5735,13 +5740,13 @@ class MainWindow(QMainWindow):
 
     _PROMOTE_STYLE = (
         "QPushButton { background-color: #2d5a2d; color: white; padding: 8px 16px; "
-        "border-radius: 4px; font-weight: bold; font-size: 13px; }"
+        "border-radius: 4px; font-weight: bold; font-size: 13pt; }"
         "QPushButton:hover { background-color: #3a7a3a; }"
         "QPushButton:disabled { background-color: #444; color: #888; }"
     )
     _KEEP_STYLE = (
         "QPushButton { background-color: #2d4a5a; color: white; padding: 8px 16px; "
-        "border-radius: 4px; font-weight: bold; font-size: 13px; }"
+        "border-radius: 4px; font-weight: bold; font-size: 13pt; }"
         "QPushButton:hover { background-color: #3a6a7a; }"
         "QPushButton:disabled { background-color: #444; color: #888; }"
     )
