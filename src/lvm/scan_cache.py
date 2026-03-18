@@ -6,6 +6,8 @@ scanning on every project load.  The cache is stored as JSON in
 .lvm_cache/scan_cache.json next to the project file.
 """
 
+__all__ = ["load_cache", "save_cache", "clear_cache", "cache_path_for_project"]
+
 import hashlib
 import json
 import logging

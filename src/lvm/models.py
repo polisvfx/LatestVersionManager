@@ -2,6 +2,13 @@
 Data models for the Latest Version Manager.
 """
 
+__all__ = [
+    "DEFAULT_FILE_EXTENSIONS", "has_media_extension",
+    "resolve_path", "make_relative",
+    "VersionInfo", "HistoryEntry", "WatchedSource",
+    "ProjectConfig", "DiscoveryResult",
+]
+
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -10,6 +17,17 @@ from typing import Optional
 
 # Default file extensions including video formats
 DEFAULT_FILE_EXTENSIONS = [".exr", ".dpx", ".tiff", ".tif", ".png", ".jpg", ".mov", ".mxf", ".mp4"]
+
+
+def has_media_extension(filename: str, valid_extensions: set) -> bool:
+    """Check if a filename has an extension in the given set.
+
+    Performs a fast rfind-based check without constructing a Path object.
+    The *valid_extensions* set must contain lowercase dotted extensions
+    (e.g. {".exr", ".mov"}).
+    """
+    dot_idx = filename.rfind(".")
+    return dot_idx >= 0 and filename[dot_idx:].lower() in valid_extensions
 
 
 def resolve_path(template: str, tokens: dict, project_dir: str = "") -> str:

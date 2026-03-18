@@ -11,6 +11,14 @@ Supports counted wildcards: each % matches exactly one non-divider character.
 Tokens are bounded by dividers (_, -, .) to avoid partial matches.
 """
 
+__all__ = [
+    "compile_task_pattern", "find_task_tokens", "strip_task_tokens",
+    "strip_version", "strip_frame_and_ext", "strip_date",
+    "derive_source_tokens", "compute_source_name", "get_naming_options",
+    "validate_date_string", "parse_date_to_sortable", "format_date_display",
+]
+
+import calendar
 import re
 import logging
 from functools import lru_cache
@@ -40,7 +48,8 @@ VALID_DATE_FORMATS = ("DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD")
 def validate_date_string(digits: str, date_format: str) -> bool:
     """Check if a digit string forms a plausible date for the given format.
 
-    Performs basic range checks on day (1-31), month (1-12), and year components.
+    Validates day-of-month against the actual calendar (e.g. rejects Feb 30).
+    For 2-digit year formats, uses year 2000 as a proxy for leap-year checks.
 
     Args:
         digits: Raw digit string, e.g. "260224" or "20240226".
@@ -52,8 +61,12 @@ def validate_date_string(digits: str, date_format: str) -> bool:
     try:
         if date_format == "DDMMYY" and len(digits) == 6:
             dd, mm = int(digits[:2]), int(digits[2:4])
+            yy = int(digits[4:6])
+            yyyy = 2000 + yy if yy < 70 else 1900 + yy
         elif date_format == "YYMMDD" and len(digits) == 6:
             mm, dd = int(digits[2:4]), int(digits[4:6])
+            yy = int(digits[:2])
+            yyyy = 2000 + yy if yy < 70 else 1900 + yy
         elif date_format == "DDMMYYYY" and len(digits) == 8:
             dd, mm, yyyy = int(digits[:2]), int(digits[2:4]), int(digits[4:8])
             if yyyy < 1900 or yyyy > 2099:
@@ -67,7 +80,10 @@ def validate_date_string(digits: str, date_format: str) -> bool:
     except (ValueError, IndexError):
         return False
 
-    return 1 <= dd <= 31 and 1 <= mm <= 12
+    if not (1 <= mm <= 12):
+        return False
+    max_day = calendar.monthrange(yyyy, mm)[1]
+    return 1 <= dd <= max_day
 
 
 def parse_date_to_sortable(date_str: str, date_format: str) -> int:

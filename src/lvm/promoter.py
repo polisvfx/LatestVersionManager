@@ -5,6 +5,11 @@ This is the core operation: take a detected version and make it the
 current "latest" that Resolve/Nuke is reading from.
 """
 
+__all__ = [
+    "Promoter", "PromotionError", "has_frame_gaps",
+    "generate_report", "validate_rename_template",
+]
+
 import os
 import re
 import shutil
@@ -15,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Callable
 
-from .models import VersionInfo, WatchedSource, HistoryEntry
+from .models import VersionInfo, WatchedSource, HistoryEntry, has_media_extension
 from .history import HistoryManager
 from .hooks import run_pre_promote_hook, run_post_promote_hook, HookError
 from .task_tokens import derive_source_tokens
@@ -33,6 +38,27 @@ _FRAME_EXT_RE = re.compile(r"([._])(\d+)\.(\w+)$")
 
 # Number of threads for parallel file copy operations — adapts to CPU count
 _COPY_WORKERS = min(os.cpu_count() or 4, 8)
+
+# Valid tokens for file_rename_template
+_VALID_RENAME_TOKENS = {
+    "{source_title}", "{source_name}", "{source_basename}",
+    "{source_fullname}", "{group}",
+}
+_TOKEN_RE = re.compile(r"\{[^}]+\}")
+
+
+def validate_rename_template(template: str) -> list[str]:
+    """Return a list of unknown tokens found in a file rename template.
+
+    Known tokens: {source_title}, {source_name}, {source_basename},
+    {source_fullname}, {group}.
+
+    Returns an empty list if all tokens are valid.
+    """
+    if not template:
+        return []
+    found = _TOKEN_RE.findall(template)
+    return [t for t in found if t not in _VALID_RENAME_TOKENS]
 
 
 def _resolve_unc_safe(path: Path) -> Path:
@@ -89,6 +115,14 @@ class Promoter:
         # Cache derived tokens for file renaming
         self._rename_tokens = None
         self._cancelled = threading.Event()
+
+        # Warn about unknown tokens in file rename template
+        unknown = validate_rename_template(watched_source.file_rename_template)
+        if unknown:
+            logger.warning(
+                "Source '%s' file_rename_template contains unknown tokens: %s",
+                watched_source.name, ", ".join(unknown),
+            )
 
     def cancel(self):
         """Signal that the current promotion should be aborted at the next checkpoint."""
@@ -233,9 +267,14 @@ class Promoter:
                 self._promote_sequence(source_path, target_dir, version, progress_callback, keep_layers=keep_layers)
             else:
                 self._promote_single_file(source_path, target_dir, progress_callback)
-        except PromotionError:
+        except PromotionError as e:
+            # Clean up partial files on cancellation
+            if self._cancelled.is_set():
+                self._cleanup_partial_promotion(target_dir)
             raise
         except Exception as e:
+            if self._cancelled.is_set():
+                self._cleanup_partial_promotion(target_dir)
             raise PromotionError(f"File operation failed: {e}") from e
 
         # Record in history with mtime snapshots
@@ -269,11 +308,8 @@ class Promoter:
         try:
             with os.scandir(target_dir) as it:
                 for entry in it:
-                    if entry.is_file(follow_symlinks=False):
-                        name = entry.name
-                        dot_idx = name.rfind(".")
-                        if dot_idx >= 0 and name[dot_idx:].lower() in self._valid_extensions:
-                            entries.append(entry)
+                    if entry.is_file(follow_symlinks=False) and has_media_extension(entry.name, self._valid_extensions):
+                        entries.append(entry)
         except (PermissionError, OSError):
             pass
         return entries
@@ -290,11 +326,8 @@ class Promoter:
         try:
             with os.scandir(target_dir) as it:
                 for entry in it:
-                    if entry.is_file(follow_symlinks=False):
-                        name = entry.name
-                        dot_idx = name.rfind(".")
-                        if dot_idx >= 0 and name[dot_idx:].lower() in self._valid_extensions:
-                            return True
+                    if entry.is_file(follow_symlinks=False) and has_media_extension(entry.name, self._valid_extensions):
+                        return True
         except (PermissionError, OSError):
             pass
         return False
@@ -585,6 +618,23 @@ class Promoter:
                 except OSError as e:
                     logger.warning(f"Could not remove symlink {f}: {e}")
 
+    def _cleanup_partial_promotion(self, target_dir: Path):
+        """Remove media files from the target after a cancelled/failed promotion.
+
+        Best-effort cleanup — logs but does not raise on individual failures.
+        """
+        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+        try:
+            for f in target_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in valid_extensions:
+                    try:
+                        f.unlink()
+                    except OSError as e:
+                        logger.debug(f"Could not clean up partial file {f}: {e}")
+        except OSError:
+            pass
+        logger.info("Cleaned up partial promotion in %s", target_dir)
+
     def _link_or_copy(self, source: Path, target: Path):
         """Route to the correct file operation based on link_mode."""
         if target.exists() or target.is_symlink():
@@ -629,17 +679,21 @@ class Promoter:
 
         When *cached_entries* is provided (list of os.DirEntry from
         _scan_target_media), uses those instead of re-scanning.
+
+        Raises PromotionError if the target directory itself is unreadable.
         """
         locked = []
 
         if cached_entries is not None:
             files = [Path(e.path) for e in cached_entries]
         else:
-            valid_extensions = self._valid_extensions
-            files = [
-                f for f in target_dir.iterdir()
-                if f.is_file() and f.suffix.lower() in valid_extensions
-            ]
+            try:
+                files = [
+                    f for f in target_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() in self._valid_extensions
+                ]
+            except OSError as e:
+                raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
 
         for f in files:
             try:
