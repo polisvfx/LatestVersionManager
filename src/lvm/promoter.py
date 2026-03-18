@@ -308,7 +308,7 @@ class Promoter:
         try:
             with os.scandir(target_dir) as it:
                 for entry in it:
-                    if entry.is_file(follow_symlinks=False) and has_media_extension(entry.name, self._valid_extensions):
+                    if (entry.is_file(follow_symlinks=False) or entry.is_symlink()) and has_media_extension(entry.name, self._valid_extensions):
                         entries.append(entry)
         except (PermissionError, OSError):
             pass
@@ -778,7 +778,7 @@ class Promoter:
                 valid_extensions = self._valid_extensions
                 with os.scandir(path) as it:
                     for entry in it:
-                        if entry.is_file(follow_symlinks=False):
+                        if entry.is_file(follow_symlinks=False) or entry.is_symlink():
                             name = entry.name
                             dot_idx = name.rfind(".")
                             if dot_idx >= 0 and name[dot_idx:].lower() in valid_extensions:
@@ -867,7 +867,7 @@ class Promoter:
             max_mt = 0.0
             for entry in target_entries:
                 try:
-                    mt = entry.stat(follow_symlinks=False).st_mtime
+                    mt = entry.stat().st_mtime
                     if mt > max_mt:
                         max_mt = mt
                 except OSError:
