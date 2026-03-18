@@ -2178,7 +2178,18 @@ class DiscoveryDialog(QDialog):
         self._rebuild_tree()
 
     def _rebuild_tree(self):
-        """Rebuild the results tree, respecting filters (existing, ignored)."""
+        """Rebuild the results tree, respecting filters (existing, ignored).
+
+        Wraps the rebuild in setUpdatesEnabled(False/True) to avoid costly
+        per-item repaints when the tree has hundreds of results.
+        """
+        self.result_tree.setUpdatesEnabled(False)
+        try:
+            self._rebuild_tree_inner()
+        finally:
+            self.result_tree.setUpdatesEnabled(True)
+
+    def _rebuild_tree_inner(self):
         self.result_tree.clear()
 
         if not self._results:
@@ -2316,6 +2327,19 @@ class DiscoveryDialog(QDialog):
         self.scan_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.status_label.setText(f"Error: {msg}")
+
+    def reject(self):
+        """Clean up any running discovery worker before closing."""
+        if self._worker is not None:
+            try:
+                self._worker.disconnect()
+            except RuntimeError:
+                pass
+            if self._worker.isRunning():
+                self._worker.quit()
+                self._worker.wait(2000)
+            self._worker = None
+        super().reject()
 
     # --- Ignore / context menu ---
 
@@ -3411,6 +3435,7 @@ class MainWindow(QMainWindow):
         self._refresh_select_source: str = None  # source name to re-select after background refresh
         self._thumb_worker: ThumbnailWorker = None
         self._io_executor = ThreadPoolExecutor(max_workers=1)
+        self._dirty = False  # True when config has unsaved changes
 
         # File watcher
         self.watcher = SourceWatcher(self)
@@ -3972,6 +3997,7 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
         self.config.watched_sources = [s for s in self.config.watched_sources if s.name not in names]
+        self._mark_dirty()
         if self.config_path:
             self._save_project()
         self._reload_ui()
@@ -4067,9 +4093,26 @@ class MainWindow(QMainWindow):
 
             self.project_label.setText(f"{self.config.project_name}")
             self.project_label.setStyleSheet("color: #ccc; font-weight: bold;")
+            self._dirty = False
+            self._update_title()
             self.statusBar().showMessage(f"Loaded: {path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load config:\n{e}")
+
+    def _mark_dirty(self):
+        """Mark the project as having unsaved changes."""
+        if not self._dirty:
+            self._dirty = True
+            self._update_title()
+
+    def _update_title(self):
+        """Update window title with project name and dirty indicator."""
+        title = APP_NAME
+        if self.config:
+            title = f"{self.config.project_name} - {APP_NAME}"
+        if self._dirty:
+            title = f"* {title}"
+        self.setWindowTitle(title)
 
     def _save_project(self):
         if not self.config:
@@ -4111,6 +4154,8 @@ class MainWindow(QMainWindow):
                 logger.error(f"Failed to save project: {e}")
 
         self._io_executor.submit(_write)
+        self._dirty = False
+        self._update_title()
         self.statusBar().showMessage(f"Saved: {self.config_path}")
 
     def _save_project_as(self):
@@ -4143,6 +4188,7 @@ class MainWindow(QMainWindow):
         dlg = ProjectSettingsDialog(self.config, selected_source=self._current_source, parent=self)
         if dlg.exec() == QDialog.Accepted:
             dlg.apply_to_config(self.config)
+            self._mark_dirty()
             self.project_label.setText(f"{self.config.project_name}")
             if self.config_path:
                 self._save_project()
@@ -4185,6 +4231,7 @@ class MainWindow(QMainWindow):
             from datetime import datetime
             draft.added_at = datetime.now().isoformat(timespec="seconds")
         self.config.watched_sources.append(draft)
+        self._mark_dirty()
         if self.config_path:
             self._save_project()
         self._reload_ui()
@@ -4215,6 +4262,7 @@ class MainWindow(QMainWindow):
         if original.added_at and not draft.added_at:
             draft.added_at = original.added_at
         self.config.watched_sources[index] = draft
+        self._mark_dirty()
         if self.config_path:
             self._save_project()
         self._reload_ui()
@@ -4260,6 +4308,7 @@ class MainWindow(QMainWindow):
         if confirmed:
             for i in sorted(indices, reverse=True):
                 self.config.watched_sources.pop(i)
+            self._mark_dirty()
             if self.config_path:
                 self._save_project()
             self._reload_ui()
@@ -4429,6 +4478,7 @@ class MainWindow(QMainWindow):
         for i in indices:
             old_groups.add(self.config.watched_sources[i].group)
             self.config.watched_sources[i].group = group_name
+        self._mark_dirty()
 
         # Check if any old groups are now empty
         for old_grp in old_groups:
@@ -4473,6 +4523,7 @@ class MainWindow(QMainWindow):
         dlg = ManageGroupsDialog(self.config, parent=self)
         if dlg.exec() == QDialog.Accepted:
             dlg.apply_to_config(self.config)
+            self._mark_dirty()
             apply_project_defaults(self.config)
             if self.config_path:
                 self._save_project()
@@ -4525,6 +4576,7 @@ class MainWindow(QMainWindow):
                 return
             self.config.latest_path_template = dlg.get_template()
             self.config.default_file_rename_template = dlg.get_rename_template()
+            self._mark_dirty()
             apply_project_defaults(self.config)
             if self.config_path:
                 self._save_project()
@@ -5100,6 +5152,7 @@ class MainWindow(QMainWindow):
             if self.config.groups and "group" not in enabled:
                 enabled.append("group")
                 self.config.source_list_columns = enabled
+                self._mark_dirty()
         for i, key in enumerate(self._source_col_keys):
             if key == "name":
                 # Name column is always visible
@@ -5131,6 +5184,7 @@ class MainWindow(QMainWindow):
         elif not visible and key in cols:
             cols.remove(key)
         self.config.source_list_columns = cols
+        self._mark_dirty()
         self._apply_source_column_visibility()
         if self.config_path:
             self._save_project()
@@ -5900,6 +5954,7 @@ class MainWindow(QMainWindow):
         # Apply the template to the project config
         self.config.latest_path_template = dlg.get_template()
         self.config.default_file_rename_template = dlg.get_rename_template()
+        self._mark_dirty()
         apply_project_defaults(self.config)
 
         # Save and rebuild promoters
@@ -6416,8 +6471,37 @@ class MainWindow(QMainWindow):
             self._load_project(last_project)
 
     def closeEvent(self, event):
+        # Prompt to save unsaved changes
+        if self._dirty and self.config_path:
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                "You have unsaved changes. Save before closing?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save,
+            )
+            if reply == QMessageBox.Cancel:
+                event.ignore()
+                return
+            if reply == QMessageBox.Save:
+                self._save_project()
+
         if self.config_path:
             self._settings.setValue("last_project", self.config_path)
+
+        # Disconnect signals and stop all background workers to avoid
+        # callbacks firing into a half-destroyed window.
+        for worker in (self._scan_worker, self._status_worker,
+                        self._worker, self._thumb_worker):
+            if worker is not None:
+                try:
+                    worker.disconnect()
+                except RuntimeError:
+                    pass
+                if worker.isRunning():
+                    worker.quit()
+                    worker.wait(2000)
+
+        self._io_executor.shutdown(wait=False)
         self.watcher.stop()
         event.accept()
 

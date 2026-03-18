@@ -98,7 +98,12 @@ class SourceWatcher(QObject):
         self.watch_status_changed.emit("Watcher stopped")
 
     def _on_change(self, source_name: str):
-        """Called by watchdog handler (background thread) — marshal to main thread."""
+        """Called by watchdog handler (background thread) — marshal to main thread.
+
+        Thread safety: QueuedConnection ensures _on_change_main_thread runs on
+        the main/GUI thread, so _pending_sources and _debounce_timer are only
+        ever accessed from a single thread.  No additional locking is needed.
+        """
         QMetaObject.invokeMethod(self, "_on_change_main_thread",
                                  Qt.ConnectionType.QueuedConnection,
                                  Q_ARG(str, source_name))
