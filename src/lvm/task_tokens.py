@@ -21,6 +21,7 @@ __all__ = [
 import calendar
 import re
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -174,14 +175,11 @@ def strip_date(name: str, date_format: str = "") -> str:
     return name
 
 
-# Module-level cache for compiled task patterns (avoids recompilation)
-_task_pattern_cache: dict[str, re.Pattern] = {}
-
-
+@lru_cache(maxsize=256)
 def compile_task_pattern(task_token: str) -> re.Pattern:
     """Convert a task token (possibly with % wildcards) into a bounded regex.
 
-    Results are cached module-level to avoid recompilation across calls.
+    Results are cached (LRU, max 256 entries) to avoid recompilation.
 
     Rules:
     - The token must be bounded by dividers or string start/end.
@@ -192,9 +190,6 @@ def compile_task_pattern(task_token: str) -> re.Pattern:
     Returns:
         Compiled regex pattern.
     """
-    if task_token in _task_pattern_cache:
-        return _task_pattern_cache[task_token]
-
     # Build pattern by walking through the token character by character
     pattern_body = ""
     i = 0
@@ -217,9 +212,7 @@ def compile_task_pattern(task_token: str) -> re.Pattern:
         + pattern_body
         + r"(?=[_.\-]|$)"
     )
-    compiled = re.compile(full_pattern, re.IGNORECASE)
-    _task_pattern_cache[task_token] = compiled
-    return compiled
+    return re.compile(full_pattern, re.IGNORECASE)
 
 
 def find_task_tokens(name: str, task_patterns: list[str]) -> list[dict]:

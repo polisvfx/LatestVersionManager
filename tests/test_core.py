@@ -310,7 +310,8 @@ class TestResolvePath(unittest.TestCase):
         self.assertIn("renders", result)
 
     def test_relative_resolved(self):
-        result = resolve_path("shots/hero", {}, "C:/projects")
+        base = "C:/projects" if os.name == "nt" else "/projects"
+        result = resolve_path("shots/hero", {}, base)
         self.assertTrue(Path(result).is_absolute())
 
 
@@ -320,6 +321,7 @@ class TestMakeRelative(unittest.TestCase):
         result = make_relative("/projects/shots/hero", "/projects")
         self.assertEqual(result, "shots/hero")
 
+    @unittest.skipUnless(os.name == "nt", "backslash paths are Windows-only")
     def test_forward_slashes(self):
         result = make_relative("C:\\projects\\shots\\hero", "C:\\projects")
         self.assertNotIn("\\", result)

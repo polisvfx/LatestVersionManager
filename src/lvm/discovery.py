@@ -158,7 +158,7 @@ def discover(
 
     # Dispatch top-level subdirectories in parallel
     if max_depth >= 1 and top_subdirs:
-        worker_count = min(8, len(top_subdirs))
+        worker_count = min(os.cpu_count() or 4, 8, len(top_subdirs))
         if worker_count > 1:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 futures = {}
@@ -345,7 +345,7 @@ def _walk_for_versions(
         # _scan_version_dir now returns (VersionInfo, found_exts) to avoid
         # a second os.scandir call just to collect extensions.
         scan_results = []  # list of (vdir, match, vi, exts, sample)
-        worker_count = min(8, len(versioned_dirs))
+        worker_count = min(os.cpu_count() or 4, 8, len(versioned_dirs))
         if worker_count > 1:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 future_to_entry = {}
