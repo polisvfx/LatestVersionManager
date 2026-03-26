@@ -6651,6 +6651,100 @@ def main():
         QAbstractItemView::item:focus {
             outline: none;
         }
+        QAbstractItemView::item:selected {
+            background-color: #336699;
+            color: #f0f0f0;
+        }
+        QRadioButton::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #333333;
+            border-radius: 7px;
+            background-color: #121212;
+        }
+        QRadioButton::indicator:hover {
+            border-color: #6699cc;
+        }
+        QRadioButton::indicator:checked {
+            background-color: #336699;
+            border-color: #4d7aae;
+        }
+        QRadioButton::indicator:checked:hover {
+            background-color: #4d7aae;
+        }
+        QRadioButton::indicator:disabled {
+            border-color: #2a2a2a;
+            background-color: #1a1a1a;
+        }
+        QLineEdit {
+            border: 1px solid #333333;
+            border-radius: 3px;
+            padding: 2px 4px;
+            background-color: #1c1c1c;
+        }
+        QLineEdit:focus {
+            border-color: #6699cc;
+        }
+        QLineEdit:disabled {
+            color: #555555;
+            background-color: #1a1a1a;
+        }
+        QSpinBox, QDoubleSpinBox {
+            border: 1px solid #333333;
+            border-radius: 3px;
+            padding: 2px 4px;
+            background-color: #1c1c1c;
+        }
+        QSpinBox:focus, QDoubleSpinBox:focus {
+            border-color: #6699cc;
+        }
+        QTabBar::tab {
+            background-color: #242424;
+            border: 1px solid #2a2a2a;
+            border-bottom: none;
+            padding: 4px 14px;
+        }
+        QTabBar::tab:selected {
+            background-color: #1c1c1c;
+            border-bottom: 2px solid #6699cc;
+        }
+        QTabBar::tab:hover:!selected {
+            background-color: #2e2e2e;
+        }
+        QScrollBar:vertical {
+            background: #1c1c1c;
+            width: 10px;
+            border: none;
+            margin: 0;
+        }
+        QScrollBar::handle:vertical {
+            background: #3a3a4a;
+            min-height: 24px;
+            border-radius: 4px;
+            margin: 1px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #4d7aae;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+        QScrollBar:horizontal {
+            background: #1c1c1c;
+            height: 10px;
+            border: none;
+            margin: 0;
+        }
+        QScrollBar::handle:horizontal {
+            background: #3a3a4a;
+            min-width: 24px;
+            border-radius: 4px;
+            margin: 1px;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background: #4d7aae;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
     """)
 
     window = MainWindow()
