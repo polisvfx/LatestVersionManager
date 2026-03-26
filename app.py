@@ -6517,6 +6517,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
 
@@ -6534,6 +6535,11 @@ def main():
     palette.setColor(QPalette.ButtonText, QColor(240, 240, 240))
     palette.setColor(QPalette.Highlight, QColor(51, 102, 153))
     palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+    palette.setColor(QPalette.Link, QColor(102, 153, 204))
+    palette.setColor(QPalette.LinkVisited, QColor(68, 119, 170))
+    palette.setColor(QPalette.ToolTipBase, QColor(28, 28, 28))
+    palette.setColor(QPalette.ToolTipText, QColor(240, 240, 240))
+    palette.setColor(QPalette.PlaceholderText, QColor(100, 100, 100))
     app.setPalette(palette)
 
     # Global stylesheet
@@ -6602,6 +6608,48 @@ def main():
         }
         QSplitter::handle {
             background-color: #2a2a2a;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #333333;
+            border-radius: 2px;
+            background-color: #121212;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #6699cc;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #336699;
+            border-color: #4d7aae;
+        }
+        QCheckBox::indicator:checked:hover {
+            background-color: #4d7aae;
+        }
+        QCheckBox::indicator:disabled {
+            border-color: #2a2a2a;
+            background-color: #1a1a1a;
+        }
+        QComboBox {
+            border: 1px solid #333333;
+            border-radius: 3px;
+            background-color: #242424;
+            padding: 2px 6px;
+        }
+        QComboBox:hover {
+            border-color: #6699cc;
+        }
+        QComboBox QAbstractItemView {
+            border: 1px solid #333333;
+            background-color: #1c1c1c;
+            selection-background-color: #336699;
+            selection-color: #f0f0f0;
+        }
+        QAbstractItemView {
+            outline: none;
+        }
+        QAbstractItemView::item:focus {
+            outline: none;
         }
     """)
 
