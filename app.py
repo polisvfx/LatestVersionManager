@@ -502,7 +502,7 @@ class DryRunDialog(QDialog):
             tree_item = QTreeWidgetItem([src_name, item["target_name"], size_str])
             # Highlight if name actually changed
             if src_name != item["target_name"]:
-                tree_item.setForeground(1, QColor("#5cbf95"))
+                tree_item.setForeground(1, QColor("#4ec9a0"))
             self.tree.addTopLevelItem(tree_item)
 
         layout.addWidget(self.tree)
@@ -1176,7 +1176,7 @@ class ProjectSettingsDialog(QDialog):
         paths.addRow("File Rename Template:", self.rename_template_edit)
 
         self.path_preview_label = QLabel("")
-        self.path_preview_label.setStyleSheet("color: #4aaa82; font-size: 11pt;")
+        self.path_preview_label.setStyleSheet("color: #3aaa88; font-size: 11pt;")
         self.path_preview_label.setWordWrap(True)
         self.path_preview_label.setMinimumWidth(50)
         self.path_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -1433,7 +1433,7 @@ class ProjectSettingsDialog(QDialog):
             return p.replace("/", "/\u200b").replace("\\", "\\\u200b")
 
         self.path_preview_label.setText("\n".join(_path_wrappable(p) for p in previews))
-        self.path_preview_label.setStyleSheet("color: #4aaa82; font-size: 11pt;")
+        self.path_preview_label.setStyleSheet("color: #3aaa88; font-size: 11pt;")
 
     def _browse_root(self):
         start = self.root_edit.text().strip()
@@ -1471,7 +1471,7 @@ class ProjectSettingsDialog(QDialog):
             text = (
                 f'<b>{label}</b> <span style="color:#8c8c8c;">({rule})</span><br/>'
                 f'<span style="color:#8c8c8c; font-size:11px;">{desc}</span><br/>'
-                f'<span style="color:#4aaa82; font-size:11px;">e.g. {example}</span>'
+                f'<span style="color:#3aaa88; font-size:11px;">e.g. {example}</span>'
             )
         elif rule.startswith("parent:"):
             depth = rule.split(":")[1]
@@ -1641,7 +1641,7 @@ class LatestPathDialog(QDialog):
         layout.addWidget(preview_header)
 
         self.preview_label = QLabel("")
-        self.preview_label.setStyleSheet("color: #4aaa82; font-size: 11pt;")
+        self.preview_label.setStyleSheet("color: #3aaa88; font-size: 11pt;")
         self.preview_label.setWordWrap(True)
         self.preview_label.setMinimumHeight(60)
         layout.addWidget(self.preview_label)
@@ -1764,7 +1764,7 @@ class LatestPathDialog(QDialog):
             previews.append(str(Path(dir_str) / sample_file))
 
         self.preview_label.setText("\n".join(previews))
-        self.preview_label.setStyleSheet("color: #4aaa82; font-size: 11pt;")
+        self.preview_label.setStyleSheet("color: #3aaa88; font-size: 11pt;")
 
     def get_template(self) -> str:
         return self.template_edit.text().strip()
@@ -3232,7 +3232,7 @@ class BatchPromoteReviewDialog(QDialog):
             item.setCheckState(0, Qt.Checked)
             item.setData(0, Qt.UserRole, (source, version))
 
-            color_map = {"normal": "#5cbf95", "orange": "#ffaa00", "red": "#ff6666"}
+            color_map = {"normal": "#4ec9a0", "orange": "#ffaa00", "red": "#ff6666"}
             color = QColor(color_map[row_status])
             for col in range(1, 8):
                 item.setForeground(col, color)
@@ -3662,7 +3662,7 @@ class MainWindow(QMainWindow):
         banner_layout = QHBoxLayout(self.current_banner)
         banner_layout.setContentsMargins(12, 8, 12, 8)
         self.current_label = QLabel("No version loaded")
-        self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #5cbf95;")
+        self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #4ec9a0;")
         banner_layout.addWidget(self.current_label)
         self.integrity_label = QLabel("")
         self.integrity_label.setStyleSheet("font-size: 11pt; color: #8c8c8c;")
@@ -5025,7 +5025,7 @@ class MainWindow(QMainWindow):
             color = QColor("#7abbe0")
             tooltip = f"Pinned on {ver_tag} (Keep) — batch promote skips until a new version arrives"
         elif status == "highest":
-            color = QColor("#5cbf95")
+            color = QColor("#4ec9a0")
             tooltip = f"On latest version: {ver_tag}"
         elif status == "integrity_fail":
             color = QColor("#ffaa00")
@@ -5649,7 +5649,7 @@ class MainWindow(QMainWindow):
             is_highest = (current.version == highest_ver)
             if is_highest:
                 self.current_label.setText(f"Current: {current.version}   ({source.name})")
-                self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #5cbf95;")
+                self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #4ec9a0;")
             else:
                 # Check if this is a pinned (Keep) version with no new versions since
                 is_pinned_deliberate = (
@@ -5672,7 +5672,7 @@ class MainWindow(QMainWindow):
                 integrity = {"valid": True, "message": ""}
             if integrity["valid"]:
                 self.integrity_label.setText("\u2713 Verified")
-                self.integrity_label.setStyleSheet("font-size: 11pt; color: #5cbf95;")
+                self.integrity_label.setStyleSheet("font-size: 11pt; color: #4ec9a0;")
                 self.current_banner.setStyleSheet(
                     "QFrame { background-color: #1a2a3a; border: 1px solid #336699; "
                     "border-radius: 4px; padding: 8px; }"
@@ -5748,7 +5748,7 @@ class MainWindow(QMainWindow):
                     # Promoted version IS the highest — bright green
                     suffix = " [manual]" if is_manual else ""
                     item.setText(0, f"{v.version_string}{suffix} \u25c0")
-                    color = QColor("#5cbf95")
+                    color = QColor("#4ec9a0")
                 elif has_new:
                     # New higher versions appeared after promotion — dark orange
                     suffix = " [manual]" if is_manual else ""
@@ -5787,7 +5787,7 @@ class MainWindow(QMainWindow):
                 item.setData(0, Qt.UserRole, h)
                 if i == 0:
                     for col in range(6):
-                        item.setForeground(col, QColor("#5cbf95"))
+                        item.setForeground(col, QColor("#4ec9a0"))
                 self.history_tree.addTopLevelItem(item)
 
         self.history_tree.itemSelectionChanged.connect(self._on_history_selected)
