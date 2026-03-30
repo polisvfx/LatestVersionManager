@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QDockWidget, QPlainTextEdit, QScrollArea,
     QToolButton,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData, QTimer
 from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
 from PySide6.QtSvg import QSvgRenderer
 
@@ -5143,9 +5143,10 @@ class MainWindow(QMainWindow):
             for source in sorted(filtered, key=lambda s: s.name.lower()):
                 self.source_list.addTopLevelItem(self._make_source_item(source))
 
-        # Apply column visibility
-        self._apply_source_column_visibility()
+        # Apply column visibility — setSortingEnabled must come first; on Linux/Qt6
+        # enabling sort triggers a QHeaderView section re-init that resets hidden states.
         self.source_list.setSortingEnabled(True)
+        self._apply_source_column_visibility()
 
     def _apply_source_column_visibility(self):
         """Show/hide source list columns based on config."""
@@ -5190,7 +5191,8 @@ class MainWindow(QMainWindow):
             cols.remove(key)
         self.config.source_list_columns = cols
         self._mark_dirty()
-        self._apply_source_column_visibility()
+        # Defer apply so Linux/Qt6 header re-init events from menu close settle first.
+        QTimer.singleShot(0, self._apply_source_column_visibility)
         if self.config_path:
             self._save_project()
 
