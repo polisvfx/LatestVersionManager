@@ -2140,7 +2140,7 @@ class DiscoveryDialog(QDialog):
         if (resolved, result_name.lower()) in existing_sources:
             return True
         # Also check path-only match for backward compatibility (single-shot dirs)
-        return any(d == resolved for d, _ in existing_sources) and not result_name
+        return any(d == resolved for d, _ in existing_sources)
 
     def _on_scan_progress(self, current_path: str, dirs_scanned: int, estimated_total: int):
         """Update progress bar during discovery scan."""
@@ -2206,7 +2206,11 @@ class DiscoveryDialog(QDialog):
         hidden = 0
 
         for i, result in enumerate(self._results):
-            is_existing = self._is_existing(result.path, existing_sources, result.name)
+            if self._config and self._config.default_naming_rule:
+                expected_name = compute_source_name(result, self._config.default_naming_rule, self._config.task_tokens)
+            else:
+                expected_name = result.name
+            is_existing = self._is_existing(result.path, existing_sources, expected_name)
             is_ignored = result.path in self._ignored_paths
             is_filtered_whitelist = result.path in self._filtered_by_whitelist
             is_filtered_blacklist = result.path in self._filtered_by_blacklist
