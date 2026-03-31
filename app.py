@@ -2233,6 +2233,9 @@ class DiscoveryDialog(QDialog):
             except ValueError:
                 display_path = result.path
 
+            if result.sample_filename:
+                display_path += "  \u2014  " + result.sample_filename
+
             # Mark existing/ignored sources with a suffix
             if is_existing:
                 display_path += "  (already added)"
@@ -2249,6 +2252,8 @@ class DiscoveryDialog(QDialog):
             ])
             parent_item.setData(0, Qt.UserRole, i)  # store index into _results
             parent_item.setExpanded(True)
+            if result.sample_filename:
+                parent_item.setToolTip(0, f"Sample file: {result.sample_filename}")
 
             # Style existing sources: gray and italic, non-selectable
             if is_existing:
