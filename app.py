@@ -101,6 +101,46 @@ else:
     _REVEAL_LABEL = "Open in File Browser"
 
 
+# Container/single-file extensions that don't carry a frame number in their
+# output filename. Used by the resolved-path preview to decide whether to
+# render the trailing sample as ".####.<ext>" or just ".<ext>".
+_SINGLE_FILE_EXTS = {
+    ".mov", ".mxf", ".mp4", ".m4v", ".avi", ".mkv",
+    ".wav", ".aiff", ".aif", ".mp3", ".flac",
+}
+
+
+def _preview_sample_suffix(source) -> str:
+    """Build the trailing filename for a resolved-path preview.
+
+    Sequence sources (e.g. .exr frames) render as ".####.<ext>". Single-file
+    sources (e.g. .mov containers) render as plain ".<ext>". Decision uses the
+    source's *sample_filename* when available — a frame number in the sample
+    indicates a sequence — and falls back to the first configured extension.
+    """
+    from src.lvm.task_tokens import FRAME_EXT_RE
+
+    sample = getattr(source, "sample_filename", "") or ""
+    if sample:
+        m = FRAME_EXT_RE.search(sample)
+        if m:
+            return f".####{sample[m.end(1):]}"
+        sample_ext = Path(sample).suffix
+        if sample_ext:
+            return sample_ext
+
+    extensions = getattr(source, "file_extensions", []) or []
+    if extensions:
+        ext = extensions[0]
+        if not ext.startswith("."):
+            ext = "." + ext
+        if ext.lower() in _SINGLE_FILE_EXTS:
+            return ext
+        return f".####{ext}"
+
+    return ".####.exr"
+
+
 def reveal_in_file_browser(path: str) -> None:
     """Open the containing folder in the native file browser and select the item."""
     p = Path(path)
@@ -1397,7 +1437,7 @@ class ProjectSettingsDialog(QDialog):
                 rename_resolved = rename_resolved.replace("{source_basename}", tokens["source_basename"])
                 rename_resolved = rename_resolved.replace("{source_fullname}", tokens["source_fullname"])
                 rename_resolved = _expand_group_token(rename_resolved, source.group)
-                sample_file = f"{rename_resolved}.####.exr"
+                sample_file = f"{rename_resolved}{_preview_sample_suffix(source)}"
                 group_tag = f" [{source.group}]" if source.group else ""
                 previews.append(f"{source.name}{group_tag}: {str(Path(dir_str) / sample_file)}")
             if not self._selected_source and len(config.watched_sources) > 3:
@@ -1733,7 +1773,7 @@ class LatestPathDialog(QDialog):
                 rename_resolved = rename_resolved.replace("{source_basename}", tokens["source_basename"])
                 rename_resolved = rename_resolved.replace("{source_fullname}", tokens["source_fullname"])
                 rename_resolved = _expand_group_token(rename_resolved, source.group)
-                sample_file = f"{rename_resolved}.####.exr"
+                sample_file = f"{rename_resolved}{_preview_sample_suffix(source)}"
                 group_tag = f" [{source.group}]" if source.group else ""
                 previews.append(f"{source.name}{group_tag}: {str(Path(dir_str) / sample_file)}")
             if len(config.watched_sources) > 4:
@@ -2533,7 +2573,13 @@ class DiscoveryDialog(QDialog):
                 self._config.latest_path_template = path_dlg.get_template()
                 self._config.default_file_rename_template = path_dlg.get_rename_template()
 
-        # Add sources using the naming rule
+        # Add sources using the naming rule.
+        # Names must be unique across the project, so detect collisions and
+        # auto-disambiguate. This matters when several discovery results share
+        # the same source_dir (multi-shot flat folder) and the user's naming
+        # rule (e.g. parent:0) yields the same name for all of them.
+        existing_names = {s.name for s in self._config.watched_sources}
+        renamed_count = 0
         added = 0
         for result in selected_results:
             source_name = compute_source_name(
@@ -2541,6 +2587,23 @@ class DiscoveryDialog(QDialog):
                 self._config.default_naming_rule,
                 self._config.task_tokens,
             )
+            if source_name in existing_names:
+                # Fall back to the per-cluster source_name rule, which is
+                # naturally unique because discovery clustered by basename.
+                fallback_name = compute_source_name(
+                    result, "source_name", self._config.task_tokens)
+                if fallback_name and fallback_name not in existing_names:
+                    source_name = fallback_name
+                    renamed_count += 1
+                else:
+                    # Still colliding (or empty) — append a numeric suffix.
+                    base = fallback_name or source_name
+                    n = 2
+                    while f"{base}_{n}" in existing_names:
+                        n += 1
+                    source_name = f"{base}_{n}"
+                    renamed_count += 1
+            existing_names.add(source_name)
 
             suggested_date_fmt = getattr(result, "suggested_date_format", "")
             from datetime import datetime as _dt
@@ -2589,7 +2652,13 @@ class DiscoveryDialog(QDialog):
 
         if added:
             self.sources_added.emit(added)
-            QMessageBox.information(self, "Sources Added", f"Added {added} source(s) to the project.")
+            msg = f"Added {added} source(s) to the project."
+            if renamed_count:
+                msg += (
+                    f"\n\n{renamed_count} source(s) were auto-renamed to avoid "
+                    f"name collisions (fell back to source_name rule)."
+                )
+            QMessageBox.information(self, "Sources Added", msg)
             # Rebuild tree so newly-added sources get marked/hidden
             self._rebuild_tree()
 

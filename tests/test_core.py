@@ -919,6 +919,63 @@ class TestDiscover(unittest.TestCase):
         results = discover(self.tmpdir, max_depth=1)
         self.assertEqual(len(results), 2)
 
+    def test_discover_multi_shot_flat_files(self):
+        """Multiple shots as single .mov files in one folder split into
+        one DiscoveryResult per shot, not a fake frame sequence."""
+        for shot in ("A001C007", "A001C022", "A001C033"):
+            for ver in (1, 2):
+                f = (Path(self.tmpdir)
+                     / f"{shot}_260401_R1WC_comp_v{ver:02d}.mov")
+                f.write_bytes(b"\x00" * 128)
+
+        results = discover(self.tmpdir, max_depth=1)
+
+        # One DiscoveryResult per shot, each with 2 versions.
+        self.assertEqual(len(results), 3)
+        names = {r.name for r in results}
+        # With YYMMDD detected, the date is stripped from the cluster key.
+        self.assertEqual(names, {
+            "A001C007_R1WC_comp",
+            "A001C022_R1WC_comp",
+            "A001C033_R1WC_comp",
+        })
+        for r in results:
+            self.assertEqual(len(r.versions_found), 2)
+            # sample_filename must belong to *this* cluster — otherwise the
+            # scanner's _matches_basename would filter the source's own files out.
+            shot_prefix = r.name.split("_", 1)[0]
+            self.assertTrue(r.sample_filename.startswith(shot_prefix))
+            # Each version is a single file (file_count == 1), not a 3-file
+            # "frame sequence" mistakenly aggregated across shots.
+            for vi in r.versions_found:
+                self.assertEqual(vi.file_count, 1)
+
+    def test_discover_single_shot_flat_files_unchanged(self):
+        """Regression: a flat folder with one shot's multi-version files still
+        produces a single DiscoveryResult named after the parent directory."""
+        _make_versioned_files(self.tmpdir, "hero_comp",
+                              ["v001", "v002", "v003"], ".mov")
+        results = discover(self.tmpdir, max_depth=1)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results[0].versions_found), 3)
+        # When only one cluster exists, the result name keeps the legacy
+        # behavior of using the parent directory name.
+        self.assertEqual(results[0].name, Path(self.tmpdir).name)
+
+    def test_discover_same_shot_multi_date_clusters_together(self):
+        """Same shot across different dates should land in one cluster — the
+        date is stripped from the cluster key when the format is detected."""
+        files = [
+            "A001C007_260401_R1WC_comp_v01.mov",
+            "A001C007_260402_R1WC_comp_v02.mov",
+        ]
+        for name in files:
+            (Path(self.tmpdir) / name).write_bytes(b"\x00" * 128)
+
+        results = discover(self.tmpdir, max_depth=1)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results[0].versions_found), 2)
+
     def test_progress_callback(self):
         _make_versioned_dirs(self.tmpdir, "shot", ["v001"])
         calls = []
