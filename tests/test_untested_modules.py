@@ -124,6 +124,75 @@ class TestDetectTargetConflicts(unittest.TestCase):
         ])
         self.assertEqual(detect_target_conflicts(cfg), [])
 
+    def test_no_conflict_same_dir_different_output_filenames(self):
+        """Two sources sharing a target dir but writing different filenames
+        (distinct sample_filename + distinct history_filename) don't conflict."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "shared")
+            os.makedirs(target)
+            cfg = _make_config([
+                _make_source(
+                    "ShotA", latest_target=target,
+                    sample_filename="ShotA_v01.mov",
+                    file_rename_template="{source_name}_latest",
+                    history_filename=".latest_history_ShotA.json",
+                ),
+                _make_source(
+                    "ShotB", latest_target=target,
+                    sample_filename="ShotB_v01.mov",
+                    file_rename_template="{source_name}_latest",
+                    history_filename=".latest_history_ShotB.json",
+                ),
+            ])
+            self.assertEqual(detect_target_conflicts(cfg), [])
+
+    def test_conflict_same_dir_same_history_filename(self):
+        """Two sources sharing a dir AND the default history filename collide
+        on the history sidecar even if their output filenames differ."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "shared")
+            os.makedirs(target)
+            cfg = _make_config([
+                _make_source(
+                    "ShotA", latest_target=target,
+                    sample_filename="ShotA_v01.mov",
+                    file_rename_template="{source_name}_latest",
+                ),
+                _make_source(
+                    "ShotB", latest_target=target,
+                    sample_filename="ShotB_v01.mov",
+                    file_rename_template="{source_name}_latest",
+                ),
+            ])
+            conflicts = detect_target_conflicts(cfg)
+            self.assertEqual(len(conflicts), 1)
+            # Conflict path is the shared history file.
+            self.assertIn(".latest_history.json", conflicts[0][0])
+
+    def test_conflict_same_output_pattern(self):
+        """Two sources whose remapped output filename ends up identical
+        collide on the file itself, even with disambiguated history files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "shared")
+            os.makedirs(target)
+            cfg = _make_config([
+                _make_source(
+                    "A", latest_target=target,
+                    sample_filename="hero_comp_v01.mov",
+                    file_rename_template="latest",  # constant → both remap to same
+                    history_filename=".latest_history_A.json",
+                ),
+                _make_source(
+                    "B", latest_target=target,
+                    sample_filename="other_v01.mov",
+                    file_rename_template="latest",
+                    history_filename=".latest_history_B.json",
+                ),
+            ])
+            conflicts = detect_target_conflicts(cfg)
+            self.assertEqual(len(conflicts), 1)
+            self.assertIn("latest.mov", conflicts[0][0])
+
 
 class TestCheckTargetOwnership(unittest.TestCase):
     """Tests for check_target_ownership()."""

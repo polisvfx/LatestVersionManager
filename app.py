@@ -3,6 +3,7 @@ Latest Version Manager - PySide6 GUI Application.
 """
 
 import os
+import re
 import sys
 import json
 import logging
@@ -406,7 +407,7 @@ class StatusWorker(QThread):
                     promoters[name] = promoter
                 scanners[name] = scanner
 
-        conflicts = detect_target_conflicts(self._config)
+        conflicts = detect_target_conflicts(self._config, self._config.task_tokens)
         target_conflicts = {}
         for target, name_a, name_b in conflicts:
             target_conflicts.setdefault(name_a, []).append(name_b)
@@ -2579,7 +2580,27 @@ class DiscoveryDialog(QDialog):
         # the same source_dir (multi-shot flat folder) and the user's naming
         # rule (e.g. parent:0) yields the same name for all of them.
         existing_names = {s.name for s in self._config.watched_sources}
+
+        # Pre-build an index of existing latest_target -> history filenames so
+        # we can disambiguate a new source's history file when it'd land in a
+        # directory that another source is already writing to. Without this,
+        # several sources sharing a target dir all read/write the same
+        # .latest_history.json and stomp each other's promotion records.
+        def _resolved(p: str) -> str:
+            try:
+                return str(Path(p).resolve())
+            except (OSError, ValueError):
+                return p
+
+        target_history_map: dict[str, set[str]] = {}
+        for s in self._config.watched_sources:
+            if s.latest_target:
+                target_history_map.setdefault(_resolved(s.latest_target), set()).add(
+                    s.history_filename or ".latest_history.json"
+                )
+
         renamed_count = 0
+        history_disambiguated = 0
         added = 0
         for result in selected_results:
             source_name = compute_source_name(
@@ -2647,6 +2668,25 @@ class DiscoveryDialog(QDialog):
                 source.latest_target = str(resolved.resolve())
                 # Don't mark as override — it came from the project default template
 
+            # Disambiguate history filename when this source's target dir is
+            # already claimed by another source (existing or earlier in this
+            # batch). The first source in a fresh dir keeps the default
+            # ".latest_history.json"; subsequent sources get a name-derived
+            # filename so their promotion records don't overwrite each other.
+            if source.latest_target:
+                resolved_dir = _resolved(source.latest_target)
+                taken = target_history_map.setdefault(resolved_dir, set())
+                if taken:
+                    safe = re.sub(r"[^A-Za-z0-9_-]", "_", source.name) or "source"
+                    desired = f".latest_history_{safe}.json"
+                    n = 2
+                    while desired in taken:
+                        desired = f".latest_history_{safe}_{n}.json"
+                        n += 1
+                    source.history_filename = desired
+                    history_disambiguated += 1
+                taken.add(source.history_filename or ".latest_history.json")
+
             self._config.watched_sources.append(source)
             added += 1
 
@@ -2657,6 +2697,12 @@ class DiscoveryDialog(QDialog):
                 msg += (
                     f"\n\n{renamed_count} source(s) were auto-renamed to avoid "
                     f"name collisions (fell back to source_name rule)."
+                )
+            if history_disambiguated:
+                msg += (
+                    f"\n\n{history_disambiguated} source(s) share a latest target "
+                    f"directory; their history files were auto-namespaced so "
+                    f"promotions don't overwrite each other."
                 )
             QMessageBox.information(self, "Sources Added", msg)
             # Rebuild tree so newly-added sources get marked/hidden
@@ -5391,7 +5437,7 @@ class MainWindow(QMainWindow):
         self._scanners.update(scanners)
         # Recompute conflicts for all sources (cheap — just path comparison)
         from src.lvm.conflicts import detect_target_conflicts
-        conflicts = detect_target_conflicts(self.config)
+        conflicts = detect_target_conflicts(self.config, self.config.task_tokens)
         self._target_conflicts = {}
         for target, name_a, name_b in conflicts:
             self._target_conflicts.setdefault(name_a, []).append(name_b)

@@ -544,9 +544,9 @@ def cmd_validate(args):
             warnings.append(f"{source.name}: assigned to group '{source.group}' which is not defined")
 
     # Check for overlapping targets
-    conflicts = detect_target_conflicts(config)
+    conflicts = detect_target_conflicts(config, config.task_tokens)
     for target, name_a, name_b in conflicts:
-        warnings.append(f"CONFLICT: '{name_a}' and '{name_b}' share target: {target}")
+        warnings.append(f"CONFLICT: '{name_a}' and '{name_b}' would clobber: {target}")
 
     # Report
     if issues:
