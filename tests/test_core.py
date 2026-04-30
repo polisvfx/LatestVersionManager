@@ -1119,6 +1119,37 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(str(Path(config.project_root)),
                          str(Path(project_root).resolve()))
 
+    def test_load_disambiguates_shared_history_filenames(self):
+        """Sources sharing a target dir + the same history filename get
+        their history filenames auto-namespaced at load time, so existing
+        broken projects fix themselves on next open."""
+        target_dir = str(Path(self.tmpdir) / "shared_latest")
+        Path(target_dir).mkdir(parents=True, exist_ok=True)
+        config = ProjectConfig(project_name="Migrate")
+        for shot in ("ShotA", "ShotB", "ShotC"):
+            config.watched_sources.append(WatchedSource(
+                name=shot,
+                source_dir=str(Path(self.tmpdir) / "src"),
+                latest_target=target_dir,
+                override_latest_target=True,
+                history_filename=".latest_history.json",  # all the same
+            ))
+        config_path = str(Path(self.tmpdir) / "migrate.json")
+        save_config(config, config_path)
+
+        loaded = load_config(config_path)
+
+        history_names = [s.history_filename for s in loaded.watched_sources]
+        # All three must be unique now.
+        self.assertEqual(len(set(history_names)), 3)
+        # First source keeps the legacy default — preserves any existing
+        # on-disk .latest_history.json file.
+        self.assertEqual(loaded.watched_sources[0].history_filename,
+                         ".latest_history.json")
+        # The other two are name-derived.
+        self.assertIn("ShotB", loaded.watched_sources[1].history_filename)
+        self.assertIn("ShotC", loaded.watched_sources[2].history_filename)
+
 
 class TestApplyProjectDefaults(unittest.TestCase):
 

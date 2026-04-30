@@ -144,8 +144,80 @@ def load_config(config_path: str) -> ProjectConfig:
     # Apply project defaults to sources without overrides
     apply_project_defaults(config)
 
+    # Auto-disambiguate history filenames for sources sharing a target dir.
+    # Mutates config in-place; persisted on the next save_config().
+    _migrate_shared_history_filenames(config)
+
     logger.info(f"Loaded project '{config.project_name}' with {len(config.watched_sources)} sources")
     return config
+
+
+def _migrate_shared_history_filenames(config: ProjectConfig) -> int:
+    """Rename colliding history sidecars in-place.
+
+    When several sources share a ``latest_target`` AND the same
+    ``history_filename``, they read/write the same JSON file at runtime and
+    overwrite each other's promotion records. This pass walks the loaded
+    config and assigns name-derived filenames to all but the first source in
+    each colliding group, so each source gets its own sidecar.
+
+    The first source in each group keeps whatever filename it had (often the
+    legacy ``.latest_history.json``) so an existing on-disk history file
+    keeps working for one of the sources.
+
+    Returns the number of sources whose history filename was changed.
+    """
+    # Group sources by (resolved_target_dir, history_filename)
+    groups: dict[tuple[str, str], list] = {}
+    for s in config.watched_sources:
+        if not s.latest_target:
+            continue
+        try:
+            resolved_dir = str(Path(s.latest_target).resolve())
+        except (OSError, ValueError):
+            resolved_dir = s.latest_target
+        history = s.history_filename or ".latest_history.json"
+        groups.setdefault((resolved_dir, history), []).append(s)
+
+    renamed = 0
+    for (resolved_dir, _), sources in groups.items():
+        if len(sources) < 2:
+            continue
+        # Track filenames already in use within this directory so we don't
+        # accidentally pick another colliding name during disambiguation.
+        taken = {
+            (sx.history_filename or ".latest_history.json")
+            for sx in config.watched_sources
+            if sx.latest_target and (
+                _safe_resolve(sx.latest_target) == resolved_dir
+            )
+        }
+        # Keep sources[0] as-is, disambiguate the rest.
+        for s in sources[1:]:
+            safe = re.sub(r"[^A-Za-z0-9_-]", "_", s.name) or "source"
+            desired = f".latest_history_{safe}.json"
+            n = 2
+            while desired in taken:
+                desired = f".latest_history_{safe}_{n}.json"
+                n += 1
+            taken.discard(s.history_filename or ".latest_history.json")
+            s.history_filename = desired
+            taken.add(desired)
+            renamed += 1
+            logger.info(
+                "Auto-namespaced history file for source '%s' to '%s' "
+                "(shared latest_target: %s)",
+                s.name, desired, resolved_dir,
+            )
+
+    return renamed
+
+
+def _safe_resolve(path: str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except (OSError, ValueError):
+        return path
 
 
 def save_config(config: ProjectConfig, config_path: str):
