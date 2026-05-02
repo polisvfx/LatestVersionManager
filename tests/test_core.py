@@ -1470,6 +1470,57 @@ class TestPromoter(unittest.TestCase):
         with self.assertRaises(PromotionError):
             promoter.promote(vi)
 
+    def test_verify_ignores_files_from_other_sources_in_shared_target(self):
+        """Two sources sharing a latest_target dir each promote a single .mov.
+        verify() must only count this source's own file — not all files in the
+        directory — otherwise the integrity check trips on the other source's
+        promoted output."""
+        # Each source has a distinct shot prefix; rename template makes the
+        # output filename unique per source.
+        for shot in ("ShotA", "ShotB"):
+            (Path(self.source_dir) / f"{shot}_v001.mov").write_bytes(b"\x00" * 128)
+
+        srcA = self._make_source(
+            name="ShotA",
+            file_extensions=[".mov"],
+            sample_filename="ShotA_v001.mov",
+            file_rename_template="{source_name}_latest",
+            history_filename=".latest_history_ShotA.json",
+        )
+        srcB = self._make_source(
+            name="ShotB",
+            file_extensions=[".mov"],
+            sample_filename="ShotB_v001.mov",
+            file_rename_template="{source_name}_latest",
+            history_filename=".latest_history_ShotB.json",
+        )
+
+        promA = Promoter(srcA)
+        promB = Promoter(srcB)
+
+        viA = VersionInfo("v001", 1, str(Path(self.source_dir) / "ShotA_v001.mov"), file_count=1)
+        viB = VersionInfo("v001", 1, str(Path(self.source_dir) / "ShotB_v001.mov"), file_count=1)
+
+        promA.promote(viA, user="t")
+        promB.promote(viB, user="t")
+
+        # Both shots' files now coexist in the target dir.
+        target_movs = sorted(p.name for p in Path(self.target_dir).glob("*.mov"))
+        self.assertEqual(len(target_movs), 2)
+
+        # Each source's verify() should count only its own file (not the other
+        # source's), so basic integrity stays valid.
+        result_a = promA.verify()
+        self.assertTrue(
+            result_a["valid"],
+            f"ShotA.verify() should pass with sibling file present, got {result_a!r}",
+        )
+        result_b = promB.verify()
+        self.assertTrue(
+            result_b["valid"],
+            f"ShotB.verify() should pass with sibling file present, got {result_b!r}",
+        )
+
     def test_promote_no_target_raises(self):
         with self.assertRaises(PromotionError):
             ws = WatchedSource(name="T", source_dir=self.source_dir, latest_target="")
