@@ -250,12 +250,15 @@ class Promoter:
         # Create target directory if needed
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        # Scan target directory once — reuse for locked-file and clear checks
+        # Scan target directory once — reuse for locked-file and clear checks.
+        # Only inspect this source's own files: when several sources share a
+        # latest_target dir (e.g. per-shot .mov outputs), another source's
+        # file being locked must not block this source's promotion.
         target_entries = self._scan_target_media(target_dir)
+        own_target_entries = self._filter_to_own_target_files(target_entries)
 
-        # Smart locked file detection: only check if target has files
-        if self._target_has_media_files(target_dir, cached_entries=target_entries):
-            locked = self._check_locked_files(target_dir, cached_entries=target_entries)
+        if own_target_entries:
+            locked = self._check_locked_files(target_dir, cached_entries=own_target_entries)
             if locked:
                 raise PromotionError(
                     f"Cannot overwrite - these files appear to be locked/in use:\n"
@@ -281,7 +284,15 @@ class Promoter:
         entry = HistoryEntry.from_version_info(version, user)
         version_files = self._get_version_source_files(source_path, version)
         entry.source_mtime = self._get_max_mtime(source_path, files=version_files)
-        entry.target_mtime = self._get_max_mtime(target_dir)
+        # Restrict the target mtime snapshot to this source's own files —
+        # otherwise sibling sources sharing the same latest_target would
+        # bleed their mtimes into our record and cause spurious "modified
+        # since promotion" warnings on the next verify().
+        own_target_files = [
+            Path(e.path)
+            for e in self._filter_to_own_target_files(self._scan_target_media(target_dir))
+        ]
+        entry.target_mtime = self._get_max_mtime(target_dir, files=own_target_files or None)
         entry.pinned = pinned
         # Extract clip frame count for container files
         if source_path.is_file() and source_path.suffix.lower() in (".mov", ".mxf", ".mp4", ".avi"):
@@ -815,6 +826,46 @@ class Promoter:
         m = re.search(r'(\d+)', version_str)
         return int(m.group(1)) if m else None
 
+    def _filter_to_own_target_files(self, target_entries: list) -> list:
+        """Restrict target-dir entries to those this source's promotions
+        would actually write.
+
+        When several sources share a ``latest_target`` (e.g. a folder of
+        per-shot .mov outputs), the directory listing contains files from
+        every source. Counting all of them as "this source's promoted
+        files" makes integrity / mtime checks fire spurious warnings. This
+        helper returns only entries whose name matches what
+        :meth:`_remap_filename` would produce for this source's own
+        sample, treating frame numbers as wildcards for sequences.
+
+        Returns the input list unchanged when the source has no
+        ``sample_filename`` (we then can't tell which files are ours, so
+        fall back to the legacy "all files" comparison).
+        """
+        sample = self.source.sample_filename
+        if not sample:
+            return list(target_entries)
+
+        try:
+            expected = self._remap_filename(sample)
+        except Exception:
+            return list(target_entries)
+
+        m = _FRAME_EXT_RE.search(expected)
+        if m:
+            sep = m.group(1)
+            ext = m.group(3)
+            stem = expected[:m.start()]
+            own_re = re.compile(
+                re.escape(stem) + re.escape(sep) + r"\d+\." + re.escape(ext) + r"$",
+                re.IGNORECASE,
+            )
+            return [e for e in target_entries if own_re.match(e.name)]
+
+        # Single-file source — exact name match (case-insensitive on Windows).
+        expected_lower = expected.lower()
+        return [e for e in target_entries if e.name.lower() == expected_lower]
+
     def verify(self) -> dict:
         """Check integrity of the latest target vs history.
 
@@ -823,6 +874,9 @@ class Promoter:
 
         Scans the target directory once and reuses the results for both
         the file-count integrity check and the mtime staleness check.
+        Files belonging to other sources sharing the target directory are
+        filtered out via :meth:`_filter_to_own_target_files` so they don't
+        trigger false integrity failures.
         """
         target_dir = Path(self.source.latest_target)
         if not target_dir.exists():
@@ -830,7 +884,8 @@ class Promoter:
 
         # Single scan of target directory — reuse for file list and mtime
         target_entries = self._scan_target_media(target_dir)
-        actual_files = [e.name for e in target_entries]
+        own_entries = self._filter_to_own_target_files(target_entries)
+        actual_files = [e.name for e in own_entries]
 
         # Basic file count check
         basic = self.history.verify_integrity(actual_files)
@@ -862,17 +917,19 @@ class Promoter:
                                f"— may have been re-rendered.",
                 }
 
-        # Check if target files were overwritten externally — use cached entries
+        # Check if target files were overwritten externally — only inspect
+        # this source's own files; other sources sharing the dir promote on
+        # their own schedule and their mtimes shouldn't trip our check.
         if current.target_mtime is not None:
             max_mt = 0.0
-            for entry in target_entries:
+            for entry in own_entries:
                 try:
                     mt = entry.stat().st_mtime
                     if mt > max_mt:
                         max_mt = mt
                 except OSError:
                     pass
-            current_target_mtime = max_mt if target_entries else None
+            current_target_mtime = max_mt if own_entries else None
             if current_target_mtime is not None and abs(current_target_mtime - current.target_mtime) > 1.0:
                 return {
                     "valid": False,

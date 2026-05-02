@@ -919,6 +919,63 @@ class TestDiscover(unittest.TestCase):
         results = discover(self.tmpdir, max_depth=1)
         self.assertEqual(len(results), 2)
 
+    def test_discover_multi_shot_flat_files(self):
+        """Multiple shots as single .mov files in one folder split into
+        one DiscoveryResult per shot, not a fake frame sequence."""
+        for shot in ("A001C007", "A001C022", "A001C033"):
+            for ver in (1, 2):
+                f = (Path(self.tmpdir)
+                     / f"{shot}_260401_R1WC_comp_v{ver:02d}.mov")
+                f.write_bytes(b"\x00" * 128)
+
+        results = discover(self.tmpdir, max_depth=1)
+
+        # One DiscoveryResult per shot, each with 2 versions.
+        self.assertEqual(len(results), 3)
+        names = {r.name for r in results}
+        # With YYMMDD detected, the date is stripped from the cluster key.
+        self.assertEqual(names, {
+            "A001C007_R1WC_comp",
+            "A001C022_R1WC_comp",
+            "A001C033_R1WC_comp",
+        })
+        for r in results:
+            self.assertEqual(len(r.versions_found), 2)
+            # sample_filename must belong to *this* cluster — otherwise the
+            # scanner's _matches_basename would filter the source's own files out.
+            shot_prefix = r.name.split("_", 1)[0]
+            self.assertTrue(r.sample_filename.startswith(shot_prefix))
+            # Each version is a single file (file_count == 1), not a 3-file
+            # "frame sequence" mistakenly aggregated across shots.
+            for vi in r.versions_found:
+                self.assertEqual(vi.file_count, 1)
+
+    def test_discover_single_shot_flat_files_unchanged(self):
+        """Regression: a flat folder with one shot's multi-version files still
+        produces a single DiscoveryResult named after the parent directory."""
+        _make_versioned_files(self.tmpdir, "hero_comp",
+                              ["v001", "v002", "v003"], ".mov")
+        results = discover(self.tmpdir, max_depth=1)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results[0].versions_found), 3)
+        # When only one cluster exists, the result name keeps the legacy
+        # behavior of using the parent directory name.
+        self.assertEqual(results[0].name, Path(self.tmpdir).name)
+
+    def test_discover_same_shot_multi_date_clusters_together(self):
+        """Same shot across different dates should land in one cluster — the
+        date is stripped from the cluster key when the format is detected."""
+        files = [
+            "A001C007_260401_R1WC_comp_v01.mov",
+            "A001C007_260402_R1WC_comp_v02.mov",
+        ]
+        for name in files:
+            (Path(self.tmpdir) / name).write_bytes(b"\x00" * 128)
+
+        results = discover(self.tmpdir, max_depth=1)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results[0].versions_found), 2)
+
     def test_progress_callback(self):
         _make_versioned_dirs(self.tmpdir, "shot", ["v001"])
         calls = []
@@ -1061,6 +1118,37 @@ class TestConfig(unittest.TestCase):
         config = load_config(path)
         self.assertEqual(str(Path(config.project_root)),
                          str(Path(project_root).resolve()))
+
+    def test_load_disambiguates_shared_history_filenames(self):
+        """Sources sharing a target dir + the same history filename get
+        their history filenames auto-namespaced at load time, so existing
+        broken projects fix themselves on next open."""
+        target_dir = str(Path(self.tmpdir) / "shared_latest")
+        Path(target_dir).mkdir(parents=True, exist_ok=True)
+        config = ProjectConfig(project_name="Migrate")
+        for shot in ("ShotA", "ShotB", "ShotC"):
+            config.watched_sources.append(WatchedSource(
+                name=shot,
+                source_dir=str(Path(self.tmpdir) / "src"),
+                latest_target=target_dir,
+                override_latest_target=True,
+                history_filename=".latest_history.json",  # all the same
+            ))
+        config_path = str(Path(self.tmpdir) / "migrate.json")
+        save_config(config, config_path)
+
+        loaded = load_config(config_path)
+
+        history_names = [s.history_filename for s in loaded.watched_sources]
+        # All three must be unique now.
+        self.assertEqual(len(set(history_names)), 3)
+        # First source keeps the legacy default — preserves any existing
+        # on-disk .latest_history.json file.
+        self.assertEqual(loaded.watched_sources[0].history_filename,
+                         ".latest_history.json")
+        # The other two are name-derived.
+        self.assertIn("ShotB", loaded.watched_sources[1].history_filename)
+        self.assertIn("ShotC", loaded.watched_sources[2].history_filename)
 
 
 class TestApplyProjectDefaults(unittest.TestCase):
@@ -1381,6 +1469,57 @@ class TestPromoter(unittest.TestCase):
         vi = VersionInfo("v001", 1, "/nonexistent/path")
         with self.assertRaises(PromotionError):
             promoter.promote(vi)
+
+    def test_verify_ignores_files_from_other_sources_in_shared_target(self):
+        """Two sources sharing a latest_target dir each promote a single .mov.
+        verify() must only count this source's own file — not all files in the
+        directory — otherwise the integrity check trips on the other source's
+        promoted output."""
+        # Each source has a distinct shot prefix; rename template makes the
+        # output filename unique per source.
+        for shot in ("ShotA", "ShotB"):
+            (Path(self.source_dir) / f"{shot}_v001.mov").write_bytes(b"\x00" * 128)
+
+        srcA = self._make_source(
+            name="ShotA",
+            file_extensions=[".mov"],
+            sample_filename="ShotA_v001.mov",
+            file_rename_template="{source_name}_latest",
+            history_filename=".latest_history_ShotA.json",
+        )
+        srcB = self._make_source(
+            name="ShotB",
+            file_extensions=[".mov"],
+            sample_filename="ShotB_v001.mov",
+            file_rename_template="{source_name}_latest",
+            history_filename=".latest_history_ShotB.json",
+        )
+
+        promA = Promoter(srcA)
+        promB = Promoter(srcB)
+
+        viA = VersionInfo("v001", 1, str(Path(self.source_dir) / "ShotA_v001.mov"), file_count=1)
+        viB = VersionInfo("v001", 1, str(Path(self.source_dir) / "ShotB_v001.mov"), file_count=1)
+
+        promA.promote(viA, user="t")
+        promB.promote(viB, user="t")
+
+        # Both shots' files now coexist in the target dir.
+        target_movs = sorted(p.name for p in Path(self.target_dir).glob("*.mov"))
+        self.assertEqual(len(target_movs), 2)
+
+        # Each source's verify() should count only its own file (not the other
+        # source's), so basic integrity stays valid.
+        result_a = promA.verify()
+        self.assertTrue(
+            result_a["valid"],
+            f"ShotA.verify() should pass with sibling file present, got {result_a!r}",
+        )
+        result_b = promB.verify()
+        self.assertTrue(
+            result_b["valid"],
+            f"ShotB.verify() should pass with sibling file present, got {result_b!r}",
+        )
 
     def test_promote_no_target_raises(self):
         with self.assertRaises(PromotionError):

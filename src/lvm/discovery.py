@@ -417,64 +417,98 @@ def _walk_for_versions(
                 suggested_date_format=suggested_date_fmt,
             ))
 
-    # If this directory contains versioned single files, report it
+    # If this directory contains versioned single files, report it.
+    # Files are clustered by their version-stripped (and date-stripped, when a
+    # date format is detected) basename so that a flat folder containing
+    # multiple shots — e.g. A001C007_..._v01.mov, A001C022_..._v01.mov — yields
+    # one DiscoveryResult per shot instead of being mis-reported as a single
+    # multi-file frame sequence.
     if versioned_files and not versioned_dirs:
-        versions = []
-        found_extensions = set()
-        seen_versions = {}
+        from .task_tokens import derive_source_tokens
 
+        # Detect pattern + date format once from the first file (consistent
+        # with the heuristic used for versioned-directory results above).
         first_file_stem = versioned_files[0][0].stem
         first_ver_match = versioned_files[0][1]
         first_date_match = DATE_RE.search(first_file_stem)
         if first_date_match and not _is_plausible_date(first_date_match.group(1)):
             first_date_match = None
 
-        for vfile, match in versioned_files:
-            ver_num = int(match.group(1))
-            ver_str = f"v{ver_num:03d}"
-            found_extensions.add(vfile.suffix.lower())
-
-            if ver_num in seen_versions:
-                # Multiple files for same version - increment count
-                try:
-                    seen_versions[ver_num].file_count += 1
-                    seen_versions[ver_num].total_size_bytes += vfile.stat().st_size
-                except OSError:
-                    pass
-            else:
-                try:
-                    file_size = vfile.stat().st_size
-                except OSError:
-                    file_size = 0
-                vi = VersionInfo(
-                    version_string=ver_str,
-                    version_number=ver_num,
-                    source_path=str(vfile),
-                    file_count=1,
-                    total_size_bytes=file_size,
-                    start_timecode=None,  # Lazy: extracted on demand
-                )
-                _populate_date_on_vi(vi, vfile.stem)
-                seen_versions[ver_num] = vi
-                versions.append(vi)
-
-        versions.sort(key=lambda v: (v.date_sortable, v.version_number))
         suggested_pattern = _suggest_pattern(
             first_file_stem, ver_match=first_ver_match, date_match=first_date_match)
 
+        # Detect the date format whenever a plausible date is in the filename,
+        # not only when _suggest_pattern emits a {date} token. The latter only
+        # fires when date and version are adjacent — so layouts like
+        # "A001C007_260401_R1WC_comp_v01.mov" (date and version separated by
+        # other metadata) would otherwise cluster per-date and split a single
+        # shot across multiple sources.
         suggested_date_fmt = ""
-        if first_date_match and "{date}" in suggested_pattern:
+        if first_date_match:
             suggested_date_fmt = _detect_date_format(first_date_match.group(1))
 
-        results.append(DiscoveryResult(
-            path=str(current),
-            name=current.name,
-            versions_found=versions,
-            suggested_pattern=suggested_pattern,
-            suggested_extensions=sorted(found_extensions),
-            sample_filename=versioned_files[0][0].name,
-            suggested_date_format=suggested_date_fmt,
-        ))
+        # Cluster files by source_basename (version + date stripped). Insertion
+        # order is preserved so the single-cluster path emits the same first
+        # sample as the legacy code.
+        clusters: dict = {}  # cluster_key -> list of (vfile, match)
+        for vfile, match in versioned_files:
+            tokens = derive_source_tokens(
+                vfile.name, task_patterns=[], date_format=suggested_date_fmt)
+            cluster_key = tokens["source_basename"]
+            if not cluster_key:
+                # Defensive fallback — should not happen for valid filenames.
+                cluster_key = vfile.stem
+            clusters.setdefault(cluster_key, []).append((vfile, match))
+
+        single_cluster = len(clusters) == 1
+
+        for cluster_key, cluster_files in clusters.items():
+            versions = []
+            found_extensions = set()
+            seen_versions = {}
+
+            for vfile, match in cluster_files:
+                ver_num = int(match.group(1))
+                ver_str = f"v{ver_num:03d}"
+                found_extensions.add(vfile.suffix.lower())
+
+                if ver_num in seen_versions:
+                    # Multiple files for same version - increment count
+                    try:
+                        seen_versions[ver_num].file_count += 1
+                        seen_versions[ver_num].total_size_bytes += vfile.stat().st_size
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        file_size = vfile.stat().st_size
+                    except OSError:
+                        file_size = 0
+                    vi = VersionInfo(
+                        version_string=ver_str,
+                        version_number=ver_num,
+                        source_path=str(vfile),
+                        file_count=1,
+                        total_size_bytes=file_size,
+                        start_timecode=None,  # Lazy: extracted on demand
+                    )
+                    _populate_date_on_vi(vi, vfile.stem)
+                    seen_versions[ver_num] = vi
+                    versions.append(vi)
+
+            versions.sort(key=lambda v: (v.date_sortable, v.version_number))
+
+            result_name = current.name if single_cluster else cluster_key
+
+            results.append(DiscoveryResult(
+                path=str(current),
+                name=result_name,
+                versions_found=versions,
+                suggested_pattern=suggested_pattern,
+                suggested_extensions=sorted(found_extensions),
+                sample_filename=cluster_files[0][0].name,
+                suggested_date_format=suggested_date_fmt,
+            ))
 
     # If this directory contains date-only subdirectories (no version pattern), report it
     if dated_dirs and not versioned_dirs:
