@@ -271,52 +271,58 @@ class WatchedSource:
         return self.override_latest_target or self.override_link_mode
 
     def to_dict(self) -> dict:
+        # Source-specific fields (always persisted when set) — these aren't
+        # inherited from project defaults, they describe this source.
         d = {
             "name": self.name,
             "source_dir": self.source_dir,
-            "version_pattern": self.version_pattern,
-            "file_extensions": self.file_extensions,
-            "latest_target": self.latest_target,
-            "history_filename": self.history_filename,
-            "link_mode": self.link_mode,
         }
-        if self.file_rename_template:
-            d["file_rename_template"] = self.file_rename_template
+        if self.history_filename and self.history_filename != ".latest_history.json":
+            d["history_filename"] = self.history_filename
         if self.sample_filename:
             d["sample_filename"] = self.sample_filename
         if self.group:
             d["group"] = self.group
-        if self.date_format:
-            d["date_format"] = self.date_format
-        # Only serialize override flags when True (compact JSON)
-        if self.override_version_pattern:
-            d["override_version_pattern"] = True
-        if self.override_date_format:
-            d["override_date_format"] = True
-        if self.override_file_extensions:
-            d["override_file_extensions"] = True
-        if self.override_latest_target:
-            d["override_latest_target"] = True
-        if self.override_file_rename:
-            d["override_file_rename"] = True
-        if self.override_link_mode:
-            d["override_link_mode"] = True
-        if not self.block_incomplete_sequences:
-            d["block_incomplete_sequences"] = False
-        if self.override_block_incomplete:
-            d["override_block_incomplete"] = True
-        if self.pre_promote_cmd:
-            d["pre_promote_cmd"] = self.pre_promote_cmd
-        if self.post_promote_cmd:
-            d["post_promote_cmd"] = self.post_promote_cmd
-        if self.override_pre_promote_cmd:
-            d["override_pre_promote_cmd"] = True
-        if self.override_post_promote_cmd:
-            d["override_post_promote_cmd"] = True
         if self.added_at:
             d["added_at"] = self.added_at
         if self.manual_versions:
             d["manual_versions"] = self.manual_versions
+
+        # Inherited fields — persist *only* when explicitly overridden.
+        # Without the override flag the project default flows through at load
+        # (apply_project_defaults), so storing the value here would just
+        # capture a stale snapshot that drifts when project defaults change.
+        if self.override_version_pattern:
+            d["version_pattern"] = self.version_pattern
+            d["override_version_pattern"] = True
+        if self.override_file_extensions:
+            d["file_extensions"] = self.file_extensions
+            d["override_file_extensions"] = True
+        if self.override_latest_target:
+            d["latest_target"] = self.latest_target
+            d["override_latest_target"] = True
+        if self.override_file_rename:
+            if self.file_rename_template:
+                d["file_rename_template"] = self.file_rename_template
+            d["override_file_rename"] = True
+        if self.override_link_mode:
+            d["link_mode"] = self.link_mode
+            d["override_link_mode"] = True
+        if self.override_date_format:
+            if self.date_format:
+                d["date_format"] = self.date_format
+            d["override_date_format"] = True
+        if self.override_block_incomplete:
+            d["block_incomplete_sequences"] = self.block_incomplete_sequences
+            d["override_block_incomplete"] = True
+        if self.override_pre_promote_cmd:
+            if self.pre_promote_cmd:
+                d["pre_promote_cmd"] = self.pre_promote_cmd
+            d["override_pre_promote_cmd"] = True
+        if self.override_post_promote_cmd:
+            if self.post_promote_cmd:
+                d["post_promote_cmd"] = self.post_promote_cmd
+            d["override_post_promote_cmd"] = True
         return d
 
     @classmethod

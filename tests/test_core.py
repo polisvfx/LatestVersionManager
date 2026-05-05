@@ -200,8 +200,11 @@ class TestWatchedSource(unittest.TestCase):
             override_file_rename=True,
             override_link_mode=True,
             block_incomplete_sequences=False,
+            override_block_incomplete=True,
             pre_promote_cmd="echo pre",
             post_promote_cmd="echo post",
+            override_pre_promote_cmd=True,
+            override_post_promote_cmd=True,
             manual_versions=[{"version_string": "v099", "version_number": 99, "source_path": "/tmp"}],
         )
         d = ws.to_dict()
@@ -236,6 +239,63 @@ class TestWatchedSource(unittest.TestCase):
         self.assertNotIn("sample_filename", d)
         self.assertNotIn("group", d)
         self.assertNotIn("manual_versions", d)
+
+    def test_inherited_fields_not_persisted_without_override(self):
+        """Inherited fields (version_pattern, file_extensions, latest_target,
+        link_mode, file_rename_template, date_format, block_incomplete,
+        hooks) must only land in JSON when their override flag is True.
+        Otherwise the JSON snapshot would drift from the project defaults
+        and silently mask later default changes — the bug that caused
+        freshly-added sources to promote with stale values."""
+        ws = WatchedSource(
+            name="x", source_dir="/x",
+            version_pattern="custom_v{version}",
+            file_extensions=[".dpx"],
+            latest_target="/custom",
+            link_mode="symlink",
+            file_rename_template="custom_template",
+            date_format="DDMMYY",
+            block_incomplete_sequences=False,
+            pre_promote_cmd="echo pre",
+            post_promote_cmd="echo post",
+        )
+        d = ws.to_dict()
+        for k in (
+            "version_pattern", "file_extensions", "latest_target",
+            "link_mode", "file_rename_template", "date_format",
+            "block_incomplete_sequences", "pre_promote_cmd", "post_promote_cmd",
+        ):
+            self.assertNotIn(k, d, f"{k} should be omitted without override")
+
+    def test_project_default_flows_through_after_roundtrip(self):
+        """A source saved without overrides should pick up the *current*
+        project default after load, not whatever value happened to be
+        cached on it at save time. This is the architectural fix for the
+        'output missing _latest suffix' bug."""
+        config = ProjectConfig(
+            project_name="T",
+            default_file_rename_template="{source_basename}_v1",
+        )
+        source = WatchedSource(
+            name="s", source_dir="/x",
+            file_rename_template="{source_basename}_v1",  # matches default at "save" time
+        )
+        config.watched_sources.append(source)
+        apply_project_defaults(config)
+
+        # Roundtrip the source through dict
+        restored = WatchedSource.from_dict(source.to_dict())
+        # Without override the inherited field doesn't survive serialization
+        self.assertEqual(restored.file_rename_template, "")
+        self.assertFalse(restored.override_file_rename)
+
+        # Project changes its default; reapply defaults
+        config.watched_sources = [restored]
+        config.default_file_rename_template = "{source_basename}_v2_NEW"
+        apply_project_defaults(config)
+
+        # The restored source picks up the new default — no stale snapshot.
+        self.assertEqual(restored.file_rename_template, "{source_basename}_v2_NEW")
 
     def test_has_overrides(self):
         ws = WatchedSource(name="t", source_dir="/tmp")
