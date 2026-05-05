@@ -270,6 +270,23 @@ class WatchedSource:
         """True if this source overrides latest target or link mode settings."""
         return self.override_latest_target or self.override_link_mode
 
+    @property
+    def search_text(self) -> str:
+        """Lowercased haystack used by the source list search box.
+
+        Combines name, sample_filename, and source_dir basename so a single
+        ``in`` check covers all three. Cached per-instance and auto-invalidated
+        when any of those fields changes — no manual bust required.
+        """
+        key = (self.name, self.source_dir, self.sample_filename)
+        if getattr(self, "_search_text_key", None) != key:
+            dirname = Path(self.source_dir).name if self.source_dir else ""
+            self._search_text_cache = (
+                f"{self.name}\n{self.sample_filename or ''}\n{dirname}".lower()
+            )
+            self._search_text_key = key
+        return self._search_text_cache
+
     def to_dict(self) -> dict:
         # Source-specific fields (always persisted when set) — these aren't
         # inherited from project defaults, they describe this source.
