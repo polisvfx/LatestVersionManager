@@ -14,6 +14,7 @@ import logging
 import shutil
 import struct
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,22 @@ _ffprobe_checked: bool = False
 
 # Extensions handled by native parsers (no ffprobe needed)
 _NATIVE_TC_EXTENSIONS = {".exr", ".dpx"}
+
+
+def _subprocess_kwargs() -> dict:
+    """Return platform-specific kwargs to suppress console windows on Windows.
+
+    Without these flags, every subprocess.run() call to ffprobe flashes a cmd
+    window on top of the GUI — very visible once a project has many sources.
+    """
+    kwargs = {}
+    if sys.platform == "win32":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = si
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +244,7 @@ def _extract_timecode_ffprobe(file_path: Path) -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=5,
+            **_subprocess_kwargs(),
         )
         if result.returncode != 0:
             logger.debug(f"ffprobe returned {result.returncode} for {file_path}")
@@ -284,6 +302,7 @@ def extract_clip_frame_count(file_path: Path) -> int:
                  "-show_entries", "stream=nb_read_frames,nb_frames,duration,r_frame_rate",
                  "-print_format", "json", str(file_path)],
                 capture_output=True, text=True, timeout=30,
+                **_subprocess_kwargs(),
             )
             if result.returncode != 0:
                 return {}

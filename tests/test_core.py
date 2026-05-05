@@ -200,8 +200,11 @@ class TestWatchedSource(unittest.TestCase):
             override_file_rename=True,
             override_link_mode=True,
             block_incomplete_sequences=False,
+            override_block_incomplete=True,
             pre_promote_cmd="echo pre",
             post_promote_cmd="echo post",
+            override_pre_promote_cmd=True,
+            override_post_promote_cmd=True,
             manual_versions=[{"version_string": "v099", "version_number": 99, "source_path": "/tmp"}],
         )
         d = ws.to_dict()
@@ -236,6 +239,63 @@ class TestWatchedSource(unittest.TestCase):
         self.assertNotIn("sample_filename", d)
         self.assertNotIn("group", d)
         self.assertNotIn("manual_versions", d)
+
+    def test_inherited_fields_not_persisted_without_override(self):
+        """Inherited fields (version_pattern, file_extensions, latest_target,
+        link_mode, file_rename_template, date_format, block_incomplete,
+        hooks) must only land in JSON when their override flag is True.
+        Otherwise the JSON snapshot would drift from the project defaults
+        and silently mask later default changes — the bug that caused
+        freshly-added sources to promote with stale values."""
+        ws = WatchedSource(
+            name="x", source_dir="/x",
+            version_pattern="custom_v{version}",
+            file_extensions=[".dpx"],
+            latest_target="/custom",
+            link_mode="symlink",
+            file_rename_template="custom_template",
+            date_format="DDMMYY",
+            block_incomplete_sequences=False,
+            pre_promote_cmd="echo pre",
+            post_promote_cmd="echo post",
+        )
+        d = ws.to_dict()
+        for k in (
+            "version_pattern", "file_extensions", "latest_target",
+            "link_mode", "file_rename_template", "date_format",
+            "block_incomplete_sequences", "pre_promote_cmd", "post_promote_cmd",
+        ):
+            self.assertNotIn(k, d, f"{k} should be omitted without override")
+
+    def test_project_default_flows_through_after_roundtrip(self):
+        """A source saved without overrides should pick up the *current*
+        project default after load, not whatever value happened to be
+        cached on it at save time. This is the architectural fix for the
+        'output missing _latest suffix' bug."""
+        config = ProjectConfig(
+            project_name="T",
+            default_file_rename_template="{source_basename}_v1",
+        )
+        source = WatchedSource(
+            name="s", source_dir="/x",
+            file_rename_template="{source_basename}_v1",  # matches default at "save" time
+        )
+        config.watched_sources.append(source)
+        apply_project_defaults(config)
+
+        # Roundtrip the source through dict
+        restored = WatchedSource.from_dict(source.to_dict())
+        # Without override the inherited field doesn't survive serialization
+        self.assertEqual(restored.file_rename_template, "")
+        self.assertFalse(restored.override_file_rename)
+
+        # Project changes its default; reapply defaults
+        config.watched_sources = [restored]
+        config.default_file_rename_template = "{source_basename}_v2_NEW"
+        apply_project_defaults(config)
+
+        # The restored source picks up the new default — no stale snapshot.
+        self.assertEqual(restored.file_rename_template, "{source_basename}_v2_NEW")
 
     def test_has_overrides(self):
         ws = WatchedSource(name="t", source_dir="/tmp")
@@ -1215,6 +1275,52 @@ class TestApplyProjectDefaults(unittest.TestCase):
         apply_project_defaults(config)
         self.assertIn("hero_comp", source.latest_target)
         self.assertIn("online", source.latest_target)
+
+    def test_freshly_added_source_promotes_with_default_rename_template(self):
+        """Regression: a WatchedSource added during a session (the way the
+        Discovery dialog's _add_selected does it) starts with an empty
+        file_rename_template. Without apply_project_defaults the Promoter's
+        no-template fallback strips version+date and never appends the
+        suffix the user configured (e.g. "_latest"), so promote produces
+        e.g. shot_R1WC_comp.mov instead of shot_R1WC_comp_latest.mov.
+        After apply_project_defaults runs, the rename uses the project
+        default and emits the expected name."""
+        config = ProjectConfig(
+            project_name="Test",
+            task_tokens=["comp"],
+            default_file_rename_template="{source_basename}_comp_latest",
+            default_date_format="DDMMYY",
+        )
+        source = WatchedSource(
+            name="A001C033_260401_R1WC",
+            source_dir="/mov",
+            latest_target="/latest",
+            version_pattern="_v{version}",
+            file_extensions=[".mov"],
+            sample_filename="A001C033_260401_R1WC_comp_v01.mov",
+            date_format="DDMMYY",
+            override_version_pattern=True,
+            override_date_format=True,
+            override_file_extensions=True,
+            override_latest_target=True,
+        )
+        config.watched_sources.append(source)
+
+        # Without apply_project_defaults the rename strips version+date and
+        # emits the wrong name — captured here so a regression is loud.
+        promoter_pre = Promoter(source, config.task_tokens, config.project_name)
+        self.assertEqual(
+            promoter_pre._remap_filename(source.sample_filename),
+            "A001C033_R1WC_comp.mov",
+        )
+
+        apply_project_defaults(config)
+
+        promoter_post = Promoter(source, config.task_tokens, config.project_name)
+        self.assertEqual(
+            promoter_post._remap_filename(source.sample_filename),
+            "A001C033_R1WC_comp_latest.mov",
+        )
 
 
 class TestExpandGroupToken(unittest.TestCase):
