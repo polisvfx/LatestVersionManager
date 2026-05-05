@@ -2628,6 +2628,13 @@ class DiscoveryDialog(QDialog):
 
             suggested_date_fmt = getattr(result, "suggested_date_format", "")
             from datetime import datetime as _dt
+            # Discovery never sets an override flag. The values it found
+            # (suggested_pattern, suggested_extensions, suggested_date_format)
+            # are seeded into the source as initial values, but
+            # apply_project_defaults below normalises everything against the
+            # project defaults. Per-source overrides are reserved for fields
+            # the user *explicitly* changes via the per-source settings
+            # dialog — that's the only place the flag gets set today.
             source = WatchedSource(
                 name=source_name,
                 source_dir=result.path,
@@ -2635,10 +2642,6 @@ class DiscoveryDialog(QDialog):
                 file_extensions=result.suggested_extensions or list(self._config.default_file_extensions),
                 sample_filename=result.sample_filename or "",
                 date_format=suggested_date_fmt or self._config.default_date_format,
-                # Override pattern and extensions since they come from discovery
-                override_version_pattern=bool(result.suggested_pattern),
-                override_file_extensions=bool(result.suggested_extensions),
-                override_date_format=bool(suggested_date_fmt),
                 added_at=_dt.now().isoformat(timespec="seconds"),
             )
 
