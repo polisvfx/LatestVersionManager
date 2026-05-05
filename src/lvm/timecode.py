@@ -15,8 +15,9 @@ import shutil
 import struct
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +389,44 @@ def populate_timecodes(versions: list) -> None:
     for v in versions:
         if v.start_timecode is None:
             v.start_timecode = extract_timecode_for_version(Path(v.source_path))
+
+
+def populate_timecodes_parallel(
+    versions: Iterable,
+    max_workers: int = 8,
+) -> None:
+    """Parallel variant of :func:`populate_timecodes`.
+
+    Each ffprobe invocation is a separate subprocess (~100-200ms startup);
+    EXR/DPX header reads are pure I/O. Both are independent per-version with
+    no shared state, so a thread pool is a safe and large win when many
+    versions need timecode extraction at once (e.g. ``timecode_mode='always'``
+    on a project with dozens of sources).
+
+    Workers are capped at 8 by default to stay well under typical OS handle
+    limits even when called from another worker thread.
+    """
+    pending = [v for v in versions if v.start_timecode is None]
+    if not pending:
+        return
+
+    if len(pending) == 1 or max_workers <= 1:
+        v = pending[0]
+        v.start_timecode = extract_timecode_for_version(Path(v.source_path))
+        return
+
+    workers = min(max_workers, len(pending))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(extract_timecode_for_version, Path(v.source_path)): v
+            for v in pending
+        }
+        for future in futures:
+            v = futures[future]
+            try:
+                v.start_timecode = future.result()
+            except Exception as e:
+                logger.debug("Timecode extraction failed for %s: %s", v.source_path, e)
 
 
 def extract_timecode_for_version(source_path: Path, files: Optional[list[Path]] = None) -> Optional[str]:

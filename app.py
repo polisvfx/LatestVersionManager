@@ -11,6 +11,7 @@ import platform
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -40,13 +41,64 @@ from src.lvm.elevation import (
 )
 from src.lvm.watcher import SourceWatcher
 from src.lvm.discovery import discover, DiscoveryResult
-from src.lvm.timecode import populate_timecodes
+from src.lvm.timecode import populate_timecodes, populate_timecodes_parallel
 from src.lvm.task_tokens import (
     compute_source_name, derive_source_tokens, get_naming_options, strip_task_tokens
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Source list rendering constants — hoisted to module level so we don't
+# re-allocate dicts and QColor objects on every row build. _make_source_item
+# runs once per source per list rebuild, so 500 sources × N rebuilds add up.
+# ---------------------------------------------------------------------------
+
+_STATUS_MARKERS = {
+    "newer": "▼! ",
+    "stale": "↻ ",
+    "deliberate": "* ",
+    "integrity_fail": "⚠ ",
+}
+
+_STATUS_LABELS = {
+    "newer": "Newer Available",
+    "stale": "Stale",
+    "deliberate": "Pinned",
+    "highest": "Latest",
+    "integrity_fail": "Integrity Fail",
+    "no_version": "Not Promoted",
+    "no_target": "No Target",
+}
+
+# QColor instances are immutable from our perspective — share one per status.
+_STATUS_COLORS = {
+    "newer": QColor("#cc8833"),
+    "stale": QColor("#e8a040"),
+    "deliberate": QColor("#7abbe0"),
+    "highest": QColor("#4ec9a0"),
+    "integrity_fail": QColor("#ffaa00"),
+    "no_version": QColor("#8c8c8c"),
+    "no_target": QColor("#555555"),
+}
+
+_OVERRIDE_COLOR = QColor("#88aaff")
+_CONFLICT_COLOR = QColor("#ff8c00")
+_DEFAULT_GROUP_COLOR_HEX = "#8c8c8c"
+_GROUP_COLOR_CACHE: dict[str, QColor] = {}
+
+
+def _group_qcolor(hex_str: str) -> QColor:
+    """Return a cached QColor for a hex string. Group colours are user-defined
+    so we can't pre-build the dict, but caching avoids re-parsing the same
+    hex on every row build."""
+    qc = _GROUP_COLOR_CACHE.get(hex_str)
+    if qc is None:
+        qc = QColor(hex_str)
+        _GROUP_COLOR_CACHE[hex_str] = qc
+    return qc
 
 APP_NAME = "Latest Version Manager"
 from src.lvm import __version__ as APP_VERSION
@@ -293,8 +345,6 @@ class ScanWorker(QThread):
             def _scan_one(source):
                 scanner = VersionScanner(source, self.config.task_tokens)
                 versions = scanner.scan()
-                if tc_mode == "always":
-                    populate_timecodes(versions)
                 return source.name, versions
 
             worker_count = min(8, total)
@@ -315,6 +365,14 @@ class ScanWorker(QThread):
                     self.progress.emit(i + 1, total, source.name)
                     name, versions = _scan_one(source)
                     results[name] = versions
+
+            # Phase 2: populate timecodes in one flat parallel pool over
+            # all (source, version) pairs. Avoids the nested-pool trap of
+            # 8 outer × 8 inner = 64 ffprobes saturating the box, and lets
+            # one slow source not stall others.
+            if tc_mode == "always":
+                all_versions = [v for versions in results.values() for v in versions]
+                populate_timecodes_parallel(all_versions, max_workers=8)
 
             self.finished.emit(results)
         except Exception as e:
@@ -414,6 +472,32 @@ class StatusWorker(QThread):
             target_conflicts.setdefault(name_b, []).append(name_a)
 
         self.finished.emit(source_status, target_conflicts, promoters, scanners)
+
+
+class ProjectLoadWorker(QThread):
+    """Loads a project config + scan cache off the UI thread.
+
+    ``load_config`` does N × ``Path.resolve()`` syscalls (one per source for
+    source_dir / latest_target / manual_versions / group root_dir). On SMB
+    each is ~10-30ms, so a 50-source project freezes the UI for 1-3s if loaded
+    synchronously. ``load_cache`` then deserialises VersionInfo entries — also
+    pure I/O. Both run here so file open feels instant.
+    """
+    finished = Signal(object, object, str)  # config, cached_versions_or_None, path
+    error = Signal(str, str)                 # message, path
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self._path = path
+
+    def run(self):
+        try:
+            config = load_config(self._path)
+            from src.lvm.scan_cache import load_cache
+            cached = load_cache(self._path, config.watched_sources) or None
+            self.finished.emit(config, cached, self._path)
+        except Exception as e:
+            self.error.emit(str(e), self._path)
 
 
 # ---------------------------------------------------------------------------
@@ -2228,11 +2312,13 @@ class DiscoveryDialog(QDialog):
             self.status_label.setText("No versioned content found.")
             return
 
-        # Populate timecodes once on new results rather than on every tree rebuild
+        # Populate timecodes once on new results rather than on every tree rebuild.
+        # Flatten across all results into a single parallel pool so a slow
+        # ffprobe in one result doesn't stall others.
         tc_mode = self._config.timecode_mode if self._config else "lazy"
         if tc_mode != "never":
-            for result in self._results:
-                populate_timecodes(result.versions_found)
+            all_versions = [v for r in self._results for v in r.versions_found]
+            populate_timecodes_parallel(all_versions, max_workers=8)
             self._timecodes_populated = True
 
         self._rebuild_tree()
@@ -3589,6 +3675,7 @@ class MainWindow(QMainWindow):
         self._deferred_refresh_results: dict = None  # scan results deferred due to promotion in progress
         self._scan_worker: ScanWorker = None
         self._status_worker: StatusWorker = None
+        self._project_load_worker: ProjectLoadWorker = None
         self._reload_pending: bool = False
         self._rescan_after_cache: bool = False
         self._reload_select_source: str = None  # source to select after async _reload_ui
@@ -3707,11 +3794,17 @@ class MainWindow(QMainWindow):
         header_row.addWidget(self.source_filter)
         left_layout.addLayout(header_row)
 
-        # Search box
+        # Search box — debounced so a fast typist doesn't trigger one full
+        # source-list rebuild per keystroke. 150ms feels instant but coalesces
+        # bursts.
         self.source_search = QLineEdit()
         self.source_search.setPlaceholderText("Search sources...")
         self.source_search.setClearButtonEnabled(True)
-        self.source_search.textChanged.connect(self._apply_source_filter)
+        self._search_debounce_timer = QTimer(self)
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.setInterval(150)
+        self._search_debounce_timer.timeout.connect(self._apply_source_filter)
+        self.source_search.textChanged.connect(lambda _t: self._search_debounce_timer.start())
         left_layout.addWidget(self.source_search)
 
         # Group-by checkbox
@@ -4232,14 +4325,21 @@ class MainWindow(QMainWindow):
             self._load_project(path)
 
     def _load_project(self, path: str):
+        # Reentrancy guard — ignore if a load is already in flight
+        if getattr(self, "_project_load_worker", None) is not None and self._project_load_worker.isRunning():
+            return
+        self.statusBar().showMessage(f"Loading: {path}…")
+        self._project_load_worker = ProjectLoadWorker(path, self)
+        self._project_load_worker.finished.connect(self._on_project_loaded)
+        self._project_load_worker.error.connect(self._on_project_load_error)
+        self._project_load_worker.start()
+
+    def _on_project_loaded(self, config, cached, path: str):
+        """Called on the main thread when ProjectLoadWorker finishes."""
         try:
-            self.config = load_config(path)
+            self.config = config
             self.config_path = path
             self._add_to_recent(path)
-
-            # Try cache-first for fast startup
-            from src.lvm.scan_cache import load_cache
-            cached = load_cache(path, self.config.watched_sources)
 
             if cached:
                 # Show cached data quickly, then rescan in background.
@@ -4256,8 +4356,16 @@ class MainWindow(QMainWindow):
             self._dirty = False
             self._update_title()
             self.statusBar().showMessage(f"Loaded: {path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load config:\n{e}")
+        finally:
+            self._project_load_worker = None
+
+    def _on_project_load_error(self, message: str, path: str):
+        """Called on the main thread when ProjectLoadWorker raises."""
+        try:
+            self.statusBar().clearMessage()
+            QMessageBox.critical(self, "Error", f"Failed to load config:\n{message}")
+        finally:
+            self._project_load_worker = None
 
     def _mark_dirty(self):
         """Mark the project as having unsaved changes."""
@@ -5086,21 +5194,14 @@ class MainWindow(QMainWindow):
         self._io_executor.submit(_write)
 
     def _source_matches_search(self, source: WatchedSource, query: str) -> bool:
-        """Check if a source matches the search query (name, filename, task)."""
+        """Check if a source matches the search query (name, filename, task).
+
+        Uses ``WatchedSource.search_text`` which pre-lowercases and combines
+        name, sample_filename, and source_dir basename into one cached string.
+        """
         if not query:
             return True
-        q = query.lower()
-        # Match against display name
-        if q in source.name.lower():
-            return True
-        # Match against sample filename (includes version and task)
-        if source.sample_filename and q in source.sample_filename.lower():
-            return True
-        # Match against source directory basename (file-level name)
-        dirname = Path(source.source_dir).name if source.source_dir else ""
-        if q in dirname.lower():
-            return True
-        return False
+        return query.lower() in source.search_text
 
     def _make_source_item(self, source: WatchedSource) -> QTreeWidgetItem:
         """Create a QTreeWidgetItem for a source with status coloring and multi-column data."""
@@ -5111,24 +5212,13 @@ class MainWindow(QMainWindow):
 
         ver_tag = current.version if current else ""
 
-        # Status markers for name column
-        status_markers = {
-            "newer": "\u25bc! ", "stale": "\u21bb ", "deliberate": "* ",
-            "integrity_fail": "\u26a0 ",
-        }
-        marker = status_markers.get(status, "")
+        marker = _STATUS_MARKERS.get(status, "")
         name_text = f"{marker}{source.name}"
         if source.name in self._target_conflicts:
             name_text += " [!]"
         group_text = source.group if source.group else ""
 
-        # Status display text
-        status_labels = {
-            "newer": "Newer Available", "stale": "Stale", "deliberate": "Pinned",
-            "highest": "Latest", "integrity_fail": "Integrity Fail",
-            "no_version": "Not Promoted", "no_target": "No Target",
-        }
-        status_text = status_labels.get(status, status)
+        status_text = _STATUS_LABELS.get(status, status)
 
         # Layers: number of additional layers (sub_sequences) in the promoted version
         layers = str(len(current.sub_sequences)) if current and current.sub_sequences else ""
@@ -5148,9 +5238,7 @@ class MainWindow(QMainWindow):
         added_on = ""
         if source.added_at:
             try:
-                from datetime import datetime
-                dt = datetime.fromisoformat(source.added_at)
-                added_on = dt.strftime("%Y-%m-%d %H:%M")
+                added_on = datetime.fromisoformat(source.added_at).strftime("%Y-%m-%d %H:%M")
             except (ValueError, TypeError):
                 added_on = source.added_at
 
@@ -5158,49 +5246,39 @@ class MainWindow(QMainWindow):
         last_promoted = ""
         if current and current.set_at:
             try:
-                from datetime import datetime
-                dt = datetime.fromisoformat(current.set_at)
-                last_promoted = dt.strftime("%Y-%m-%d %H:%M")
+                last_promoted = datetime.fromisoformat(current.set_at).strftime("%Y-%m-%d %H:%M")
             except (ValueError, TypeError):
                 last_promoted = current.set_at
 
         item = QTreeWidgetItem([name_text, group_text, ver_tag, layers, frames, filetype, added_on, last_promoted, status_text])
         item.setData(0, Qt.UserRole, source.name)
 
-        # Color coding
-        color = None
-        tooltip = ""
+        # Colour comes from a shared cache; tooltip is per-instance.
+        color = _STATUS_COLORS.get(status, _STATUS_COLORS["no_target"])
         if status == "newer":
-            color = QColor("#cc8833")
             tooltip = f"Newer versions available since {ver_tag} was promoted"
         elif status == "stale":
-            color = QColor("#e8a040")
             tooltip = f"Source files for {ver_tag} modified since promotion — may have been re-rendered"
         elif status == "deliberate":
-            color = QColor("#7abbe0")
             tooltip = f"Pinned on {ver_tag} (Keep) — batch promote skips until a new version arrives"
         elif status == "highest":
-            color = QColor("#4ec9a0")
             tooltip = f"On latest version: {ver_tag}"
         elif status == "integrity_fail":
-            color = QColor("#ffaa00")
             tooltip = f"Integrity issue with {ver_tag}"
         elif status == "no_version":
-            color = QColor("#8c8c8c")
             tooltip = "No version promoted yet"
         else:  # no_target
-            color = QColor("#555555")
             tooltip = "No latest target path configured"
 
         # Override marker (blue tint on top)
         if has_overrides:
-            color = QColor("#88aaff")
+            color = _OVERRIDE_COLOR
             tooltip += " | Custom settings"
 
         # Conflict warning
         if source.name in self._target_conflicts:
             conflict_names = ", ".join(self._target_conflicts[source.name])
-            color = QColor("#ff8c00")
+            color = _CONFLICT_COLOR
             tooltip += f" | TARGET CONFLICT with: {conflict_names}"
 
         if source.group:
@@ -5208,16 +5286,15 @@ class MainWindow(QMainWindow):
 
         # Apply color to all columns
         group_col_idx = self._source_col_keys.index("group")
-        if color:
-            for col in range(len(self._source_col_keys)):
-                if col == group_col_idx:
-                    continue  # Group column gets its own color
-                item.setForeground(col, color)
+        for col in range(len(self._source_col_keys)):
+            if col == group_col_idx:
+                continue  # Group column gets its own color
+            item.setForeground(col, color)
 
-        # Color the group column with the group's own color
+        # Color the group column with the group's own color (cached by hex)
         if source.group and self.config and source.group in self.config.groups:
-            grp_color = self.config.groups[source.group].get("color", "#8c8c8c")
-            item.setForeground(group_col_idx, QColor(grp_color))
+            grp_hex = self.config.groups[source.group].get("color", _DEFAULT_GROUP_COLOR_HEX)
+            item.setForeground(group_col_idx, _group_qcolor(grp_hex))
 
         item.setToolTip(0, tooltip)
 
@@ -5225,6 +5302,15 @@ class MainWindow(QMainWindow):
 
     def _populate_source_list(self):
         """Build source list items based on computed status, active filter, search query, and grouping."""
+        # Suppress repaints during rebuild — saves dozens of intermediate
+        # paints on a 100+-source list.
+        self.source_list.setUpdatesEnabled(False)
+        try:
+            self._populate_source_list_inner()
+        finally:
+            self.source_list.setUpdatesEnabled(True)
+
+    def _populate_source_list_inner(self):
         # Temporarily disable sorting while populating to avoid re-sorts on every insert
         self.source_list.setSortingEnabled(False)
         self.source_list.clear()
@@ -5781,7 +5867,7 @@ class MainWindow(QMainWindow):
         # Timecode loading based on project setting
         tc_mode = self.config.timecode_mode if self.config else "lazy"
         if tc_mode == "lazy":
-            populate_timecodes(versions)
+            populate_timecodes_parallel(versions, max_workers=8)
         # "always" — already populated during scan (see _reload_ui)
         # "never"  — leave as None
 
@@ -6653,7 +6739,8 @@ class MainWindow(QMainWindow):
         # Disconnect signals and stop all background workers to avoid
         # callbacks firing into a half-destroyed window.
         for worker in (self._scan_worker, self._status_worker,
-                        self._worker, self._thumb_worker):
+                        self._worker, self._thumb_worker,
+                        self._project_load_worker):
             if worker is not None:
                 try:
                     worker.disconnect()
