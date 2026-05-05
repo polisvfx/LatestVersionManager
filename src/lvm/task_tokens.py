@@ -16,6 +16,7 @@ __all__ = [
     "strip_version", "strip_frame_and_ext", "strip_date",
     "derive_source_tokens", "compute_source_name", "get_naming_options",
     "validate_date_string", "parse_date_to_sortable", "format_date_display",
+    "parse_date_formats",
 ]
 
 import calendar
@@ -45,19 +46,31 @@ DATE_RE = re.compile(r"(?:^|(?<=[._\-]))(\d{6}|\d{8})(?=[._\-]|$)")
 VALID_DATE_FORMATS = ("DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD")
 
 
-def validate_date_string(digits: str, date_format: str) -> bool:
-    """Check if a digit string forms a plausible date for the given format.
+def parse_date_formats(date_format: str) -> list[str]:
+    """Split a date_format spec into the list of valid format identifiers it
+    contains.
 
-    Validates day-of-month against the actual calendar (e.g. rejects Feb 30).
-    For 2-digit year formats, uses year 2000 as a proxy for leap-year checks.
+    A spec is a comma-separated string. Empty / whitespace-only specs and
+    unknown identifiers are dropped, so the return value is always a list of
+    strings drawn from VALID_DATE_FORMATS. An empty list means "no date
+    handling" — equivalent to the old single-format empty string.
 
-    Args:
-        digits: Raw digit string, e.g. "260224" or "20240226".
-        date_format: One of "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD".
-
-    Returns:
-        True if the digits form a plausible date.
+    Examples:
+        parse_date_formats("")              -> []
+        parse_date_formats("DDMMYY")        -> ["DDMMYY"]
+        parse_date_formats("DDMMYY,YYMMDD") -> ["DDMMYY", "YYMMDD"]
+        parse_date_formats("garbage,DDMMYY")-> ["DDMMYY"]
     """
+    if not date_format:
+        return []
+    return [
+        f for f in (s.strip() for s in date_format.split(","))
+        if f in VALID_DATE_FORMATS
+    ]
+
+
+def _validate_one(digits: str, date_format: str) -> bool:
+    """Single-format validator — see validate_date_string for semantics."""
     try:
         if date_format == "DDMMYY" and len(digits) == 6:
             dd, mm = int(digits[:2]), int(digits[2:4])
@@ -86,19 +99,20 @@ def validate_date_string(digits: str, date_format: str) -> bool:
     return 1 <= dd <= max_day
 
 
-def parse_date_to_sortable(date_str: str, date_format: str) -> int:
-    """Convert a date string to a YYYYMMDD integer for chronological sorting.
+def validate_date_string(digits: str, date_format: str) -> bool:
+    """Check if a digit string forms a plausible date in any of the
+    configured formats.
 
-    Args:
-        date_str: Raw date digits, e.g. "260224" or "20240226".
-        date_format: One of "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD".
-
-    Returns:
-        Integer in YYYYMMDD format, e.g. 20240226.  Returns 0 on failure.
+    *date_format* may be a single format identifier ("DDMMYY") or a
+    comma-separated list ("DDMMYY,YYMMDD"). Validates day-of-month against
+    the calendar (rejects Feb 30, etc.). For 2-digit year formats uses
+    year 2000 as a proxy for leap-year checks.
     """
-    if not validate_date_string(date_str, date_format):
-        return 0
+    return any(_validate_one(digits, f) for f in parse_date_formats(date_format))
 
+
+def _parse_one_to_sortable(date_str: str, date_format: str) -> int:
+    """Single-format sortable conversion — see parse_date_to_sortable."""
     if date_format == "DDMMYY":
         dd, mm, yy = date_str[:2], date_str[2:4], date_str[4:6]
         yyyy = f"20{yy}" if int(yy) < 70 else f"19{yy}"
@@ -115,16 +129,20 @@ def parse_date_to_sortable(date_str: str, date_format: str) -> int:
     return 0
 
 
-def format_date_display(date_str: str, date_format: str) -> str:
-    """Format a raw date string into a human-readable display string.
+def parse_date_to_sortable(date_str: str, date_format: str) -> int:
+    """Convert a date string to a YYYYMMDD integer for chronological sorting.
 
-    Args:
-        date_str: Raw date digits, e.g. "260224".
-        date_format: One of "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD".
-
-    Returns:
-        Formatted string like "26-02-24" or the raw string on failure.
+    Tries each configured format in order; the first one that validates the
+    digits is used. Returns 0 if none match (or *date_format* is empty).
     """
+    for fmt in parse_date_formats(date_format):
+        if _validate_one(date_str, fmt):
+            return _parse_one_to_sortable(date_str, fmt)
+    return 0
+
+
+def _format_one_display(date_str: str, date_format: str) -> str:
+    """Single-format display formatter — see format_date_display."""
     if date_format == "DDMMYY" and len(date_str) == 6:
         return f"{date_str[:2]}-{date_str[2:4]}-{date_str[4:6]}"
     elif date_format == "YYMMDD" and len(date_str) == 6:
@@ -136,28 +154,34 @@ def format_date_display(date_str: str, date_format: str) -> str:
     return date_str
 
 
+def format_date_display(date_str: str, date_format: str) -> str:
+    """Format a raw date string into a human-readable display string,
+    using the first configured format that validates the input.
+    """
+    for fmt in parse_date_formats(date_format):
+        if _validate_one(date_str, fmt):
+            return _format_one_display(date_str, fmt)
+    return date_str
+
+
 def strip_date(name: str, date_format: str = "") -> str:
     """Remove a validated date pattern from a name string.
 
-    Only strips when date_format is set and matched digits validate as a date.
-    This prevents false positives on camera reel IDs or other numeric sequences.
+    Strips when *date_format* is non-empty and the matched digits validate
+    against any of the configured formats — multi-format specs ("DDMMYY,
+    YYMMDD") accept either. This prevents false positives on camera reel
+    IDs or other numeric sequences.
 
-    Example: '260224_shotname' with DDMMYY -> 'shotname'
-    Example: 'shotname_260224' with DDMMYY -> 'shotname'
-
-    Args:
-        name: The string to strip date from.
-        date_format: Date format identifier. Empty string disables stripping.
-
-    Returns:
-        Name with date removed (or unchanged if no valid date found).
+    Example: '260224_shotname' with 'DDMMYY' -> 'shotname'
+    Example: '260224_shotname' with 'DDMMYY,YYMMDD' -> 'shotname'
     """
-    if not date_format:
+    formats = parse_date_formats(date_format)
+    if not formats:
         return name
 
     for m in DATE_RE.finditer(name):
         digits = m.group(1)
-        if validate_date_string(digits, date_format):
+        if any(_validate_one(digits, f) for f in formats):
             # Remove the matched date and clean up dividers
             start = m.start(1)
             end = m.end(1)

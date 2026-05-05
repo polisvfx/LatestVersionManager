@@ -83,7 +83,10 @@ class VersionScanner:
 
         Supports three token types:
         - {version}: matches \\d+ (version number)
-        - {date}: matches \\d{6} or \\d{8} (date string)
+        - {date}: matches \\d{6} or \\d{8} depending on the configured
+          date_format(s). When date_format is a comma-separated multi-format
+          spec covering both 6- and 8-digit formats, the regex matches
+          either width.
         - Raw regex: used directly
         """
         if "{version}" in pattern or "{date}" in pattern:
@@ -91,7 +94,13 @@ class VersionScanner:
             if r"\{version\}" in regex_str:
                 regex_str = regex_str.replace(r"\{version\}", r"(\d+)")
             if r"\{date\}" in regex_str:
-                if date_format in ("DDMMYYYY", "YYYYMMDD"):
+                from .task_tokens import parse_date_formats
+                formats = parse_date_formats(date_format)
+                has_8 = any(f in ("DDMMYYYY", "YYYYMMDD") for f in formats)
+                has_6 = any(f in ("DDMMYY", "YYMMDD") for f in formats)
+                if has_8 and has_6:
+                    regex_str = regex_str.replace(r"\{date\}", r"(\d{6}|\d{8})")
+                elif has_8:
                     regex_str = regex_str.replace(r"\{date\}", r"(\d{8})")
                 else:
                     regex_str = regex_str.replace(r"\{date\}", r"(\d{6})")

@@ -170,6 +170,24 @@ class TestStripDate(unittest.TestCase):
         # Should strip the first valid date
         self.assertIn("shotname", result)
 
+    def test_multi_format_strips_either(self):
+        """Comma-separated date_format spec accepts a date matching any
+        listed format, so DDMMYY-or-YYMMDD both validate '260401'."""
+        # "260401" parses as DDMMYY (26 Apr 2001) and as YYMMDD (1 Apr 2026).
+        self.assertEqual(strip_date("260401_shot", "DDMMYY,YYMMDD"), "shot")
+        self.assertEqual(strip_date("260401_shot", "YYMMDD"), "shot")
+        # A 6-digit value that's only valid as YYMMDD (mm > 12 in DDMMYY).
+        self.assertEqual(strip_date("260024_shot", "DDMMYY"), "260024_shot")
+        # Same input under multi-format including YYMMDD now strips,
+        # because YYMMDD validates "26-00-24" as month 00 — not actually
+        # valid either; pick a real YYMMDD-only date to assert success.
+        self.assertEqual(strip_date("261231_shot", "DDMMYY,YYMMDD"), "shot")
+
+    def test_multi_format_six_and_eight(self):
+        """Multi-format spec with both 6- and 8-digit formats handles either width."""
+        self.assertEqual(strip_date("shot_260401", "DDMMYY,YYYYMMDD"), "shot")
+        self.assertEqual(strip_date("shot_20260401", "DDMMYY,YYYYMMDD"), "shot")
+
 
 # ---------------------------------------------------------------------------
 # derive_source_tokens with date_format

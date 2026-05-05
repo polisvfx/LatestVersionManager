@@ -628,14 +628,21 @@ class SourceDialog(QDialog):
         pattern_row.addWidget(self.pattern_edit, 1)
         layout.addRow("Version Pattern:", pattern_row)
 
-        # Date format
+        # Date format — multi-select. Pick zero or more formats; each one
+        # configured contributes to validation/stripping/sorting. Zero
+        # checked == "(none)", same as the old single-value behaviour.
         self.override_date_format_check = QCheckBox("Override")
-        self.date_format_combo = QComboBox()
-        self.date_format_combo.addItems(["(none)", "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"])
-        self.override_date_format_check.toggled.connect(lambda on: self.date_format_combo.setEnabled(on))
+        self.date_format_checks: dict[str, QCheckBox] = {}
         date_row = QHBoxLayout()
         date_row.addWidget(self.override_date_format_check)
-        date_row.addWidget(self.date_format_combo, 1)
+        for fmt in ("DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"):
+            cb = QCheckBox(fmt)
+            self.date_format_checks[fmt] = cb
+            date_row.addWidget(cb)
+        date_row.addStretch(1)
+        self.override_date_format_check.toggled.connect(
+            lambda on: [cb.setEnabled(on) for cb in self.date_format_checks.values()]
+        )
         layout.addRow("Date Format:", date_row)
 
         # File extensions
@@ -679,8 +686,10 @@ class SourceDialog(QDialog):
             self.extensions_edit.setText(" ".join(source.file_extensions))
 
             self.override_date_format_check.setChecked(source.override_date_format)
-            if source.date_format:
-                self.date_format_combo.setCurrentText(source.date_format)
+            from src.lvm.task_tokens import parse_date_formats as _parse_dfmts
+            for fmt in _parse_dfmts(source.date_format):
+                if fmt in self.date_format_checks:
+                    self.date_format_checks[fmt].setChecked(True)
 
             self.override_link_mode_check.setChecked(source.override_link_mode)
             self.link_mode_combo.setCurrentText(source.link_mode)
@@ -701,7 +710,8 @@ class SourceDialog(QDialog):
                               project_config.default_version_pattern if project_config else "_v{version}")
         self._toggle_override(self.override_ext_check.isChecked(),
                               self.extensions_edit, None, default_ext_str)
-        self.date_format_combo.setEnabled(self.override_date_format_check.isChecked())
+        for cb in self.date_format_checks.values():
+            cb.setEnabled(self.override_date_format_check.isChecked())
         self.link_mode_combo.setEnabled(self.override_link_mode_check.isChecked())
 
     def _get_default_latest(self) -> str:
@@ -731,8 +741,9 @@ class SourceDialog(QDialog):
         exts = exts_text.split() if exts_text else list(DEFAULT_FILE_EXTENSIONS)
 
         pc = self._project_config
-        date_fmt_text = self.date_format_combo.currentText()
-        date_fmt = "" if date_fmt_text == "(none)" else date_fmt_text
+        date_fmt = ",".join(
+            fmt for fmt, cb in self.date_format_checks.items() if cb.isChecked()
+        )
         return WatchedSource(
             name=self.name_edit.text().strip() or "Untitled",
             source_dir=self.source_dir_edit.text().strip(),
@@ -1260,12 +1271,19 @@ class ProjectSettingsDialog(QDialog):
         self.pattern_edit = QLineEdit(config.default_version_pattern)
         naming.addRow("Version Pattern:", self.pattern_edit)
 
-        # --- Date format ---
-        self.date_format_combo = QComboBox()
-        self.date_format_combo.addItems(["(none)", "DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"])
-        if config.default_date_format:
-            self.date_format_combo.setCurrentText(config.default_date_format)
-        naming.addRow("Date Format:", self.date_format_combo)
+        # --- Date format (multi-select; 0 boxes checked == "(none)") ---
+        from src.lvm.task_tokens import parse_date_formats as _parse_dfmts_proj
+        self.date_format_checks: dict[str, QCheckBox] = {}
+        date_row = QHBoxLayout()
+        for fmt in ("DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"):
+            cb = QCheckBox(fmt)
+            self.date_format_checks[fmt] = cb
+            date_row.addWidget(cb)
+        date_row.addStretch(1)
+        for fmt in _parse_dfmts_proj(config.default_date_format):
+            if fmt in self.date_format_checks:
+                self.date_format_checks[fmt].setChecked(True)
+        naming.addRow("Date Format:", date_row)
 
         # --- File extensions ---
         self.extensions_edit = QLineEdit(" ".join(config.default_file_extensions))
@@ -1553,8 +1571,9 @@ class ProjectSettingsDialog(QDialog):
         config.default_file_rename_template = self.rename_template_edit.text().strip() or "{source_basename}_latest"
         config.default_version_pattern = self.pattern_edit.text().strip() or "_v{version}"
 
-        date_fmt_text = self.date_format_combo.currentText()
-        config.default_date_format = "" if date_fmt_text == "(none)" else date_fmt_text
+        config.default_date_format = ",".join(
+            fmt for fmt, cb in self.date_format_checks.items() if cb.isChecked()
+        )
 
         exts = self.extensions_edit.text().strip().split()
         config.default_file_extensions = exts if exts else list(DEFAULT_FILE_EXTENSIONS)
