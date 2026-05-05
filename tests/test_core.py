@@ -1216,6 +1216,52 @@ class TestApplyProjectDefaults(unittest.TestCase):
         self.assertIn("hero_comp", source.latest_target)
         self.assertIn("online", source.latest_target)
 
+    def test_freshly_added_source_promotes_with_default_rename_template(self):
+        """Regression: a WatchedSource added during a session (the way the
+        Discovery dialog's _add_selected does it) starts with an empty
+        file_rename_template. Without apply_project_defaults the Promoter's
+        no-template fallback strips version+date and never appends the
+        suffix the user configured (e.g. "_latest"), so promote produces
+        e.g. shot_R1WC_comp.mov instead of shot_R1WC_comp_latest.mov.
+        After apply_project_defaults runs, the rename uses the project
+        default and emits the expected name."""
+        config = ProjectConfig(
+            project_name="Test",
+            task_tokens=["comp"],
+            default_file_rename_template="{source_basename}_comp_latest",
+            default_date_format="DDMMYY",
+        )
+        source = WatchedSource(
+            name="A001C033_260401_R1WC",
+            source_dir="/mov",
+            latest_target="/latest",
+            version_pattern="_v{version}",
+            file_extensions=[".mov"],
+            sample_filename="A001C033_260401_R1WC_comp_v01.mov",
+            date_format="DDMMYY",
+            override_version_pattern=True,
+            override_date_format=True,
+            override_file_extensions=True,
+            override_latest_target=True,
+        )
+        config.watched_sources.append(source)
+
+        # Without apply_project_defaults the rename strips version+date and
+        # emits the wrong name — captured here so a regression is loud.
+        promoter_pre = Promoter(source, config.task_tokens, config.project_name)
+        self.assertEqual(
+            promoter_pre._remap_filename(source.sample_filename),
+            "A001C033_R1WC_comp.mov",
+        )
+
+        apply_project_defaults(config)
+
+        promoter_post = Promoter(source, config.task_tokens, config.project_name)
+        self.assertEqual(
+            promoter_post._remap_filename(source.sample_filename),
+            "A001C033_R1WC_comp_latest.mov",
+        )
+
 
 class TestExpandGroupToken(unittest.TestCase):
 

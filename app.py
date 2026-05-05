@@ -2691,6 +2691,15 @@ class DiscoveryDialog(QDialog):
             added += 1
 
         if added:
+            # Populate every inheritable field on the new sources from the
+            # current project defaults — file_rename_template, link_mode,
+            # block_incomplete_sequences, pre/post-promote hooks, etc. The
+            # WatchedSource constructor only sets dataclass defaults, so
+            # without this call a freshly added source would promote with
+            # an empty file_rename_template and the no-template fallback in
+            # _remap_filename would strip "_latest" (or whatever suffix the
+            # user configured) until the project is reloaded.
+            apply_project_defaults(self._config)
             self.sources_added.emit(added)
             msg = f"Added {added} source(s) to the project."
             if renamed_count:
