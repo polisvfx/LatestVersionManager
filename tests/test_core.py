@@ -1065,19 +1065,41 @@ class TestFormatDiscoveryReport(unittest.TestCase):
 
 class TestDetectDateFormat(unittest.TestCase):
 
-    def test_yymmdd(self):
-        # 24 <= 31 and 02 <= 12, so heuristic picks DDMMYY for ambiguous 6-digit
-        # Use a value where first two > 31 to get YYMMDD
+    def test_yymmdd_unambiguous_high_first_two(self):
+        # First two = 99 — invalid as a day, so DDMMYY can't match.
         self.assertEqual(_detect_date_format("990226"), "YYMMDD")
 
-    def test_ddmmyy(self):
-        self.assertEqual(_detect_date_format("260224"), "DDMMYY")
+    def test_yymmdd_unambiguous_high_first_two_32(self):
+        # First two = 32 — invalid as a day, so DDMMYY can't match.
+        self.assertEqual(_detect_date_format("320101"), "YYMMDD")
+
+    def test_ambiguous_recent_year_prefers_yymmdd(self):
+        # 26 is in the 2020s/30s range — current-decade year wins. The user
+        # in 2026 reads "260401" as April 1, 2026, not April 26, 2001.
+        self.assertEqual(_detect_date_format("260401"), "YYMMDD,DDMMYY")
+        self.assertEqual(_detect_date_format("260224"), "YYMMDD,DDMMYY")
+
+    def test_ambiguous_low_first_two_prefers_ddmmyy(self):
+        # 18 reads naturally as a day number, not a 2018 year.
+        self.assertEqual(_detect_date_format("180524"), "DDMMYY,YYMMDD")
+        # 01 likewise — first day of the month.
+        self.assertEqual(_detect_date_format("010624"), "DDMMYY,YYMMDD")
+
+    def test_ddmmyy_only_when_yymmdd_invalid(self):
+        # Month 13 is invalid as YYMMDD's mm but fine as DDMMYY's mm only
+        # when first_two looks like a day. "311299": YYMMDD yy=31->2031,
+        # mm=12, dd=99 invalid. DDMMYY dd=31, mm=12, yy=99->1999 valid.
+        self.assertEqual(_detect_date_format("311299"), "DDMMYY")
 
     def test_yyyymmdd(self):
         self.assertEqual(_detect_date_format("20240226"), "YYYYMMDD")
 
     def test_ddmmyyyy(self):
         self.assertEqual(_detect_date_format("26022024"), "DDMMYYYY")
+
+    def test_invalid_returns_empty(self):
+        # Neither format validates ("999999" — month 99 invalid both ways).
+        self.assertEqual(_detect_date_format("999999"), "")
 
 
 class TestIsPlausibleDate(unittest.TestCase):
