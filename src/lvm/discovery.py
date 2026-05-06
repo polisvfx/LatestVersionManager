@@ -744,15 +744,24 @@ def _detect_frame_range(files: list[Path]) -> tuple[Optional[str], int, list]:
 
 
 def _detect_date_format(date_str: str) -> str:
-    """Guess date format from a 6- or 8-digit string.
+    """Detect the date format(s) for a 6- or 8-digit date string.
 
-    Heuristic for 6-digit:
-    - If first two digits > 31, likely YYMMDD (e.g. 240226).
-    - If first two digits <= 31 and middle two <= 12, likely DDMMYY (e.g. 260224).
+    Returns a single format identifier when only one candidate format
+    produces a valid calendar date, or a comma-separated multi-format
+    spec ("YYMMDD,DDMMYY") when multiple formats validate. Downstream
+    functions in task_tokens accept multi-format specs and try each
+    format in order, so the first one in the spec is the preferred
+    interpretation for display/sort.
 
-    Heuristic for 8-digit:
-    - If first four digits >= 1900, likely YYYYMMDD (e.g. 20240226).
-    - Otherwise likely DDMMYYYY (e.g. 26022024).
+    For ambiguous 6-digit dates the order is:
+    - YYMMDD-first when the leading two digits are 20-31 — most plausibly
+      a current-decade year. In 2026 a filename containing "260401"
+      means April 1, 2026 (YYMMDD), not April 26, 2001 (DDMMYY).
+    - DDMMYY-first when the leading two digits are 01-19 — more naturally
+      read as a day number than a year ("180524" = May 18, 2024 DDMMYY).
+
+    8-digit dates rarely overlap (DDMMYYYY would need a year < 1900 to
+    avoid YYYYMMDD), so a single format is returned.
     """
     if len(date_str) == 8:
         first_four = int(date_str[:4])
@@ -761,14 +770,18 @@ def _detect_date_format(date_str: str) -> str:
         return "DDMMYYYY"
 
     if len(date_str) == 6:
-        first_two = int(date_str[:2])
-        mid_two = int(date_str[2:4])
-        if first_two > 31:
+        from .task_tokens import validate_date_string
+        yymmdd_ok = validate_date_string(date_str, "YYMMDD")
+        ddmmyy_ok = validate_date_string(date_str, "DDMMYY")
+        if yymmdd_ok and ddmmyy_ok:
+            first_two = int(date_str[:2])
+            if 20 <= first_two <= 31:
+                return "YYMMDD,DDMMYY"
+            return "DDMMYY,YYMMDD"
+        if yymmdd_ok:
             return "YYMMDD"
-        if first_two <= 31 and mid_two <= 12:
+        if ddmmyy_ok:
             return "DDMMYY"
-        # Ambiguous — default
-        return "YYMMDD"
 
     return ""
 
