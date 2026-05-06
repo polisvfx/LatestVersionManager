@@ -2283,8 +2283,12 @@ class DiscoveryDialog(QDialog):
         # Check if this specific (path, name) combination exists
         if (resolved, result_name.lower()) in existing_sources:
             return True
-        # Also check path-only match for backward compatibility (single-shot dirs)
-        return any(d == resolved for d, _ in existing_sources)
+        # Path-only fallback for legacy callers that don't pass a name. Must
+        # NOT fire when result_name is set: with multi-shot flat folders,
+        # several sources legitimately share one source_dir under different
+        # names, so a path-only match would flag every sibling shot as
+        # already-added.
+        return not result_name and any(d == resolved for d, _ in existing_sources)
 
     def _on_scan_progress(self, current_path: str, dirs_scanned: int, estimated_total: int):
         """Update progress bar during discovery scan."""
