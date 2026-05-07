@@ -179,6 +179,22 @@ class TestHistoryEntry(unittest.TestCase):
         d = he.to_dict()
         self.assertNotIn("pinned", d)
 
+    def test_latest_basename_roundtrip(self):
+        he = HistoryEntry("v003", "/renders/v003", "x", "2024-01-01",
+                          latest_basename="hero_comp_latest")
+        restored = HistoryEntry.from_dict(he.to_dict())
+        self.assertEqual(restored.latest_basename, "hero_comp_latest")
+
+    def test_latest_basename_omitted_when_empty(self):
+        he = HistoryEntry("v001", "/tmp", "x", "2024-01-01")
+        d = he.to_dict()
+        self.assertNotIn("latest_basename", d)
+
+    def test_latest_basename_default_for_old_sidecar(self):
+        d = {"version": "v001", "source": "/tmp", "set_by": "x", "set_at": "2024-01-01"}
+        he = HistoryEntry.from_dict(d)
+        self.assertEqual(he.latest_basename, "")
+
 
 class TestWatchedSource(unittest.TestCase):
 
@@ -1648,6 +1664,43 @@ class TestPromoter(unittest.TestCase):
             result_b["valid"],
             f"ShotB.verify() should pass with sibling file present, got {result_b!r}",
         )
+
+        # Each sidecar must capture its own latest_basename so the NLE
+        # companion script can match a clip back to the right sidecar.
+        cur_a = promA.get_current_version()
+        cur_b = promB.get_current_version()
+        self.assertEqual(cur_a.latest_basename, "ShotA_latest")
+        self.assertEqual(cur_b.latest_basename, "ShotB_latest")
+
+    def test_promote_records_latest_basename_for_sequence(self):
+        """latest_basename is the on-disk stem (no frame, no ext)."""
+        vdir = Path(self.source_dir) / "shot_v001"
+        _make_exr_sequence(str(vdir), "shot", "v001", 1001, 1003)
+
+        source = self._make_source(
+            sample_filename="shot_v001.1001.exr",
+            file_rename_template="{source_name}_latest",
+        )
+        promoter = Promoter(source)
+        vi = VersionInfo("v001", 1, str(vdir), file_count=3)
+        entry = promoter.promote(vi, user="x")
+
+        self.assertEqual(entry.latest_basename, "shot_latest")
+
+    def test_promote_records_latest_basename_for_single_file(self):
+        f = Path(self.source_dir) / "hero_comp_v001.mov"
+        f.write_bytes(b"\x00" * 128)
+
+        source = self._make_source(
+            file_extensions=[".mov"],
+            sample_filename="hero_comp_v001.mov",
+            file_rename_template="{source_name}_latest",
+        )
+        promoter = Promoter(source)
+        vi = VersionInfo("v001", 1, str(f), file_count=1)
+        entry = promoter.promote(vi, user="x")
+
+        self.assertEqual(entry.latest_basename, "hero_comp_latest")
 
     def test_promote_no_target_raises(self):
         with self.assertRaises(PromotionError):

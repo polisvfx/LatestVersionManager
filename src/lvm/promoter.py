@@ -294,6 +294,9 @@ class Promoter:
         ]
         entry.target_mtime = self._get_max_mtime(target_dir, files=own_target_files or None)
         entry.pinned = pinned
+        # Capture the on-disk stem so NLE companion scripts can match this
+        # sidecar to its clip even when several sources share a target dir.
+        entry.latest_basename = self._compute_latest_basename(version, own_target_files)
         # Extract clip frame count for container files
         if source_path.is_file() and source_path.suffix.lower() in (".mov", ".mxf", ".mp4", ".avi"):
             try:
@@ -515,6 +518,45 @@ class Promoter:
             return file_source_name[len(base_source_name):]
 
         return ""
+
+    def _compute_latest_basename(self, version: VersionInfo,
+                                  written_files: Optional[list] = None) -> str:
+        """Return the stem of this source's latest output filename.
+
+        The stem is what the on-disk file looks like minus the frame number
+        (for sequences) and the extension. Example: a sequence written as
+        ``hero_comp_latest.1001.exr`` gives ``hero_comp_latest``; a single
+        ``hero_comp_latest.mov`` also gives ``hero_comp_latest``.
+
+        Companion NLE scripts read this to match an imported clip back to
+        the right sidecar, even when many sidecars (one per source) live in
+        the same target directory.
+
+        Prefers a name derived from a freshly-written target file, then
+        falls back to remapping the source's sample filename, then to the
+        version's source path basename.
+        """
+        sample_name = ""
+        if written_files:
+            try:
+                sample_name = Path(written_files[0]).name
+            except Exception:
+                sample_name = ""
+        if not sample_name and self.source.sample_filename:
+            try:
+                sample_name = self._remap_filename(self.source.sample_filename)
+            except Exception:
+                sample_name = ""
+        if not sample_name:
+            try:
+                sample_name = self._remap_filename(Path(version.source_path).name)
+            except Exception:
+                return ""
+
+        m = _FRAME_EXT_RE.search(sample_name)
+        if m:
+            return sample_name[:m.start()]
+        return Path(sample_name).stem
 
     def _remap_filename(self, filename: str) -> str:
         """Remap a versioned filename using the file rename template.

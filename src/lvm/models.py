@@ -148,6 +148,9 @@ class HistoryEntry:
     source_mtime: Optional[float] = None   # max mtime of source files at promotion time
     target_mtime: Optional[float] = None   # max mtime of target files right after promotion
     pinned: bool = False                   # True only for "Keep This Version" operations
+    latest_basename: str = ""              # stem of the latest output filename (no frame, no ext)
+                                            # e.g. "hero_comp_latest" — used by NLE companion scripts
+                                            # to match a clip on disk back to its source version.
 
     def to_dict(self) -> dict:
         d = {
@@ -172,6 +175,8 @@ class HistoryEntry:
             d["target_mtime"] = self.target_mtime
         if self.pinned:
             d["pinned"] = True
+        if self.latest_basename:
+            d["latest_basename"] = self.latest_basename
         return d
 
     @classmethod
@@ -191,6 +196,7 @@ class HistoryEntry:
             source_mtime=data.get("source_mtime"),
             target_mtime=data.get("target_mtime"),
             pinned=data.get("pinned", False),
+            latest_basename=data.get("latest_basename", ""),
         )
 
     @classmethod
