@@ -164,6 +164,14 @@ def _iter_clips(folder):
 
 
 def main():
+    # Force line-buffered streams so streaming parents (e.g. LVM's GUI worker)
+    # see progress immediately rather than after the subprocess exits.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
     if dvr_script is None:
         fallback = _default_modules_path()
         print("DaVinciResolveScript module not found.", file=sys.stderr)
@@ -199,8 +207,15 @@ def main():
     skipped_match = 0
     skipped_idempotent = 0
     errors = 0
+    processed = 0
+    HEARTBEAT_EVERY = 250
 
     for item in _iter_clips(root):
+        processed += 1
+        if processed % HEARTBEAT_EVERY == 0:
+            print(f"  ...processed {processed} clips "
+                  f"(renamed={renamed}, skipped={skipped_match}, errors={errors})")
+
         try:
             clip_path = item.GetClipProperty("File Path") or ""
             clip_name = item.GetClipProperty("Clip Name") or ""

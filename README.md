@@ -18,6 +18,8 @@ In a typical compositing or grading workflow, artists iterate through numbered v
 
 **Promote any version to "latest" with one click.** Select a source and a version, and LVM copies (or symlinks/hardlinks) all the files into the target directory your tools are reading from. File names are cleaned up automatically - version tags are stripped so the downstream tool sees a stable, predictable path regardless of which version is active.
 
+**Show the actual version inside DaVinci Resolve and Adobe Premiere.** Companion scripts read the LVM sidecar next to each imported `_latest.*` clip and rename the **clip's display name** in the NLE to the source's versioned filename (e.g. `SH0010_comp_v003.mov`). The on-disk file is untouched. Inside DaVinci Resolve, run **Workspace → Scripts → Edit → lvm_restore_versions** (works on **both Free and Studio**). DaVinci Resolve **Studio** users also get a one-click **"Sync NLE Names"** button in LVM's status bar plus an opt-in **auto-sync after every promote** — Free Resolve doesn't expose external scripting, so those LVM-driven entry points stay disabled there. Premiere users run the bundled `.jsx` from File → Scripts → Run Script File. Full setup in [docs/companions.md](docs/companions.md).
+
 **Track frame ranges and timecodes.** LVM detects frame ranges in image sequences and reads embedded timecodes. When you switch versions, it warns you if the frame range or timecode has changed - a common gotcha when swapping renders mid-project.
 
 **Keep a full promotion history.** Every promotion is logged with the version, timestamp, frame range, and who made the change. You can review the history for any source to see exactly what was live and when - useful for debugging or rolling back.
