@@ -1555,7 +1555,10 @@ class ProjectSettingsDialog(QDialog):
             "filename recorded in the LVM sidecar — independent of the rename "
             "template, so this works whether your output is named *_latest.*, "
             "*_v999.*, *_final.*, or anything else. The on-disk file is "
-            "untouched."
+            "untouched.\n\n"
+            "Note: LVM-driven sync (this section) requires DaVinci Resolve "
+            "Studio. Free Resolve users get the same renaming via Workspace → "
+            "Scripts → Edit → lvm_restore_versions inside Resolve."
         )
         nle_help.setWordWrap(True)
         nle_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
@@ -1564,9 +1567,10 @@ class ProjectSettingsDialog(QDialog):
         resolve_available = is_resolve_external_available()
         status_text = ("DaVinci Resolve Studio: detected"
                        if resolve_available
-                       else "DaVinci Resolve Studio: not detected (Free edition "
-                            "can still use Workspace → Scripts → Edit → "
-                            "lvm_restore_versions)")
+                       else "DaVinci Resolve Studio: not detected — LVM-driven "
+                            "sync needs Studio. Free Resolve users can still "
+                            "run Workspace → Scripts → Edit → "
+                            "lvm_restore_versions from inside Resolve.")
         resolve_status = QLabel(status_text)
         resolve_status.setWordWrap(True)
         resolve_status.setStyleSheet(

@@ -18,6 +18,21 @@ touched — LVM keeps owning it.
 Re-running is idempotent. Promoting a new version and re-running picks up
 the new version automatically.
 
+> ## ⚠ Resolve Studio is required for LVM-driven sync
+>
+> The **Tools → Sync Names in NLE** menu, the **status-bar "Sync NLE
+> Names"** button, and the **auto-sync after promote** option all spawn an
+> external Python subprocess against a running Resolve. Blackmagic gates
+> external scripting behind **DaVinci Resolve Studio (paid)** — these
+> entry points stay disabled on the free edition.
+>
+> Free Resolve users still get full functionality via the **in-Resolve
+> path** (Workspace → Scripts → Edit → lvm_restore_versions) once the
+> script is installed; see [§ DaVinci Resolve](#davinci-resolve) below.
+>
+> Adobe Premiere has no Studio/Free split; its companion script runs from
+> File → Scripts → Run Script File regardless.
+
 ---
 
 ## DaVinci Resolve
@@ -54,9 +69,16 @@ v1.5 roadmap below for LVM-driven external launching (Studio only).
 
 ### Free vs Studio
 
-This script runs inside Resolve and works in both the free and Studio
-editions. External Python launching from another process is Studio-only —
-that's a v1.5 LVM feature, not required here.
+This in-Resolve script (Workspace → Scripts) runs in **both Free and
+Studio** — fully featured, no upgrade needed. Setting `External scripting
+using → Local` in Preferences is enough.
+
+What's **Studio-only** is the LVM-driven path (status-bar button, Tools
+menu, auto-sync). Blackmagic restricts external Python scripting to
+Studio licenses, so LVM cannot spawn a subprocess against Free Resolve.
+Free users keep using the in-Resolve script entry above; functionality
+is identical, you just trigger it from inside Resolve instead of from
+LVM's window.
 
 ---
 
@@ -145,19 +167,28 @@ works.
 
 ## Run from inside LVM (DaVinci Resolve Studio only)
 
-LVM can launch the Resolve companion script for you. Open Resolve, then in
-LVM go to **Tools → Sync Names in NLE → DaVinci Resolve**. Output appears
-in the LVM log dock (View → Log).
+> **Studio-only**: LVM-driven sync uses external Python scripting, which
+> Blackmagic gates behind a paid Studio license. Free Resolve users get
+> exactly the same renaming via the in-Resolve script described above —
+> the only difference is whether you click inside Resolve or inside LVM.
 
+When Studio is detected, LVM offers three entry points:
+
+- **Status-bar "Sync NLE Names" button** (right-hand side of LVM's status
+  bar) — one click, runs immediately.
+- **Tools → Sync Names in NLE → DaVinci Resolve** menu entry.
+- **Project Settings → NLE Companion Scripts → Auto-sync** — opt-in
+  toggle that fires the script automatically after every successful
+  promote, so editors never see template-named clips.
+
+All three stream output to LVM's log dock (View → Log). Under the hood
 LVM shells out to a Python subprocess with the standard
 `RESOLVE_SCRIPT_API` / `RESOLVE_SCRIPT_LIB` / `PYTHONPATH` env vars set,
-then runs the same script you'd run from Workspace → Scripts. The menu
-entry is disabled when Resolve's scripting modules aren't detected on
-this machine.
+then runs the same script you'd run from Workspace → Scripts.
 
-**Free DaVinci Resolve doesn't support external scripting** — Free users
-still have the in-NLE path (Workspace → Scripts → Edit →
-lvm_restore_versions), which is fully featured.
+The menu entry, button, and auto-sync toggle are all disabled (with a
+tooltip explaining why) when Resolve's scripting modules aren't detected
+on this machine — i.e. on Free Resolve, or when Resolve isn't installed.
 
 ## Roadmap
 
