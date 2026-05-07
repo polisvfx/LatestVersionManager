@@ -1,16 +1,19 @@
 # NLE Companion Scripts
 
 LVM promotes a versioned source (e.g. `SH0010_comp_v003.mov`) to a "latest"
-file (`SH0010_comp_latest.mov`) so DaVinci Resolve, Adobe Premiere, and other
-tools always read from a stable filename. The trade-off: an editor importing
-`SH0010_comp_latest.mov` sees `_latest` in the project panel and loses track
-of which actual version is on disk.
+file whose name is determined by your project's `file_rename_template` —
+typically `SH0010_comp_latest.mov`, but it could be `SH0010_comp_v999.mov`,
+`SH0010_comp_final.mov`, or anything else you configured. Whatever the
+template produces, an editor importing that file sees the template-named
+clip in the NLE's project panel and loses track of which actual version
+is on disk.
 
 The companion scripts under `companions/` fix this by reading the LVM
-sidecar (`.latest_history*.json`) next to the imported clip and renaming the
-**clip's display name** in the NLE to the source version
-(e.g. `SH0010_comp_v003.mov`). The on-disk file is never touched — LVM
-keeps owning it.
+sidecar (`.latest_history*.json`) next to the imported clip and renaming
+the **clip's display name** in the NLE to the **source filename recorded
+in the sidecar** — independent of whatever rename template produced the
+on-disk file (e.g. `SH0010_comp_v003.mov`). The on-disk file is never
+touched — LVM keeps owning it.
 
 Re-running is idempotent. Promoting a new version and re-running picks up
 the new version automatically.
@@ -106,11 +109,16 @@ B001C001_..._comp_latest.mov
 For each clip the script:
 
 1. Globs `.latest_history*.json` in the clip's directory.
-2. Reads each sidecar's `current` entry. The preferred match key is
-   `current.latest_basename` (added by LVM at promote time — the on-disk
-   stem like `A001C011_..._comp_latest`).
-3. Falls back to deriving the stem from `current.source` for older
-   sidecars written before the field existed.
+2. Reads each sidecar's `current` entry. The match key is
+   `current.latest_basename` — the actual on-disk stem LVM wrote
+   (whatever your `file_rename_template` produced). The script does **not**
+   look for the literal string `_latest`; it uses whatever name the sidecar
+   recorded.
+3. **Fallback for old sidecars** (no `latest_basename` field): derives a
+   stem from `current.source` assuming the default `{source_basename}_latest`
+   template. Custom templates with old sidecars won't match — re-promoting
+   once with current LVM regenerates the sidecar with `latest_basename` and
+   matching works from then on.
 4. Renames the clip to `basename(current.source)` for single files, or
    keeps the clip's frame number and extension and uses the source's stem
    for sequences.
@@ -121,20 +129,39 @@ Clips without a matching sidecar are left alone.
 
 ## Custom rename templates
 
-If a watched source uses a non-default `file_rename_template` (anything
-other than the default `{source_basename}_latest`), the
-`current.latest_basename` field added by recent LVM versions still
-captures the actual on-disk stem — matching works without configuration.
+The script is template-agnostic for sidecars written by current LVM. The
+`current.latest_basename` field captures the on-disk stem produced by your
+`file_rename_template` verbatim — `_latest`, `_v999`, `_final`,
+`_approved`, anything. The script never looks for the literal `_latest`
+string.
 
-For sidecars written before LVM added `latest_basename`, the fallback
-assumes the default `_latest` suffix. Custom templates with sidecars from
-that older era won't match — re-promote the source once with the current
-LVM to regenerate the sidecar with `latest_basename`.
+The only constraint is the legacy fallback: sidecars written by older LVM
+versions (before `latest_basename` existed) only match when the default
+`{source_basename}_latest` template was in use. Re-promote each source
+once with current LVM to upgrade its sidecar; from then on every template
+works.
 
 ---
 
+## Run from inside LVM (DaVinci Resolve Studio only)
+
+LVM can launch the Resolve companion script for you. Open Resolve, then in
+LVM go to **Tools → Sync Names in NLE → DaVinci Resolve**. Output appears
+in the LVM log dock (View → Log).
+
+LVM shells out to a Python subprocess with the standard
+`RESOLVE_SCRIPT_API` / `RESOLVE_SCRIPT_LIB` / `PYTHONPATH` env vars set,
+then runs the same script you'd run from Workspace → Scripts. The menu
+entry is disabled when Resolve's scripting modules aren't detected on
+this machine.
+
+**Free DaVinci Resolve doesn't support external scripting** — Free users
+still have the in-NLE path (Workspace → Scripts → Edit →
+lvm_restore_versions), which is fully featured.
+
 ## Roadmap
 
-- **v1.5** — LVM "Sync Names" toolbar button. Drives Resolve Studio via
-  external Python; signals a Premiere CEP panel via a file-based trigger.
+- **v1.5 (in progress)** — Premiere side: a CEP panel that listens for
+  LVM triggers via a file watcher, so LVM's "Sync Names" menu can drive
+  Premiere too.
 - **v2** — Premiere CEP panel ported to UXP for long-term Adobe support.

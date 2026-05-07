@@ -430,6 +430,9 @@ class ProjectConfig:
     # Source list column visibility — list of enabled optional column keys
     # Default: ["version", "status"]. Optional: "layers", "frames", "filetype", "added_on", "last_promoted"
     source_list_columns: list = field(default_factory=lambda: ["version", "status"])
+    # Auto-run the DaVinci Resolve companion script after a successful promote.
+    # Off by default so promote stays decoupled from the NLE.
+    nle_auto_sync_resolve: bool = False
     # Runtime only — not serialized, set by config loader
     project_dir: str = field(default="", repr=False)
 
@@ -489,6 +492,8 @@ class ProjectConfig:
             d["skip_resolve"] = False
         if self.source_list_columns != ["version", "status"]:
             d["source_list_columns"] = self.source_list_columns
+        if self.nle_auto_sync_resolve:
+            d["nle_auto_sync_resolve"] = True
         return d
 
     @classmethod
@@ -522,6 +527,7 @@ class ProjectConfig:
                 "layers" if c == "layer_count" else c
                 for c in data.get("source_list_columns", ["version", "status"])
             ],
+            nle_auto_sync_resolve=data.get("nle_auto_sync_resolve", False),
         )
 
 

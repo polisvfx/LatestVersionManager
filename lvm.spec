@@ -36,6 +36,11 @@ a = Analysis(
         ('resources/mp_logo_256.png', 'resources'),
         # Bundle the src package explicitly (it's a namespace package)
         ('src/lvm/*.py', 'src/lvm'),
+        # Bundle the NLE companion scripts so the bridge can launch them
+        # in frozen builds. Path resolution uses parents[2] of nle_bridge.py,
+        # which lands on _MEIPASS at runtime — keep this layout in sync.
+        ('companions/resolve/*.py', 'companions/resolve'),
+        ('companions/premiere/*.jsx', 'companions/premiere'),
     ] + _ffmpeg_binaries,
     hiddenimports=[
         # watchdog uses platform-specific backends selected at runtime

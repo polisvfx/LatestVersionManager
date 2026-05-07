@@ -474,6 +474,82 @@ class StatusWorker(QThread):
         self.finished.emit(source_status, target_conflicts, promoters, scanners)
 
 
+class SyncNamesWorker(QThread):
+    """Runs the Resolve companion script as a subprocess off the UI thread.
+
+    Streams stdout/stderr line-by-line to the GUI so the user sees progress
+    on large media pools (Resolve API calls can be slow). Emits ``done``
+    once the subprocess exits, with the final returncode.
+    """
+    line = Signal(str, str)        # stream ("stdout"|"stderr"), text
+    done = Signal(bool, int, str)  # ok, returncode, error
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._proc = None
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+    def run(self):
+        import subprocess
+        import threading
+        from src.lvm.nle_bridge import prepare_resolve_command
+
+        prep = prepare_resolve_command()
+        if prep.error:
+            self.done.emit(False, 1, prep.error)
+            return
+
+        try:
+            self._proc = subprocess.Popen(
+                prep.cmd,
+                env=prep.env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,  # line-buffered
+            )
+        except (OSError, FileNotFoundError) as e:
+            self.done.emit(False, 1, f"Could not launch interpreter: {e}")
+            return
+
+        def _pump(stream, label):
+            try:
+                for raw in iter(stream.readline, ""):
+                    line = raw.rstrip("\n").rstrip("\r")
+                    if line:
+                        self.line.emit(label, line)
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        t_out = threading.Thread(target=_pump, args=(self._proc.stdout, "stdout"),
+                                  daemon=True)
+        t_err = threading.Thread(target=_pump, args=(self._proc.stderr, "stderr"),
+                                  daemon=True)
+        t_out.start()
+        t_err.start()
+
+        rc = self._proc.wait()
+        # Drain pump threads so we don't lose trailing lines
+        t_out.join(timeout=2.0)
+        t_err.join(timeout=2.0)
+
+        if self._cancel_requested:
+            self.done.emit(False, rc, "Cancelled.")
+        else:
+            self.done.emit(rc == 0, rc, "")
+
+
 class ProjectLoadWorker(QThread):
     """Loads a project config + scan cache off the UI thread.
 
@@ -1226,6 +1302,7 @@ class ProjectSettingsDialog(QDialog):
     """Dialog for editing project-wide settings."""
 
     _last_geometry = None  # remember size/position within session
+    _collapsed_states: dict = {}  # title -> bool, remembered within session
 
     def __init__(self, config: ProjectConfig, selected_source: WatchedSource = None, parent=None):
         super().__init__(parent)
@@ -1235,10 +1312,13 @@ class ProjectSettingsDialog(QDialog):
         if ProjectSettingsDialog._last_geometry:
             self.restoreGeometry(ProjectSettingsDialog._last_geometry)
         else:
-            self.resize(700, 600)
+            # 25 % larger than the previous 700×600 default so all the
+            # help text and the new NLE section breathe.
+            self.resize(875, 750)
         self._config = config
         self._selected_source = selected_source
         self._naming_reset = False
+        self._sections: list = []  # (title, CollapsibleSection) for state save
 
         # Outer layout with scroll area
         outer = QVBoxLayout(self)
@@ -1279,7 +1359,7 @@ class ProjectSettingsDialog(QDialog):
         # ==================================================================
         # OUTPUT PATHS
         # ==================================================================
-        paths_section = CollapsibleSection("Output Paths")
+        paths_section = self._make_section("Output Paths")
         paths = paths_section.content_layout()
 
         template_help = QLabel(
@@ -1323,7 +1403,7 @@ class ProjectSettingsDialog(QDialog):
         # ==================================================================
         # SOURCE NAMING & DETECTION
         # ==================================================================
-        naming_section = CollapsibleSection("Source Naming && Detection")
+        naming_section = self._make_section("Source Naming && Detection")
         naming = naming_section.content_layout()
 
         # --- Naming rule (improved display) ---
@@ -1378,7 +1458,7 @@ class ProjectSettingsDialog(QDialog):
         # ==================================================================
         # DISCOVERY FILTERS
         # ==================================================================
-        filters_section = CollapsibleSection("Discovery Filters")
+        filters_section = self._make_section("Discovery Filters")
         filters = filters_section.content_layout()
 
         self.whitelist_edit = TagInputWidget(config.name_whitelist, placeholder="Type and press comma to add...")
@@ -1392,7 +1472,7 @@ class ProjectSettingsDialog(QDialog):
         # ==================================================================
         # ADVANCED (collapsed by default)
         # ==================================================================
-        advanced_section = CollapsibleSection("Advanced", collapsed=True)
+        advanced_section = self._make_section("Advanced", collapsed=True)
         adv = advanced_section.content_layout()
 
         # Link mode
@@ -1461,6 +1541,66 @@ class ProjectSettingsDialog(QDialog):
         adv.addRow("", skip_resolve_help)
 
         top_layout.addWidget(advanced_section)
+
+        # ==================================================================
+        # NLE COMPANION SCRIPTS
+        # ==================================================================
+        nle_section = self._make_section("NLE Companion Scripts")
+        nle = nle_section.content_layout()
+
+        from src.lvm.nle_bridge import is_resolve_external_available
+
+        nle_help = QLabel(
+            "Renames clip display names in Resolve / Premiere to the source "
+            "filename recorded in the LVM sidecar — independent of the rename "
+            "template, so this works whether your output is named *_latest.*, "
+            "*_v999.*, *_final.*, or anything else. The on-disk file is "
+            "untouched."
+        )
+        nle_help.setWordWrap(True)
+        nle_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
+        nle.addRow("", nle_help)
+
+        resolve_available = is_resolve_external_available()
+        status_text = ("DaVinci Resolve Studio: detected"
+                       if resolve_available
+                       else "DaVinci Resolve Studio: not detected (Free edition "
+                            "can still use Workspace → Scripts → Edit → "
+                            "lvm_restore_versions)")
+        resolve_status = QLabel(status_text)
+        resolve_status.setWordWrap(True)
+        resolve_status.setStyleSheet(
+            "color: #3aaa88; font-size: 11pt;" if resolve_available
+            else "color: #ffaa00; font-size: 11pt;"
+        )
+        nle.addRow("Status:", resolve_status)
+
+        self.nle_auto_sync_resolve_cb = QCheckBox(
+            "Run the Resolve script automatically after every successful promote"
+        )
+        self.nle_auto_sync_resolve_cb.setChecked(
+            getattr(config, "nle_auto_sync_resolve", False)
+        )
+        self.nle_auto_sync_resolve_cb.setEnabled(resolve_available)
+        if not resolve_available:
+            self.nle_auto_sync_resolve_cb.setToolTip(
+                "Requires DaVinci Resolve Studio. Free Resolve users can run "
+                "the script manually from inside Resolve."
+            )
+        nle.addRow("Auto-sync:", self.nle_auto_sync_resolve_cb)
+
+        auto_help = QLabel(
+            "When enabled, every successful promote (or batch promote) "
+            "immediately runs the rename script against a running Resolve, "
+            "so editors never see the stale, template-named clips. Output "
+            "goes to the log dock. Off by default — promote stays decoupled "
+            "from the NLE."
+        )
+        auto_help.setWordWrap(True)
+        auto_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
+        nle.addRow("", auto_help)
+
+        top_layout.addWidget(nle_section)
 
         # ==================================================================
         # Footer (Save as Template + OK/Cancel)
@@ -1642,6 +1782,20 @@ class ProjectSettingsDialog(QDialog):
         self.naming_label.setText("(will be re-asked on next ingest)")
         self.naming_label.setStyleSheet("color: #ffaa00;")
 
+    def _make_section(self, title: str, collapsed: bool = False) -> CollapsibleSection:
+        """Create a CollapsibleSection that remembers its collapsed state.
+
+        Per-title state is stored on the class and survives across dialog
+        opens within the session. The *collapsed* arg is the first-time
+        default — used only when this title hasn't been seen before.
+        """
+        remembered = ProjectSettingsDialog._collapsed_states.get(title)
+        if remembered is not None:
+            collapsed = remembered
+        section = CollapsibleSection(title, collapsed=collapsed)
+        self._sections.append((title, section))
+        return section
+
     def apply_to_config(self, config: ProjectConfig):
         """Apply dialog values back to the config."""
         config.project_name = self.name_edit.text().strip() or "Untitled"
@@ -1684,11 +1838,16 @@ class ProjectSettingsDialog(QDialog):
         # Network performance
         config.skip_resolve = self.skip_resolve_cb.isChecked()
 
+        # NLE companion scripts
+        config.nle_auto_sync_resolve = self.nle_auto_sync_resolve_cb.isChecked()
+
         # Re-apply defaults to non-overridden sources
         apply_project_defaults(config)
 
     def done(self, result):
         ProjectSettingsDialog._last_geometry = self.saveGeometry()
+        for title, section in self._sections:
+            ProjectSettingsDialog._collapsed_states[title] = section._collapsed
         super().done(result)
 
     def _save_as_template(self):
@@ -4096,6 +4255,21 @@ class MainWindow(QMainWindow):
         self._scan_indicator = QLabel("")
         self._scan_indicator.setStyleSheet("color: #8c8c8c; font-size: 11pt; margin-right: 8px;")
         self.statusBar().addPermanentWidget(self._scan_indicator)
+
+        # NLE sync indicator — flat button so the user can click to sync without
+        # hunting through the Tools menu. Greyed out when no NLE is detected.
+        self._nle_sync_btn = QPushButton("")
+        self._nle_sync_btn.setFlat(True)
+        self._nle_sync_btn.setCursor(Qt.PointingHandCursor)
+        self._nle_sync_btn.setStyleSheet(
+            "QPushButton { font-size: 11pt; padding: 2px 8px; margin-right: 4px; "
+            "border: 1px solid #555; border-radius: 3px; }"
+            "QPushButton:hover:!disabled { background-color: #3a3a3a; }"
+            "QPushButton:disabled { color: #6c6c6c; border-color: #3a3a3a; }"
+        )
+        self._nle_sync_btn.clicked.connect(self._sync_names_resolve)
+        self.statusBar().addPermanentWidget(self._nle_sync_btn)
+
         self.statusBar().showMessage("Ready")
 
     def _build_menu(self):
@@ -4163,6 +4337,14 @@ class MainWindow(QMainWindow):
         validate_action = QAction("&Validate Config", self)
         validate_action.triggered.connect(self._validate_config)
         tools_menu.addAction(validate_action)
+
+        tools_menu.addSeparator()
+
+        sync_names_menu = tools_menu.addMenu("Sync &Names in NLE")
+        self._sync_names_resolve_action = QAction("DaVinci &Resolve", self)
+        self._sync_names_resolve_action.triggered.connect(self._sync_names_resolve)
+        sync_names_menu.addAction(self._sync_names_resolve_action)
+        self._refresh_sync_names_state()
 
         view_menu = menubar.addMenu("&View")
         self.log_dock_action = self.log_dock.toggleViewAction()
@@ -4359,6 +4541,7 @@ class MainWindow(QMainWindow):
             self.project_label.setStyleSheet("color: #c0c0c0; font-weight: bold;")
             self._dirty = False
             self._update_title()
+            self._refresh_sync_names_state()
             self.statusBar().showMessage(f"Loaded: {path}")
         finally:
             self._project_load_worker = None
@@ -4465,6 +4648,7 @@ class MainWindow(QMainWindow):
             if self.config_path:
                 self._save_project()
             self._refresh_all_with_selection()
+            self._refresh_sync_names_state()
             self.statusBar().showMessage("Project settings updated")
 
     def _open_discover(self):
@@ -5000,6 +5184,7 @@ class MainWindow(QMainWindow):
                 self._versions_cache.pop(name, None)
             self._process_deferred_or_refresh(promoted_names)
             self.statusBar().showMessage(f"Batch promotion complete: {count} source(s)")
+            self._maybe_auto_sync_nle()
             return
 
         source, version = self._batch_promote_list[self._batch_promote_index]
@@ -5763,6 +5948,118 @@ class MainWindow(QMainWindow):
             json.dump(report, f, indent=2, ensure_ascii=False)
         self.statusBar().showMessage(f"Report exported to: {filepath}")
 
+    def _refresh_sync_names_state(self):
+        """Refresh the sync Names menu and status-bar button based on what's installed."""
+        try:
+            from src.lvm.nle_bridge import is_resolve_external_available
+            available = is_resolve_external_available()
+        except ImportError:
+            available = False
+
+        running = (getattr(self, "_sync_names_worker", None) is not None and
+                   self._sync_names_worker.isRunning())
+
+        if available:
+            menu_tip = ("Run the LVM rename script against a running "
+                        "DaVinci Resolve Studio (Resolve must be open).")
+        else:
+            menu_tip = ("Requires DaVinci Resolve Studio (free version supports "
+                        "the in-NLE script only: Workspace -> Scripts -> Edit -> "
+                        "lvm_restore_versions).")
+        self._sync_names_resolve_action.setEnabled(available and not running)
+        self._sync_names_resolve_action.setToolTip(menu_tip)
+
+        # Status-bar button mirror: same enabled state, different label
+        if hasattr(self, "_nle_sync_btn"):
+            if running:
+                self._nle_sync_btn.setText("Syncing NLE…")
+                self._nle_sync_btn.setEnabled(False)
+                self._nle_sync_btn.setToolTip(
+                    "Sync in progress — see the log dock for details."
+                )
+            elif available:
+                self._nle_sync_btn.setText("Sync NLE Names")
+                self._nle_sync_btn.setEnabled(True)
+                auto = (self.config and
+                        getattr(self.config, "nle_auto_sync_resolve", False))
+                hint = " (auto-sync after promote enabled)" if auto else ""
+                self._nle_sync_btn.setToolTip(
+                    "Click to run the Resolve rename script now." + hint
+                )
+            else:
+                self._nle_sync_btn.setText("NLE: not detected")
+                self._nle_sync_btn.setEnabled(False)
+                self._nle_sync_btn.setToolTip(menu_tip)
+
+    def _sync_names_resolve(self, *, automatic: bool = False):
+        """Spawn the Resolve companion script and stream results to the log dock.
+
+        ``automatic=True`` is set when this is fired from the post-promote
+        auto-sync hook — it suppresses the modal "already running" dialog
+        (just logs and exits) and tags the launch line for log clarity.
+        """
+        if getattr(self, "_sync_names_worker", None) is not None and \
+                self._sync_names_worker.isRunning():
+            if automatic:
+                logger.info("Sync Names: skipping auto-sync — a previous sync "
+                            "is still running.")
+                return
+            QMessageBox.information(
+                self, "Sync Names",
+                "A sync is already in progress. Wait for it to finish.",
+            )
+            return
+
+        self._refresh_sync_names_state()
+        self.log_dock.setVisible(True)
+        prefix = "auto-sync after promote" if automatic else "manual sync"
+        logger.info("Sync Names (%s): launching DaVinci Resolve companion "
+                    "script (this can take a while on large projects)...", prefix)
+
+        worker = SyncNamesWorker(self)
+        worker.line.connect(self._on_sync_names_line)
+        worker.done.connect(self._on_sync_names_done)
+        self._sync_names_worker = worker
+        worker.start()
+        self._refresh_sync_names_state()
+
+    def _maybe_auto_sync_nle(self):
+        """Trigger the Resolve companion script if the project opted in.
+
+        Called at the end of a successful promote (single or batch) so
+        editors don't need to think about the rename script themselves.
+        """
+        if not self.config:
+            return
+        if not getattr(self.config, "nle_auto_sync_resolve", False):
+            return
+        try:
+            from src.lvm.nle_bridge import is_resolve_external_available
+        except ImportError:
+            return
+        if not is_resolve_external_available():
+            logger.info("Auto-sync NLE: skipped (Resolve not detected on this "
+                        "machine).")
+            return
+        self._sync_names_resolve(automatic=True)
+
+    def _on_sync_names_line(self, stream: str, text: str):
+        if stream == "stderr":
+            logger.warning("[resolve] %s", text)
+        else:
+            logger.info("[resolve] %s", text)
+
+    def _on_sync_names_done(self, ok: bool, returncode: int, error: str):
+        if error:
+            logger.error("Sync Names: %s", error)
+        if ok:
+            logger.info("Sync Names: completed successfully.")
+        else:
+            logger.warning("Sync Names: finished with rc=%s.", returncode)
+
+        self._sync_names_worker = None
+        self._refresh_sync_names_state()
+
     def _validate_config(self):
         """Validate the current project config and show results."""
         import re as _re
@@ -6414,6 +6711,7 @@ class MainWindow(QMainWindow):
         # Rescan only the promoted source instead of all sources
         self._versions_cache.pop(promoted_name, None)
         self._process_deferred_or_refresh([promoted_name], select_source=promoted_name)
+        self._maybe_auto_sync_nle()
 
     def _on_promote_error(self, error_msg):
         self._worker = None
