@@ -41,6 +41,13 @@ a = Analysis(
         # which lands on _MEIPASS at runtime — keep this layout in sync.
         ('companions/resolve/*.py', 'companions/resolve'),
         ('companions/premiere/*.jsx', 'companions/premiere'),
+        # CEP panel for Premiere — users install this from the bundled
+        # tree to their Adobe CEP extensions folder.
+        ('companions/premiere/lvm_panel/CSXS/*.xml', 'companions/premiere/lvm_panel/CSXS'),
+        ('companions/premiere/lvm_panel/lib/*.js',   'companions/premiere/lvm_panel/lib'),
+        ('companions/premiere/lvm_panel/*.html',     'companions/premiere/lvm_panel'),
+        ('companions/premiere/lvm_panel/*.js',       'companions/premiere/lvm_panel'),
+        ('companions/premiere/lvm_panel/*.jsx',      'companions/premiere/lvm_panel'),
     ] + _ffmpeg_binaries,
     hiddenimports=[
         # watchdog uses platform-specific backends selected at runtime

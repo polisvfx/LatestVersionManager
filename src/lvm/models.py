@@ -433,6 +433,9 @@ class ProjectConfig:
     # Auto-run the DaVinci Resolve companion script after a successful promote.
     # Off by default so promote stays decoupled from the NLE.
     nle_auto_sync_resolve: bool = False
+    # Auto-write a Premiere trigger (picked up by the installed CEP panel)
+    # after a successful promote. Off by default.
+    nle_auto_sync_premiere: bool = False
     # Runtime only — not serialized, set by config loader
     project_dir: str = field(default="", repr=False)
 
@@ -494,6 +497,8 @@ class ProjectConfig:
             d["source_list_columns"] = self.source_list_columns
         if self.nle_auto_sync_resolve:
             d["nle_auto_sync_resolve"] = True
+        if self.nle_auto_sync_premiere:
+            d["nle_auto_sync_premiere"] = True
         return d
 
     @classmethod
@@ -528,6 +533,7 @@ class ProjectConfig:
                 for c in data.get("source_list_columns", ["version", "status"])
             ],
             nle_auto_sync_resolve=data.get("nle_auto_sync_resolve", False),
+            nle_auto_sync_premiere=data.get("nle_auto_sync_premiere", False),
         )
 
 

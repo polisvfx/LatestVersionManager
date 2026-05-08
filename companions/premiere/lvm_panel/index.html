@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>LVM Sync Versions</title>
+    <style>
+        :root { color-scheme: dark; }
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: #232323;
+            color: #d0d0d0;
+            font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+            font-size: 12px;
+            height: 100%;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        header {
+            font-weight: 600;
+            font-size: 13px;
+            margin-bottom: 8px;
+            color: #e8e8e8;
+        }
+        #status {
+            padding: 6px 8px;
+            background: #1c1c1c;
+            border-left: 3px solid #888;
+            margin-bottom: 8px;
+            min-height: 20px;
+            font-size: 11px;
+            color: #a8a8a8;
+        }
+        #status.ready { border-left-color: #3aaa88; color: #c8e8d8; }
+        #status.busy  { border-left-color: #d8a64a; color: #f0d6a0; }
+        #status.error { border-left-color: #d65a5a; color: #f0c0c0; }
+        button {
+            padding: 6px 12px;
+            background: #3a3a3a;
+            color: #e0e0e0;
+            border: 1px solid #555;
+            border-radius: 3px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        button:hover:not(:disabled) { background: #4a4a4a; }
+        button:disabled { color: #888; cursor: default; }
+        #log {
+            flex: 1;
+            margin-top: 8px;
+            padding: 6px 8px;
+            background: #181818;
+            border-radius: 3px;
+            overflow-y: auto;
+            font-family: Consolas, Monaco, monospace;
+            font-size: 11px;
+            white-space: pre-wrap;
+            color: #b8b8b8;
+        }
+        .log-info  { color: #b8b8b8; }
+        .log-warn  { color: #f0d6a0; }
+        .log-error { color: #f0c0c0; }
+        footer {
+            margin-top: 6px;
+            font-size: 10px;
+            color: #707070;
+        }
+    </style>
+</head>
+<body>
+    <header>LVM Sync Versions</header>
+    <div id="status">Initialising…</div>
+    <button id="sync-now">Sync Versions Now</button>
+    <div id="log"></div>
+    <footer id="footer">v1.0.0</footer>
+
+    <script src="./lib/CSInterface.js"></script>
+    <script src="./main.js"></script>
+</body>
+</html>

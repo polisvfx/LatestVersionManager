@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LVM Sync Versions panel for Adobe Premiere Pro.
+
+  CEP extension that watches %APPDATA%/LVM/triggers/ for trigger files
+  written by the Latest Version Manager desktop app. When a trigger
+  appears the panel runs the rename logic in host.jsx via
+  CSInterface.evalScript() and then deletes the trigger.
+
+  Also runs the same logic on demand from the panel's own button.
+
+  Targets Premiere Pro CC 2020+ (PPRO 14.0). ExtendScript is supported by
+  Adobe through September 2026; UXP port is on the roadmap.
+-->
+<ExtensionManifest Version="6.0" ExtensionBundleId="com.polisvfx.lvm.panel"
+    ExtensionBundleVersion="1.0.0"
+    ExtensionBundleName="LVM Sync Versions"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <ExtensionList>
+    <Extension Id="com.polisvfx.lvm.panel.main" Version="1.0.0"/>
+  </ExtensionList>
+  <ExecutionEnvironment>
+    <HostList>
+      <Host Name="PPRO" Version="[14.0,99.9]"/>
+    </HostList>
+    <LocaleList>
+      <Locale Code="All"/>
+    </LocaleList>
+    <RequiredRuntimeList>
+      <RequiredRuntime Name="CSXS" Version="9.0"/>
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList>
+    <Extension Id="com.polisvfx.lvm.panel.main">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./index.html</MainPath>
+          <ScriptPath>./host.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--mixed-context</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Panel</Type>
+          <Menu>LVM Sync Versions</Menu>
+          <Geometry>
+            <Size><Height>240</Height><Width>320</Width></Size>
+            <MinSize><Height>180</Height><Width>260</Width></MinSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+</ExtensionManifest>

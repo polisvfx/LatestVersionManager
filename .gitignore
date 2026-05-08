@@ -15,6 +15,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+# The CEP panel ships a vendored CSInterface lib that must be tracked.
+!companions/premiere/lvm_panel/lib/
+!companions/premiere/lvm_panel/lib/**
 lib64/
 parts/
 sdist/

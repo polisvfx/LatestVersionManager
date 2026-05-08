@@ -320,5 +320,99 @@ class TestRunResolveInProcess(unittest.TestCase):
         self.assertTrue(any("failed to load" in msg for _, msg in logged))
 
 
+class TestPremiereBridge(unittest.TestCase):
+    """Trigger writer + heartbeat detection for the Premiere CEP panel."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = Path(tempfile.mkdtemp(prefix="lvm_premiere_"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _patch_data_dir(self):
+        return mock.patch.object(nle_bridge, "lvm_data_dir",
+                                  return_value=self._tmp)
+
+    def test_lvm_data_dir_is_under_user_home(self):
+        d = nle_bridge.lvm_data_dir()
+        self.assertEqual(d.name, "LVM")
+        # Doesn't have to exist, just be a sensible absolute path.
+        self.assertTrue(d.is_absolute())
+
+    def test_trigger_dir_under_data_dir(self):
+        with self._patch_data_dir():
+            self.assertEqual(nle_bridge.premiere_trigger_dir(),
+                             self._tmp / "triggers")
+
+    def test_heartbeat_path_under_data_dir(self):
+        with self._patch_data_dir():
+            self.assertEqual(nle_bridge.premiere_heartbeat_path(),
+                             self._tmp / "heartbeat" / "premiere.json")
+
+    def test_panel_alive_false_when_heartbeat_missing(self):
+        with self._patch_data_dir():
+            self.assertFalse(nle_bridge.is_premiere_panel_alive())
+
+    def test_panel_alive_true_when_heartbeat_fresh(self):
+        with self._patch_data_dir():
+            hb = nle_bridge.premiere_heartbeat_path()
+            hb.parent.mkdir(parents=True, exist_ok=True)
+            hb.write_text('{"updated_at":"now"}')
+            self.assertTrue(nle_bridge.is_premiere_panel_alive())
+
+    def test_panel_alive_false_when_heartbeat_stale(self):
+        import os
+        with self._patch_data_dir():
+            hb = nle_bridge.premiere_heartbeat_path()
+            hb.parent.mkdir(parents=True, exist_ok=True)
+            hb.write_text('{"updated_at":"old"}')
+            # Backdate well past the freshness window.
+            old = hb.stat().st_mtime - (nle_bridge.PREMIERE_HEARTBEAT_MAX_AGE + 60)
+            os.utime(hb, (old, old))
+            self.assertFalse(nle_bridge.is_premiere_panel_alive())
+
+    def test_write_trigger_creates_atomic_json(self):
+        import json
+        with self._patch_data_dir():
+            path = nle_bridge.write_premiere_trigger({"foo": "bar"})
+
+        self.assertTrue(path.is_file())
+        self.assertTrue(path.name.endswith(".json"))
+        body = json.loads(path.read_text())
+        self.assertEqual(body["foo"], "bar")
+        # Trigger writer fills in defaults the panel keys off of.
+        self.assertIn("id", body)
+        self.assertIn("issued_at", body)
+        self.assertEqual(body["source_app"], "lvm")
+        # No leftover .tmp files after the rename.
+        leftovers = list(path.parent.glob("*.tmp"))
+        self.assertEqual(leftovers, [])
+
+    def test_write_trigger_creates_dir_if_missing(self):
+        with self._patch_data_dir():
+            self.assertFalse((self._tmp / "triggers").exists())
+            nle_bridge.write_premiere_trigger()
+            self.assertTrue((self._tmp / "triggers").is_dir())
+
+    def test_panel_install_dir_returns_path_on_supported_oses(self):
+        # On Win/macOS we expect a concrete path; Linux returns None.
+        d = nle_bridge.premiere_panel_install_dir()
+        if sys.platform.startswith(("win", "darwin", "cygwin")):
+            self.assertIsNotNone(d)
+            self.assertTrue(d.is_absolute())
+            self.assertTrue(d.name.startswith("com.polisvfx.lvm"))
+        else:
+            self.assertIsNone(d)
+
+    def test_panel_source_dir_points_at_bundled_panel(self):
+        d = nle_bridge.premiere_panel_source_dir()
+        self.assertTrue((d / "CSXS" / "manifest.xml").is_file())
+        self.assertTrue((d / "host.jsx").is_file())
+        self.assertTrue((d / "main.js").is_file())
+        self.assertTrue((d / "index.html").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

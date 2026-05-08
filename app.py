@@ -1499,7 +1499,11 @@ class ProjectSettingsDialog(QDialog):
         nle_section = self._make_section("NLE Companion Scripts")
         nle = nle_section.content_layout()
 
-        from src.lvm.nle_bridge import is_resolve_external_available
+        from src.lvm.nle_bridge import (
+            is_resolve_external_available,
+            is_premiere_panel_alive,
+            premiere_panel_install_dir,
+        )
 
         nle_help = QLabel(
             "Renames clip display names in Resolve / Premiere to the source "
@@ -1554,6 +1558,45 @@ class ProjectSettingsDialog(QDialog):
         auto_help.setWordWrap(True)
         auto_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
         nle.addRow("", auto_help)
+
+        # ----- Premiere row -----
+        premiere_alive = is_premiere_panel_alive()
+        premiere_install_dir = premiere_panel_install_dir()
+        if premiere_alive:
+            p_status_text = "LVM Premiere panel: connected"
+        elif premiere_install_dir is None:
+            p_status_text = "Adobe Premiere isn't supported on this OS."
+        else:
+            p_status_text = (
+                "LVM Premiere panel: not detected. Install the panel from "
+                "companions/premiere/lvm_panel/ into your Adobe CEP "
+                "extensions folder, then open Premiere. See docs/companions.md."
+            )
+        premiere_status = QLabel(p_status_text)
+        premiere_status.setWordWrap(True)
+        premiere_status.setStyleSheet(
+            "color: #3aaa88; font-size: 11pt;" if premiere_alive
+            else "color: #ffaa00; font-size: 11pt;"
+        )
+        nle.addRow("Premiere:", premiere_status)
+
+        self.nle_auto_sync_premiere_cb = QCheckBox(
+            "Write a Premiere sync trigger automatically after every "
+            "successful promote"
+        )
+        self.nle_auto_sync_premiere_cb.setChecked(
+            getattr(config, "nle_auto_sync_premiere", False)
+        )
+        if not premiere_alive:
+            # Allow toggling the setting even when the panel isn't currently
+            # alive — the user may be configuring before installing or
+            # before opening Premiere. The trigger writer is silent on
+            # missing panels at runtime (logs and skips).
+            self.nle_auto_sync_premiere_cb.setToolTip(
+                "Setting persists even when the panel isn't running; the "
+                "trigger writer skips gracefully if Premiere isn't open."
+            )
+        nle.addRow("", self.nle_auto_sync_premiere_cb)
 
         top_layout.addWidget(nle_section)
 
@@ -1795,6 +1838,7 @@ class ProjectSettingsDialog(QDialog):
 
         # NLE companion scripts
         config.nle_auto_sync_resolve = self.nle_auto_sync_resolve_cb.isChecked()
+        config.nle_auto_sync_premiere = self.nle_auto_sync_premiere_cb.isChecked()
 
         # Re-apply defaults to non-overridden sources
         apply_project_defaults(config)
@@ -4211,19 +4255,36 @@ class MainWindow(QMainWindow):
         self._scan_indicator.setStyleSheet("color: #8c8c8c; font-size: 11pt; margin-right: 8px;")
         self.statusBar().addPermanentWidget(self._scan_indicator)
 
-        # NLE sync indicator — flat button so the user can click to sync without
-        # hunting through the Tools menu. Greyed out when no NLE is detected.
-        self._nle_sync_btn = QPushButton("")
-        self._nle_sync_btn.setFlat(True)
-        self._nle_sync_btn.setCursor(Qt.PointingHandCursor)
-        self._nle_sync_btn.setStyleSheet(
+        # NLE sync indicators — flat buttons so the user can click to sync
+        # without hunting through the Tools menu. Greyed out when the
+        # corresponding NLE isn't detected.
+        nle_btn_style = (
             "QPushButton { font-size: 11pt; padding: 2px 8px; margin-right: 4px; "
             "border: 1px solid #555; border-radius: 3px; }"
             "QPushButton:hover:!disabled { background-color: #3a3a3a; }"
             "QPushButton:disabled { color: #6c6c6c; border-color: #3a3a3a; }"
         )
+        self._nle_sync_btn = QPushButton("")
+        self._nle_sync_btn.setFlat(True)
+        self._nle_sync_btn.setCursor(Qt.PointingHandCursor)
+        self._nle_sync_btn.setStyleSheet(nle_btn_style)
         self._nle_sync_btn.clicked.connect(self._sync_names_resolve)
         self.statusBar().addPermanentWidget(self._nle_sync_btn)
+
+        self._nle_premiere_btn = QPushButton("")
+        self._nle_premiere_btn.setFlat(True)
+        self._nle_premiere_btn.setCursor(Qt.PointingHandCursor)
+        self._nle_premiere_btn.setStyleSheet(nle_btn_style)
+        self._nle_premiere_btn.clicked.connect(self._sync_names_premiere)
+        self.statusBar().addPermanentWidget(self._nle_premiere_btn)
+
+        # Premiere panel heartbeat goes stale ~60 s after the panel stops
+        # writing it. Polling at 30 s flips the button between "Sync
+        # Premiere" and "Premiere: not detected" within one window.
+        self._nle_state_timer = QTimer(self)
+        self._nle_state_timer.setInterval(30000)
+        self._nle_state_timer.timeout.connect(self._refresh_sync_names_state)
+        self._nle_state_timer.start()
 
         self.statusBar().showMessage("Ready")
 
@@ -4299,6 +4360,9 @@ class MainWindow(QMainWindow):
         self._sync_names_resolve_action = QAction("DaVinci &Resolve", self)
         self._sync_names_resolve_action.triggered.connect(self._sync_names_resolve)
         sync_names_menu.addAction(self._sync_names_resolve_action)
+        self._sync_names_premiere_action = QAction("Adobe &Premiere", self)
+        self._sync_names_premiere_action.triggered.connect(self._sync_names_premiere)
+        sync_names_menu.addAction(self._sync_names_premiere_action)
         self._refresh_sync_names_state()
 
         view_menu = menubar.addMenu("&View")
@@ -5904,47 +5968,82 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Report exported to: {filepath}")
 
     def _refresh_sync_names_state(self):
-        """Refresh the sync Names menu and status-bar button based on what's installed."""
+        """Refresh the sync menu and status-bar buttons based on what's installed."""
         try:
-            from src.lvm.nle_bridge import is_resolve_external_available
-            available = is_resolve_external_available()
+            from src.lvm.nle_bridge import (
+                is_resolve_external_available,
+                is_premiere_panel_alive,
+                premiere_panel_install_dir,
+            )
+            resolve_available = is_resolve_external_available()
+            premiere_alive = is_premiere_panel_alive()
+            premiere_install_dir = premiere_panel_install_dir()
         except ImportError:
-            available = False
+            resolve_available = False
+            premiere_alive = False
+            premiere_install_dir = None
 
-        running = (getattr(self, "_sync_names_worker", None) is not None and
-                   self._sync_names_worker.isRunning())
+        # ----- Resolve menu + button -----
+        running_resolve = (getattr(self, "_sync_names_worker", None) is not None and
+                           self._sync_names_worker.isRunning())
 
-        if available:
-            menu_tip = ("Run the LVM rename script against a running "
-                        "DaVinci Resolve Studio (Resolve must be open).")
+        if resolve_available:
+            r_tip = ("Run the LVM rename script against a running "
+                     "DaVinci Resolve Studio (Resolve must be open).")
         else:
-            menu_tip = ("Requires DaVinci Resolve Studio (free version supports "
-                        "the in-NLE script only: Workspace -> Scripts -> Edit -> "
-                        "lvm_restore_versions).")
-        self._sync_names_resolve_action.setEnabled(available and not running)
-        self._sync_names_resolve_action.setToolTip(menu_tip)
+            r_tip = ("Requires DaVinci Resolve Studio (free version supports "
+                     "the in-NLE script only: Workspace -> Scripts -> Edit -> "
+                     "lvm_restore_versions).")
+        self._sync_names_resolve_action.setEnabled(resolve_available and not running_resolve)
+        self._sync_names_resolve_action.setToolTip(r_tip)
 
-        # Status-bar button mirror: same enabled state, different label
         if hasattr(self, "_nle_sync_btn"):
-            if running:
-                self._nle_sync_btn.setText("Syncing NLE…")
+            if running_resolve:
+                self._nle_sync_btn.setText("Syncing Resolve…")
                 self._nle_sync_btn.setEnabled(False)
-                self._nle_sync_btn.setToolTip(
-                    "Sync in progress — see the log dock for details."
-                )
-            elif available:
-                self._nle_sync_btn.setText("Sync NLE Names")
+                self._nle_sync_btn.setToolTip("Sync in progress — see log dock.")
+            elif resolve_available:
+                self._nle_sync_btn.setText("Sync Resolve")
                 self._nle_sync_btn.setEnabled(True)
                 auto = (self.config and
                         getattr(self.config, "nle_auto_sync_resolve", False))
                 hint = " (auto-sync after promote enabled)" if auto else ""
                 self._nle_sync_btn.setToolTip(
-                    "Click to run the Resolve rename script now." + hint
-                )
+                    "Click to run the Resolve rename script now." + hint)
             else:
-                self._nle_sync_btn.setText("NLE: not detected")
+                self._nle_sync_btn.setText("Resolve: not detected")
                 self._nle_sync_btn.setEnabled(False)
-                self._nle_sync_btn.setToolTip(menu_tip)
+                self._nle_sync_btn.setToolTip(r_tip)
+
+        # ----- Premiere menu + button -----
+        # The Premiere bridge is fire-and-forget — LVM writes a trigger
+        # file and the panel handles it asynchronously. There's no
+        # "running" state to gate against.
+        if premiere_alive:
+            p_tip = ("Write a sync trigger to the LVM Premiere panel "
+                     "(panel processes it within ~1s).")
+        elif premiere_install_dir is None:
+            p_tip = "Adobe Premiere isn't supported on this OS."
+        else:
+            p_tip = (f"LVM Premiere panel not detected. Install the panel from "
+                     f"companions/premiere/lvm_panel/ into\n{premiere_install_dir}\n"
+                     f"and start Premiere. See docs/companions.md.")
+        self._sync_names_premiere_action.setEnabled(premiere_alive)
+        self._sync_names_premiere_action.setToolTip(p_tip)
+
+        if hasattr(self, "_nle_premiere_btn"):
+            if premiere_alive:
+                self._nle_premiere_btn.setText("Sync Premiere")
+                self._nle_premiere_btn.setEnabled(True)
+                auto = (self.config and
+                        getattr(self.config, "nle_auto_sync_premiere", False))
+                hint = " (auto-sync after promote enabled)" if auto else ""
+                self._nle_premiere_btn.setToolTip(
+                    "Click to write a Premiere sync trigger now." + hint)
+            else:
+                self._nle_premiere_btn.setText("Premiere: not detected")
+                self._nle_premiere_btn.setEnabled(False)
+                self._nle_premiere_btn.setToolTip(p_tip)
 
     def _sync_names_resolve(self, *, automatic: bool = False):
         """Spawn the Resolve companion script and stream results to the log dock.
@@ -5978,25 +6077,75 @@ class MainWindow(QMainWindow):
         worker.start()
         self._refresh_sync_names_state()
 
+    def _sync_names_premiere(self, *, automatic: bool = False):
+        """Write a Premiere sync trigger file. The installed CEP panel picks it up.
+
+        Fire-and-forget — the panel runs the rename inside Premiere and
+        deletes the trigger when done. No subprocess, no port, no waiting.
+        """
+        try:
+            from src.lvm.nle_bridge import (
+                write_premiere_trigger,
+                is_premiere_panel_alive,
+            )
+        except ImportError:
+            logger.error("Sync Names → Premiere: bridge unavailable in this build.")
+            return
+
+        if not is_premiere_panel_alive():
+            if automatic:
+                logger.info("Auto-sync Premiere: skipped (panel not running).")
+                return
+            QMessageBox.information(
+                self, "Sync Names → Premiere",
+                "The LVM Premiere panel isn't running.\n\n"
+                "Install the panel from companions/premiere/lvm_panel/ "
+                "into your Adobe CEP extensions folder and open Premiere "
+                "to load it. See docs/companions.md.",
+            )
+            return
+
+        try:
+            path = write_premiere_trigger({
+                "automatic": bool(automatic),
+            })
+        except OSError as e:
+            logger.error("Sync Names → Premiere: could not write trigger: %s", e)
+            return
+
+        prefix = "auto-sync after promote" if automatic else "manual sync"
+        logger.info("Sync Names → Premiere (%s): trigger %s written; panel "
+                    "should process it shortly.", prefix, path.name)
+
     def _maybe_auto_sync_nle(self):
-        """Trigger the Resolve companion script if the project opted in.
+        """Trigger NLE renames if the project opted in.
 
         Called at the end of a successful promote (single or batch) so
-        editors don't need to think about the rename script themselves.
+        editors don't need to think about the rename themselves. Both
+        Resolve (if detected) and Premiere (if panel is alive) can fire,
+        independently, based on their respective project settings.
         """
         if not self.config:
             return
-        if not getattr(self.config, "nle_auto_sync_resolve", False):
-            return
         try:
-            from src.lvm.nle_bridge import is_resolve_external_available
+            from src.lvm.nle_bridge import (
+                is_resolve_external_available,
+                is_premiere_panel_alive,
+            )
         except ImportError:
             return
-        if not is_resolve_external_available():
-            logger.info("Auto-sync NLE: skipped (Resolve not detected on this "
-                        "machine).")
-            return
-        self._sync_names_resolve(automatic=True)
+
+        if getattr(self.config, "nle_auto_sync_resolve", False):
+            if is_resolve_external_available():
+                self._sync_names_resolve(automatic=True)
+            else:
+                logger.info("Auto-sync Resolve: skipped (Resolve not detected).")
+
+        if getattr(self.config, "nle_auto_sync_premiere", False):
+            if is_premiere_panel_alive():
+                self._sync_names_premiere(automatic=True)
+            else:
+                logger.info("Auto-sync Premiere: skipped (panel not running).")
 
     def _on_sync_names_line(self, level: str, text: str):
         if level == "error":
