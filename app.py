@@ -475,79 +475,30 @@ class StatusWorker(QThread):
 
 
 class SyncNamesWorker(QThread):
-    """Runs the Resolve companion script as a subprocess off the UI thread.
+    """Runs the Resolve rename in-process on a worker thread.
 
-    Streams stdout/stderr line-by-line to the GUI so the user sees progress
-    on large media pools (Resolve API calls can be slow). Emits ``done``
-    once the subprocess exits, with the final returncode.
+    The previous design spawned ``[sys.executable, companion_script]`` as a
+    subprocess. That breaks in PyInstaller frozen builds where
+    ``sys.executable`` is the LVM ``.exe`` itself (not a Python interpreter)
+    — the .exe ignores the script argument and just opens a second copy of
+    LVM. Calling ``DaVinciResolveScript`` straight from this Python via
+    ctypes works in both source and frozen builds and is faster too.
     """
-    line = Signal(str, str)        # stream ("stdout"|"stderr"), text
-    done = Signal(bool, int, str)  # ok, returncode, error
+    line = Signal(str, str)   # level ("info"|"warning"|"error"), text
+    done = Signal(bool, str)  # ok, error
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._proc = None
-        self._cancel_requested = False
-
-    def cancel(self):
-        self._cancel_requested = True
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.terminate()
-            except Exception:
-                pass
 
     def run(self):
-        import subprocess
-        import threading
-        from src.lvm.nle_bridge import prepare_resolve_command
-
-        prep = prepare_resolve_command()
-        if prep.error:
-            self.done.emit(False, 1, prep.error)
-            return
-
+        from src.lvm.nle_bridge import run_resolve_in_process
         try:
-            self._proc = subprocess.Popen(
-                prep.cmd,
-                env=prep.env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,  # line-buffered
-            )
-        except (OSError, FileNotFoundError) as e:
-            self.done.emit(False, 1, f"Could not launch interpreter: {e}")
+            stats = run_resolve_in_process(self.line.emit)
+        except Exception as e:
+            self.done.emit(False, f"Unexpected error: {e}")
             return
-
-        def _pump(stream, label):
-            try:
-                for raw in iter(stream.readline, ""):
-                    line = raw.rstrip("\n").rstrip("\r")
-                    if line:
-                        self.line.emit(label, line)
-            finally:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
-
-        t_out = threading.Thread(target=_pump, args=(self._proc.stdout, "stdout"),
-                                  daemon=True)
-        t_err = threading.Thread(target=_pump, args=(self._proc.stderr, "stderr"),
-                                  daemon=True)
-        t_out.start()
-        t_err.start()
-
-        rc = self._proc.wait()
-        # Drain pump threads so we don't lose trailing lines
-        t_out.join(timeout=2.0)
-        t_err.join(timeout=2.0)
-
-        if self._cancel_requested:
-            self.done.emit(False, rc, "Cancelled.")
-        else:
-            self.done.emit(rc == 0, rc, "")
+        ok = bool(stats.get("ok")) and stats.get("errors", 0) == 0
+        self.done.emit(ok, "")
 
 
 class ProjectLoadWorker(QThread):
@@ -6047,19 +5998,21 @@ class MainWindow(QMainWindow):
             return
         self._sync_names_resolve(automatic=True)
 
-    def _on_sync_names_line(self, stream: str, text: str):
-        if stream == "stderr":
+    def _on_sync_names_line(self, level: str, text: str):
+        if level == "error":
+            logger.error("[resolve] %s", text)
+        elif level == "warning":
             logger.warning("[resolve] %s", text)
         else:
             logger.info("[resolve] %s", text)
 
-    def _on_sync_names_done(self, ok: bool, returncode: int, error: str):
+    def _on_sync_names_done(self, ok: bool, error: str):
         if error:
             logger.error("Sync Names: %s", error)
         if ok:
             logger.info("Sync Names: completed successfully.")
         else:
-            logger.warning("Sync Names: finished with rc=%s.", returncode)
+            logger.warning("Sync Names: finished with errors — see log lines above.")
 
         self._sync_names_worker = None
         self._refresh_sync_names_state()

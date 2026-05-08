@@ -151,16 +151,129 @@ def _match_sidecar_to_clip(clip_path):
     return None, None
 
 
-def _iter_clips(folder):
+def _iter_clips(folder, log):
     """Recursively yield every MediaPoolItem under *folder*."""
     try:
         for clip in folder.GetClipList() or []:
             yield clip
         for sub in folder.GetSubFolderList() or []:
-            for clip in _iter_clips(sub):
+            for clip in _iter_clips(sub, log):
                 yield clip
     except Exception as e:
-        print(f"  warning: failed to enumerate folder: {e}")
+        log("warning", f"failed to enumerate folder: {e}")
+
+
+def _default_log(level, message):
+    """Default logger for standalone runs — info to stdout, warnings/errors to stderr."""
+    stream = sys.stderr if level in ("warning", "error") else sys.stdout
+    print(message, file=stream)
+
+
+def rename_clips(resolve, log=None):
+    """Walk the open project's media pool and rename clips to source versions.
+
+    Args:
+        resolve: a DaVinci Resolve app handle (from
+            ``DaVinciResolveScript.scriptapp("Resolve")``).
+        log: optional ``log(level, message)`` callable. ``level`` is one of
+            ``"info"``, ``"warning"``, ``"error"``. Defaults to printing to
+            stdout/stderr so the standalone Workspace → Scripts entry still
+            works unchanged.
+
+    Returns a stats dict: ``{"renamed", "idempotent", "no_match", "errors",
+    "ok"}``. ``ok`` is True when the rename completed (even with zero matches);
+    False only when we couldn't talk to a project at all.
+    """
+    if log is None:
+        log = _default_log
+
+    if not resolve:
+        log("error", "Could not connect to DaVinci Resolve.")
+        return {"renamed": 0, "idempotent": 0, "no_match": 0, "errors": 1, "ok": False}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        log("error", "No project is open.")
+        return {"renamed": 0, "idempotent": 0, "no_match": 0, "errors": 1, "ok": False}
+
+    media_pool = project.GetMediaPool()
+    root = media_pool.GetRootFolder()
+
+    renamed = 0
+    skipped_match = 0
+    skipped_idempotent = 0
+    errors = 0
+    processed = 0
+    HEARTBEAT_EVERY = 250
+
+    for item in _iter_clips(root, log):
+        processed += 1
+        if processed % HEARTBEAT_EVERY == 0:
+            log("info", f"  ...processed {processed} clips "
+                f"(renamed={renamed}, skipped={skipped_match}, errors={errors})")
+
+        try:
+            clip_path = item.GetClipProperty("File Path") or ""
+            clip_name = item.GetClipProperty("Clip Name") or ""
+        except Exception as e:
+            errors += 1
+            log("error", f"  could not read clip properties: {e}")
+            continue
+
+        if not clip_path:
+            skipped_match += 1
+            continue
+
+        sidecar, _ = _match_sidecar_to_clip(clip_path)
+        if not sidecar:
+            skipped_match += 1
+            continue
+
+        cur = sidecar["current"]
+        new_name = _new_display_name(cur.get("source", ""), os.path.basename(clip_path))
+        if not new_name:
+            skipped_match += 1
+            continue
+
+        if clip_name == new_name:
+            skipped_idempotent += 1
+            continue
+
+        try:
+            item.SetClipProperty("Clip Name", new_name)
+        except Exception as e:
+            errors += 1
+            log("error", f"  SetClipProperty raised for {clip_name!r}: {e}")
+            continue
+
+        # SetClipProperty's bool return is unreliable in recent Resolve
+        # versions (often False even on success), so verify by reading
+        # the property back.
+        try:
+            actual = item.GetClipProperty("Clip Name") or ""
+        except Exception:
+            actual = ""
+
+        if actual == new_name:
+            renamed += 1
+            log("info", f"  {clip_name}  ->  {new_name}")
+        else:
+            errors += 1
+            log("error", f"  failed: {clip_name!r} -> {new_name!r} "
+                f"(name still reads as {actual!r})")
+
+    log("info", "")
+    log("info", f"Renamed:            {renamed}")
+    log("info", f"Already up to date: {skipped_idempotent}")
+    log("info", f"No sidecar match:   {skipped_match}")
+    log("info", f"Errors:             {errors}")
+    return {
+        "renamed": renamed,
+        "idempotent": skipped_idempotent,
+        "no_match": skipped_match,
+        "errors": errors,
+        "ok": True,
+    }
 
 
 def main():
@@ -190,88 +303,10 @@ def main():
               "ProgramData path above (or set PYTHONPATH).", file=sys.stderr)
         return 1
 
-    resolve = dvr_script.scriptapp("Resolve")
-    if not resolve:
-        print("Could not connect to DaVinci Resolve.", file=sys.stderr)
+    stats = rename_clips(dvr_script.scriptapp("Resolve"))
+    if not stats["ok"]:
         return 1
-
-    project = resolve.GetProjectManager().GetCurrentProject()
-    if not project:
-        print("No project is open.", file=sys.stderr)
-        return 1
-
-    media_pool = project.GetMediaPool()
-    root = media_pool.GetRootFolder()
-
-    renamed = 0
-    skipped_match = 0
-    skipped_idempotent = 0
-    errors = 0
-    processed = 0
-    HEARTBEAT_EVERY = 250
-
-    for item in _iter_clips(root):
-        processed += 1
-        if processed % HEARTBEAT_EVERY == 0:
-            print(f"  ...processed {processed} clips "
-                  f"(renamed={renamed}, skipped={skipped_match}, errors={errors})")
-
-        try:
-            clip_path = item.GetClipProperty("File Path") or ""
-            clip_name = item.GetClipProperty("Clip Name") or ""
-        except Exception as e:
-            errors += 1
-            print(f"  error: could not read clip properties: {e}")
-            continue
-
-        if not clip_path:
-            skipped_match += 1
-            continue
-
-        sidecar, _ = _match_sidecar_to_clip(clip_path)
-        if not sidecar:
-            skipped_match += 1
-            continue
-
-        cur = sidecar["current"]
-        new_name = _new_display_name(cur.get("source", ""), os.path.basename(clip_path))
-        if not new_name:
-            skipped_match += 1
-            continue
-
-        if clip_name == new_name:
-            skipped_idempotent += 1
-            continue
-
-        try:
-            item.SetClipProperty("Clip Name", new_name)
-        except Exception as e:
-            errors += 1
-            print(f"  error: SetClipProperty raised for {clip_name!r}: {e}")
-            continue
-
-        # SetClipProperty's bool return is unreliable in recent Resolve
-        # versions (often False even on success), so verify by reading
-        # the property back.
-        try:
-            actual = item.GetClipProperty("Clip Name") or ""
-        except Exception:
-            actual = ""
-
-        if actual == new_name:
-            renamed += 1
-            print(f"  {clip_name}  ->  {new_name}")
-        else:
-            errors += 1
-            print(f"  failed: {clip_name!r} -> {new_name!r} "
-                  f"(name still reads as {actual!r})")
-
-    print()
-    print(f"Renamed:           {renamed}")
-    print(f"Already up to date: {skipped_idempotent}")
-    print(f"No sidecar match:   {skipped_match}")
-    print(f"Errors:             {errors}")
-    return 0 if errors == 0 else 2
+    return 0 if stats["errors"] == 0 else 2
 
 
 if __name__ == "__main__":

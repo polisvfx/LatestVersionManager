@@ -183,5 +183,142 @@ class TestRunResolveSync(unittest.TestCase):
         self.assertIsNone(r.error)
 
 
+class TestCompanionRenameClips(unittest.TestCase):
+    """Sanity-check the contract that the bridge depends on: the companion
+    script exposes ``rename_clips(resolve, log)`` and handles a missing
+    Resolve gracefully.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = nle_bridge.resolve_script_path()
+        spec = importlib.util.spec_from_file_location("lvm_companion_resolve",
+                                                       str(path))
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def test_module_exposes_rename_clips(self):
+        self.assertTrue(callable(getattr(self.module, "rename_clips", None)))
+
+    def test_rename_clips_with_no_resolve_returns_error_stats(self):
+        logged = []
+        stats = self.module.rename_clips(
+            None, log=lambda lvl, msg: logged.append((lvl, msg)))
+        self.assertFalse(stats["ok"])
+        self.assertEqual(stats["errors"], 1)
+        self.assertEqual(stats["renamed"], 0)
+        self.assertTrue(any(lvl == "error" for lvl, _ in logged))
+
+    def test_rename_clips_with_no_open_project_returns_error_stats(self):
+        fake_resolve = mock.MagicMock()
+        fake_resolve.GetProjectManager.return_value.GetCurrentProject.return_value = None
+        logged = []
+        stats = self.module.rename_clips(
+            fake_resolve, log=lambda lvl, msg: logged.append((lvl, msg)))
+        self.assertFalse(stats["ok"])
+        self.assertEqual(stats["errors"], 1)
+        self.assertTrue(any("No project is open" in msg for _, msg in logged))
+
+
+class TestRunResolveInProcess(unittest.TestCase):
+    """The frozen-build hotfix path. Mocks DaVinciResolveScript + the
+    companion module so no Resolve install is needed.
+    """
+
+    def test_modules_missing_logs_error(self):
+        logged = []
+        with mock.patch.object(nle_bridge, "resolve_modules_path", return_value=None):
+            stats = nle_bridge.run_resolve_in_process(
+                lambda lvl, msg: logged.append((lvl, msg)))
+        self.assertFalse(stats["ok"])
+        self.assertEqual(stats["errors"], 1)
+        self.assertTrue(any(lvl == "error" and "modules not found" in msg.lower()
+                            for lvl, msg in logged))
+
+    def test_resolve_not_running_logs_error(self):
+        modules = Path("C:/fake/Modules")
+        fake_dvr = mock.MagicMock()
+        fake_dvr.scriptapp.return_value = None
+        logged = []
+
+        with mock.patch.object(nle_bridge, "resolve_modules_path",
+                                return_value=modules), \
+             mock.patch.object(nle_bridge, "resolve_script_lib_path",
+                                return_value=Path("/lib/fusionscript.dll")), \
+             mock.patch.dict(sys.modules, {"DaVinciResolveScript": fake_dvr}):
+            stats = nle_bridge.run_resolve_in_process(
+                lambda lvl, msg: logged.append((lvl, msg)))
+
+        self.assertFalse(stats["ok"])
+        self.assertTrue(any("Could not connect" in msg for _, msg in logged))
+
+    def test_calls_companion_rename_clips(self):
+        """When everything is wired up, run_resolve_in_process delegates to
+        the companion script's rename_clips() and returns its stats."""
+        modules = Path("C:/fake/Modules")
+        resolve_handle = mock.MagicMock()
+        fake_dvr = mock.MagicMock()
+        fake_dvr.scriptapp.return_value = resolve_handle
+
+        # Stand-in for the loaded companion module
+        fake_module = mock.MagicMock()
+        fake_module.rename_clips.return_value = {
+            "renamed": 5, "idempotent": 2, "no_match": 100,
+            "errors": 0, "ok": True,
+        }
+        spec_mock = mock.MagicMock()
+        spec_mock.loader = mock.MagicMock()
+
+        logged = []
+
+        with mock.patch.object(nle_bridge, "resolve_modules_path",
+                                return_value=modules), \
+             mock.patch.object(nle_bridge, "resolve_script_lib_path",
+                                return_value=Path("/lib/fusionscript.dll")), \
+             mock.patch.object(Path, "is_file", return_value=True), \
+             mock.patch.dict(sys.modules, {"DaVinciResolveScript": fake_dvr}), \
+             mock.patch("importlib.util.spec_from_file_location",
+                        return_value=spec_mock), \
+             mock.patch("importlib.util.module_from_spec",
+                        return_value=fake_module):
+            stats = nle_bridge.run_resolve_in_process(
+                lambda lvl, msg: logged.append((lvl, msg)))
+
+        # rename_clips was called with the real Resolve handle and our
+        # log callback (so the companion can stream progress through).
+        fake_module.rename_clips.assert_called_once()
+        call_args = fake_module.rename_clips.call_args
+        self.assertIs(call_args[0][0], resolve_handle)
+
+        self.assertTrue(stats["ok"])
+        self.assertEqual(stats["renamed"], 5)
+        self.assertEqual(stats["errors"], 0)
+
+    def test_companion_module_load_failure_returns_error_stats(self):
+        modules = Path("C:/fake/Modules")
+        fake_dvr = mock.MagicMock()
+        fake_dvr.scriptapp.return_value = mock.MagicMock()  # Resolve "running"
+        spec_mock = mock.MagicMock()
+        spec_mock.loader.exec_module.side_effect = SyntaxError("bad")
+
+        logged = []
+        with mock.patch.object(nle_bridge, "resolve_modules_path",
+                                return_value=modules), \
+             mock.patch.object(nle_bridge, "resolve_script_lib_path",
+                                return_value=Path("/lib/fusionscript.dll")), \
+             mock.patch.object(Path, "is_file", return_value=True), \
+             mock.patch.dict(sys.modules, {"DaVinciResolveScript": fake_dvr}), \
+             mock.patch("importlib.util.spec_from_file_location",
+                        return_value=spec_mock), \
+             mock.patch("importlib.util.module_from_spec",
+                        return_value=mock.MagicMock()):
+            stats = nle_bridge.run_resolve_in_process(
+                lambda lvl, msg: logged.append((lvl, msg)))
+        self.assertFalse(stats["ok"])
+        self.assertEqual(stats["errors"], 1)
+        self.assertTrue(any("failed to load" in msg for _, msg in logged))
+
+
 if __name__ == "__main__":
     unittest.main()
