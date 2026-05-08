@@ -189,10 +189,12 @@
             var stats = parseStats(result);
             if (stats && stats.ok) {
                 setStatus("ready", "Done. Watching " + triggerDir);
+                var tl = (typeof stats.timeline_renamed === "number")
+                    ? (", timeline " + stats.timeline_renamed) : "";
                 appendLog("info",
                     "Renamed " + stats.renamed +
                     ", up-to-date " + stats.idempotent +
-                    ", no-match " + stats.no_match +
+                    ", no-match " + stats.no_match + tl +
                     ", errors " + stats.errors);
             } else if (stats) {
                 setStatus("error", stats.error || "Failed (see log)");

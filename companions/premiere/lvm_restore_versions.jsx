@@ -77,10 +77,13 @@
         if (!dir) return [];
         var folder = new Folder(dir);
         if (!folder.exists) return [];
+        // ">=" so the bare ".latest_history.json" (exactly prefix+suffix
+        // chars long) isn't filtered out alongside the namespaced
+        // ".latest_history_<name>.json" siblings.
         var entries = folder.getFiles(function (f) {
             if (!(f instanceof File)) return false;
             var n = f.name;
-            return n.length > SIDECAR_PREFIX.length + SIDECAR_SUFFIX.length &&
+            return n.length >= SIDECAR_PREFIX.length + SIDECAR_SUFFIX.length &&
                    n.substring(0, SIDECAR_PREFIX.length) === SIDECAR_PREFIX &&
                    n.substring(n.length - SIDECAR_SUFFIX.length) === SIDECAR_SUFFIX;
         });
@@ -180,6 +183,87 @@
 
     // ----- main -----
 
+    // ----- timeline track-item rename helpers -----
+    //
+    // ProjectItem.name only updates the Project panel. Timeline clips
+    // (TrackItem) carry their own writable name field that was snapshot-
+    // copied at placement time, so a project-item rename leaves stale
+    // "_latest" labels in every sequence. Walk the sequences once and
+    // rename matching track items.
+
+    function projectItemKey(item) {
+        try {
+            var id = item.nodeId;
+            if (id) return String(id);
+        } catch (e) { /* fall through */ }
+        try {
+            return "path:" + (item.getMediaPath() || "");
+        } catch (e2) {
+            return "";
+        }
+    }
+
+    function renameTrackItemsForRenames(renames) {
+        var renamed = 0;
+        var errors = 0;
+        var seqs;
+        try { seqs = app.project.sequences; } catch (e) { return { renamed: 0, errors: 0 }; }
+        var nseq = 0;
+        try { nseq = seqs.numSequences; } catch (e2) { nseq = 0; }
+
+        for (var s = 0; s < nseq; s++) {
+            var seq;
+            try { seq = seqs[s]; } catch (e3) { continue; }
+            if (!seq) continue;
+
+            var trackGroups = [];
+            try { if (seq.videoTracks) trackGroups.push(seq.videoTracks); } catch (e4) {}
+            try { if (seq.audioTracks) trackGroups.push(seq.audioTracks); } catch (e5) {}
+
+            for (var g = 0; g < trackGroups.length; g++) {
+                var tracks = trackGroups[g];
+                var ntracks = 0;
+                try { ntracks = tracks.numTracks; } catch (e6) { ntracks = 0; }
+                for (var t = 0; t < ntracks; t++) {
+                    var track;
+                    try { track = tracks[t]; } catch (e7) { continue; }
+                    if (!track) continue;
+                    var clips;
+                    try { clips = track.clips; } catch (e8) { continue; }
+                    if (!clips) continue;
+                    var nclips = 0;
+                    try { nclips = clips.numItems; } catch (e9) { nclips = 0; }
+
+                    for (var c = 0; c < nclips; c++) {
+                        var ti;
+                        try { ti = clips[c]; } catch (e10) { continue; }
+                        if (!ti) continue;
+
+                        var src;
+                        try { src = ti.projectItem; } catch (e11) { src = null; }
+                        if (!src) continue;
+
+                        var key = projectItemKey(src);
+                        if (!key || !renames.hasOwnProperty(key)) continue;
+                        var target = renames[key];
+
+                        var current = "";
+                        try { current = ti.name || ""; } catch (e12) { current = ""; }
+                        if (current === target) continue;
+
+                        try {
+                            ti.name = target;
+                            renamed++;
+                        } catch (e13) {
+                            errors++;
+                        }
+                    }
+                }
+            }
+        }
+        return { renamed: renamed, errors: errors };
+    }
+
     if (!app.project) {
         alert("LVM Restore Versions: no project is open.");
         return;
@@ -190,6 +274,7 @@
     var skippedIdempotent = 0;
     var errors = 0;
     var log = [];
+    var renames = {};
 
     walkProjectItems(app.project.rootItem, function (clip) {
         var clipPath = "";
@@ -202,6 +287,11 @@
         var clipBase = dirAndBaseFromPath(clipPath).base;
         var newName = newDisplayName(match.sidecar.current.source || "", clipBase);
         if (!newName) { skippedMatch++; return; }
+
+        // Queue the timeline rename even when the project item is already
+        // up-to-date — placed clips can drift from their source.
+        var key = projectItemKey(clip);
+        if (key) renames[key] = newName;
 
         var currentName = "";
         try { currentName = clip.name || ""; } catch (e2) { currentName = ""; }
@@ -217,12 +307,15 @@
         }
     });
 
+    var tlResult = renameTrackItemsForRenames(renames);
+
     var summary =
         "LVM Restore Versions\n\n" +
-        "Renamed:            " + renamed + "\n" +
-        "Already up to date: " + skippedIdempotent + "\n" +
-        "No sidecar match:   " + skippedMatch + "\n" +
-        "Errors:             " + errors;
+        "Renamed:             " + renamed + "\n" +
+        "Already up to date:  " + skippedIdempotent + "\n" +
+        "No sidecar match:    " + skippedMatch + "\n" +
+        "Timeline items renamed: " + tlResult.renamed + "\n" +
+        "Errors:              " + (errors + tlResult.errors);
 
     if (log.length > 0) {
         summary += "\n\n" + log.slice(0, 30).join("\n");
