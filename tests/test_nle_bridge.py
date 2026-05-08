@@ -221,6 +221,71 @@ class TestCompanionRenameClips(unittest.TestCase):
         self.assertTrue(any("No project is open" in msg for _, msg in logged))
 
 
+class TestIsResolveRunning(unittest.TestCase):
+    """Process-list-based liveness probe + 10 s TTL cache."""
+
+    def setUp(self):
+        nle_bridge.invalidate_resolve_running_cache()
+
+    def tearDown(self):
+        nle_bridge.invalidate_resolve_running_cache()
+
+    def test_returns_true_when_process_check_says_yes(self):
+        with mock.patch.object(nle_bridge, "_check_resolve_process",
+                                return_value=True):
+            self.assertTrue(nle_bridge.is_resolve_running())
+
+    def test_returns_false_when_process_check_says_no(self):
+        with mock.patch.object(nle_bridge, "_check_resolve_process",
+                                return_value=False):
+            self.assertFalse(nle_bridge.is_resolve_running())
+
+    def test_caches_result_within_ttl(self):
+        with mock.patch.object(nle_bridge, "_check_resolve_process",
+                                return_value=True) as probe:
+            nle_bridge.is_resolve_running()
+            nle_bridge.is_resolve_running()
+            nle_bridge.is_resolve_running()
+        self.assertEqual(probe.call_count, 1)
+
+    def test_force_bypasses_cache(self):
+        with mock.patch.object(nle_bridge, "_check_resolve_process",
+                                return_value=True) as probe:
+            nle_bridge.is_resolve_running()
+            nle_bridge.is_resolve_running(force=True)
+            nle_bridge.is_resolve_running(force=True)
+        self.assertEqual(probe.call_count, 3)
+
+    def test_invalidate_clears_cache(self):
+        with mock.patch.object(nle_bridge, "_check_resolve_process",
+                                return_value=True) as probe:
+            nle_bridge.is_resolve_running()
+            nle_bridge.invalidate_resolve_running_cache()
+            nle_bridge.is_resolve_running()
+        self.assertEqual(probe.call_count, 2)
+
+    def test_cache_expires_after_ttl(self):
+        with mock.patch.object(nle_bridge, "_check_resolve_process",
+                                return_value=True) as probe:
+            nle_bridge.is_resolve_running()
+            # Advance time past the TTL by overwriting the cache stamp.
+            _, value = nle_bridge._resolve_running_cache
+            nle_bridge._resolve_running_cache = (-9999.0, value)
+            nle_bridge.is_resolve_running()
+        self.assertEqual(probe.call_count, 2)
+
+    def test_check_handles_subprocess_error(self):
+        # Whatever platform we're on, an OSError from subprocess.run
+        # should produce False rather than propagate.
+        with mock.patch("subprocess.run", side_effect=OSError("boom")):
+            self.assertFalse(nle_bridge._check_resolve_process())
+
+    def test_check_handles_subprocess_timeout(self):
+        with mock.patch("subprocess.run",
+                         side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)):
+            self.assertFalse(nle_bridge._check_resolve_process())
+
+
 class TestRunResolveInProcess(unittest.TestCase):
     """The frozen-build hotfix path. Mocks DaVinciResolveScript + the
     companion module so no Resolve install is needed.

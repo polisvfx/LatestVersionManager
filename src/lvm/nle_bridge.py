@@ -15,6 +15,8 @@ __all__ = [
     "resolve_modules_path",
     "resolve_script_lib_path",
     "is_resolve_external_available",
+    "is_resolve_running",
+    "invalidate_resolve_running_cache",
     "companions_dir",
     "resolve_script_path",
     "prepare_resolve_command",
@@ -98,6 +100,83 @@ def is_resolve_external_available() -> bool:
     that's checked at run time by the companion script itself.
     """
     return resolve_modules_path() is not None and resolve_script_lib_path() is not None
+
+
+# ---- Resolve running-process probe ------------------------------------
+#
+# is_resolve_external_available() only tells us Resolve is *installed*.
+# The UI also wants to know whether it's *running right now* — otherwise
+# clicking "Sync Resolve" silently fails after a few seconds while the
+# script tries to connect. Premiere has this via heartbeat; Resolve
+# doesn't expose anything cheaper than enumerating processes, so we shell
+# out and cache the result.
+
+_RESOLVE_RUNNING_TTL = 10.0  # seconds; longer than any UI refresh
+_resolve_running_cache: tuple[float, bool] = (0.0, False)
+
+
+def _check_resolve_process() -> bool:
+    """Return True when a Resolve process is currently running.
+
+    Decodes subprocess output with ``errors="replace"`` because Windows
+    ``tasklist`` emits localised header text in the system code page,
+    and Python's reader thread will silently crash on undecodable bytes
+    if the default cp1252 decoder is left to its own devices — leaving
+    ``proc.stdout`` empty and producing a false "not running" reading.
+    """
+    try:
+        if sys.platform.startswith("win") or sys.platform.startswith("cygwin"):
+            proc = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq Resolve.exe", "/NH", "/FO", "CSV"],
+                capture_output=True, text=True, timeout=4,
+                encoding="utf-8", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return "Resolve.exe" in (proc.stdout or "")
+        if sys.platform == "darwin":
+            proc = subprocess.run(
+                ["pgrep", "-x", "Resolve"],
+                capture_output=True, text=True, timeout=4,
+                encoding="utf-8", errors="replace",
+            )
+            return proc.returncode == 0
+        if sys.platform.startswith("linux"):
+            proc = subprocess.run(
+                ["pgrep", "-f", "resolve"],
+                capture_output=True, text=True, timeout=4,
+                encoding="utf-8", errors="replace",
+            )
+            return proc.returncode == 0
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        return False
+    return False
+
+
+def is_resolve_running(force: bool = False) -> bool:
+    """Return True when DaVinci Resolve is currently running.
+
+    Cached for 10 s so periodic UI refresh ticks don't keep spawning
+    ``tasklist`` / ``pgrep``. Pass ``force=True`` to bypass the cache
+    (e.g. right before launching a sync, to fail fast).
+    """
+    global _resolve_running_cache
+    import time
+    now = time.monotonic()
+    cached_at, cached_value = _resolve_running_cache
+    if not force and (now - cached_at) < _RESOLVE_RUNNING_TTL:
+        return cached_value
+
+    value = _check_resolve_process()
+    _resolve_running_cache = (now, value)
+    return value
+
+
+def invalidate_resolve_running_cache() -> None:
+    """Drop the cached running-state. Call after operations that change
+    Resolve's lifecycle (e.g. successful sync) so the next refresh
+    reads fresh state."""
+    global _resolve_running_cache
+    _resolve_running_cache = (0.0, False)
 
 
 def companions_dir() -> Path:
