@@ -1502,6 +1502,7 @@ class ProjectSettingsDialog(QDialog):
         from src.lvm.nle_bridge import (
             is_resolve_external_available,
             is_premiere_panel_alive,
+            is_premiere_panel_installed,
             premiere_panel_install_dir,
         )
 
@@ -1561,24 +1562,56 @@ class ProjectSettingsDialog(QDialog):
 
         # ----- Premiere row -----
         premiere_alive = is_premiere_panel_alive()
+        premiere_installed = is_premiere_panel_installed()
         premiere_install_dir = premiere_panel_install_dir()
-        if premiere_alive:
-            p_status_text = "LVM Premiere panel: connected"
-        elif premiere_install_dir is None:
+
+        if premiere_install_dir is None:
             p_status_text = "Adobe Premiere isn't supported on this OS."
+        elif premiere_alive:
+            p_status_text = ("LVM Premiere panel: connected (Premiere is "
+                             "running with the panel loaded).")
+        elif premiere_installed:
+            p_status_text = ("LVM Premiere panel: installed but not running. "
+                             "Open Premiere and dock it via "
+                             "Window → Extensions → LVM Sync Versions.")
         else:
-            p_status_text = (
-                "LVM Premiere panel: not detected. Install the panel from "
-                "companions/premiere/lvm_panel/ into your Adobe CEP "
-                "extensions folder, then open Premiere. See docs/companions.md."
-            )
-        premiere_status = QLabel(p_status_text)
-        premiere_status.setWordWrap(True)
-        premiere_status.setStyleSheet(
+            p_status_text = ("LVM Premiere panel: not installed. Click "
+                             "“Install panel” below to set it up "
+                             "in one step.")
+        self._premiere_status_label = QLabel(p_status_text)
+        self._premiere_status_label.setWordWrap(True)
+        self._premiere_status_label.setStyleSheet(
             "color: #3aaa88; font-size: 11pt;" if premiere_alive
             else "color: #ffaa00; font-size: 11pt;"
         )
-        nle.addRow("Premiere:", premiere_status)
+        nle.addRow("Premiere:", self._premiere_status_label)
+
+        # Install / Uninstall row — only shown when Premiere is supported.
+        if premiere_install_dir is not None:
+            install_row = QHBoxLayout()
+            self._premiere_install_btn = QPushButton(
+                "Reinstall panel..." if premiere_installed else "Install panel..."
+            )
+            self._premiere_install_btn.setToolTip(
+                "Copies the bundled panel to "
+                f"{premiere_install_dir} and enables unsigned CEP extensions "
+                "for the current user. No admin rights or registry tools "
+                "needed."
+            )
+            self._premiere_install_btn.clicked.connect(self._install_premiere_panel)
+            install_row.addWidget(self._premiere_install_btn)
+
+            self._premiere_uninstall_btn = QPushButton("Uninstall panel")
+            self._premiere_uninstall_btn.setEnabled(premiere_installed)
+            self._premiere_uninstall_btn.setToolTip(
+                "Removes the panel folder. The PlayerDebugMode flag stays "
+                "set so any other unsigned CEP panels you've installed "
+                "keep working."
+            )
+            self._premiere_uninstall_btn.clicked.connect(self._uninstall_premiere_panel)
+            install_row.addWidget(self._premiere_uninstall_btn)
+            install_row.addStretch()
+            nle.addRow("", install_row)
 
         self.nle_auto_sync_premiere_cb = QCheckBox(
             "Write a Premiere sync trigger automatically after every "
@@ -1779,6 +1812,108 @@ class ProjectSettingsDialog(QDialog):
         self.naming_label.setTextFormat(Qt.PlainText)
         self.naming_label.setText("(will be re-asked on next ingest)")
         self.naming_label.setStyleSheet("color: #ffaa00;")
+
+    def _install_premiere_panel(self):
+        """One-click install: copy panel + enable PlayerDebugMode."""
+        from src.lvm.nle_bridge import install_premiere_panel
+
+        log_lines = []
+        result = install_premiere_panel(
+            log=lambda lvl, msg: log_lines.append((lvl, msg)))
+
+        if not result["ok"]:
+            QMessageBox.critical(
+                self, "Install failed",
+                result.get("error") or "Install failed (see app log)."
+            )
+            return
+
+        body = (
+            f"Panel installed.\n\n"
+            f"Files copied: {result['files_copied']}\n"
+            f"PlayerDebugMode set for {result['csxs_flags_set']} CSXS "
+            f"version(s).\n\n"
+            f"Install path:\n{result['install_dir']}\n\n"
+        )
+        if result.get("needs_premiere_restart"):
+            body += ("Restart Premiere if it's currently open, then dock the "
+                     "panel via Window → Extensions → LVM Sync Versions.")
+        QMessageBox.information(self, "Premiere panel installed", body)
+
+        # Refresh the dialog's local labels and the main window's
+        # status-bar buttons so state is immediately accurate.
+        self._refresh_premiere_install_row()
+        if isinstance(self.parent(), MainWindow):
+            self.parent()._refresh_sync_names_state()
+
+    def _uninstall_premiere_panel(self):
+        from src.lvm.nle_bridge import uninstall_premiere_panel
+
+        reply = QMessageBox.question(
+            self, "Uninstall Premiere panel",
+            "Remove the LVM Premiere panel from your Adobe CEP "
+            "extensions folder?\n\n"
+            "PlayerDebugMode stays enabled so any other unsigned CEP "
+            "panels you've installed keep working.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        log_lines = []
+        result = uninstall_premiere_panel(
+            log=lambda lvl, msg: log_lines.append((lvl, msg)))
+
+        if not result["ok"]:
+            QMessageBox.critical(
+                self, "Uninstall failed",
+                result.get("error") or "Uninstall failed (see app log)."
+            )
+            return
+
+        QMessageBox.information(
+            self, "Premiere panel uninstalled",
+            ("Panel removed." if result["files_removed"]
+             else "Panel was not installed; nothing to remove.")
+        )
+        self._refresh_premiere_install_row()
+        if isinstance(self.parent(), MainWindow):
+            self.parent()._refresh_sync_names_state()
+
+    def _refresh_premiere_install_row(self):
+        """Re-read installer state and update the dialog's Premiere widgets."""
+        from src.lvm.nle_bridge import (
+            is_premiere_panel_installed,
+            is_premiere_panel_alive,
+            premiere_panel_install_dir,
+        )
+        if premiere_panel_install_dir() is None:
+            return
+        installed = is_premiere_panel_installed()
+        alive = is_premiere_panel_alive()
+
+        if alive:
+            text = ("LVM Premiere panel: connected (Premiere is running with "
+                    "the panel loaded).")
+            color = "#3aaa88"
+        elif installed:
+            text = ("LVM Premiere panel: installed but not running. Open "
+                    "Premiere and dock it via Window → Extensions → "
+                    "LVM Sync Versions.")
+            color = "#ffaa00"
+        else:
+            text = ("LVM Premiere panel: not installed. Click “Install "
+                    "panel” below to set it up in one step.")
+            color = "#ffaa00"
+        self._premiere_status_label.setText(text)
+        self._premiere_status_label.setStyleSheet(
+            f"color: {color}; font-size: 11pt;")
+
+        if hasattr(self, "_premiere_install_btn"):
+            self._premiere_install_btn.setText(
+                "Reinstall panel..." if installed else "Install panel...")
+        if hasattr(self, "_premiere_uninstall_btn"):
+            self._premiere_uninstall_btn.setEnabled(installed)
 
     def _make_section(self, title: str, collapsed: bool = False) -> CollapsibleSection:
         """Create a CollapsibleSection that remembers its collapsed state.

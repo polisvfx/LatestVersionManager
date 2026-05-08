@@ -111,9 +111,25 @@ runs the rename automatically. Once installed, LVM's status-bar **Sync
 Premiere** button and the **Auto-sync after promote → Premiere**
 checkbox both work.
 
-#### Install
+#### Install — one click from inside LVM (recommended)
 
-Copy the entire `companions/premiere/lvm_panel/` folder to:
+1. Open LVM → **File → Project Settings** → **NLE Companion Scripts**.
+2. Find the **Premiere** row and click **Install panel...**.
+
+That's it. LVM copies the panel into Adobe's CEP extensions folder for
+the current user *and* enables `PlayerDebugMode` for every CSXS version
+Premiere might use (9, 10, 11, 12), so you don't need to touch the
+registry or Terminal yourself. Both writes go to the user-scoped
+locations on Windows and macOS — no admin password is needed.
+
+Restart Premiere if it was already open, then open **Window → Extensions
+→ LVM Sync Versions** to dock the panel.
+
+To remove later, click **Uninstall panel** from the same dialog.
+
+#### Install — manual (if you prefer)
+
+Copy `companions/premiere/lvm_panel/` to:
 
 | OS | Path |
 | --- | --- |
@@ -124,16 +140,16 @@ The folder must contain `CSXS/manifest.xml` directly — i.e. the install
 path is `…\com.polisvfx.lvm.panel\CSXS\manifest.xml`, not nested inside
 another `lvm_panel` folder.
 
-**Enable unsigned extensions** (one-time, required because the panel is
-not Adobe-signed):
+Then enable unsigned extensions (one-time, required because the panel
+is not Adobe-signed):
 
 | OS | What to do |
 | --- | --- |
-| Windows | Registry: set `HKEY_CURRENT_USER\Software\Adobe\CSXS.<N>\PlayerDebugMode` (DWORD) to `1`, where `<N>` is your CEP version (`11` for Premiere 2024+, `10` for 2022/2023). |
+| Windows | Registry: set `HKEY_CURRENT_USER\Software\Adobe\CSXS.<N>\PlayerDebugMode` (string `"1"`) where `<N>` is your CEP version (`11` for Premiere 2024+, `10` for 2022/2023). |
 | macOS | Terminal: `defaults write com.adobe.CSXS.11 PlayerDebugMode 1` (replace `11` with your CEP version). |
 
-Then **restart Premiere**. Open **Window → Extensions → LVM Sync
-Versions** to dock the panel.
+Then restart Premiere and dock via **Window → Extensions → LVM Sync
+Versions**.
 
 #### Use
 
