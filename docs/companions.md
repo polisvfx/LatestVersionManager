@@ -18,20 +18,20 @@ touched — LVM keeps owning it.
 Re-running is idempotent. Promoting a new version and re-running picks up
 the new version automatically.
 
-> ## ⚠ Resolve Studio is required for LVM-driven sync
+> ## NLE-driven sync requirements
 >
-> The **Tools → Sync Names in NLE** menu, the **status-bar "Sync NLE
-> Names"** button, and the **auto-sync after promote** option all spawn an
-> external Python subprocess against a running Resolve. Blackmagic gates
-> external scripting behind **DaVinci Resolve Studio (paid)** — these
-> entry points stay disabled on the free edition.
+> **DaVinci Resolve:** the LVM-driven sync (status-bar button, Tools menu,
+> auto-sync after promote) needs DaVinci Resolve **Studio (paid)** — these
+> entry points stay disabled on the Free edition. Free users get exactly
+> the same renaming from inside Resolve via Workspace → Scripts → Edit →
+> lvm_restore_versions; see [§ DaVinci Resolve](#davinci-resolve).
 >
-> Free Resolve users still get full functionality via the **in-Resolve
-> path** (Workspace → Scripts → Edit → lvm_restore_versions) once the
-> script is installed; see [§ DaVinci Resolve](#davinci-resolve) below.
->
-> Adobe Premiere has no Studio/Free split; its companion script runs from
-> File → Scripts → Run Script File regardless.
+> **Adobe Premiere:** the LVM-driven sync needs the **CEP panel**
+> installed under your Adobe CEP extensions folder. Once the panel is
+> running, the LVM **Sync Premiere** button works in any licensed
+> Premiere Pro install — there is no Free/paid split. The standalone
+> `.jsx` (File → Scripts → Run Script File) also works without the panel
+> for one-shot renames.
 
 ---
 
@@ -84,33 +84,78 @@ LVM's window.
 
 ## Adobe Premiere Pro
 
+Two ways to run the rename inside Premiere — pick whichever fits your workflow.
+
+### Option 1: standalone `.jsx` (one-shot)
+
 `companions/premiere/lvm_restore_versions.jsx`
 
-### Install
+No install required. In Premiere: **File → Scripts → Run Script File** →
+pick the `.jsx`. A summary appears in an `alert()` dialog.
 
-No install required for one-off use; you can keep the `.jsx` anywhere on
-disk and pick it via the file picker.
-
-For convenience you can drop it into Premiere's Scripts folder (the menu
-will still ask you to pick a file — Premiere doesn't auto-list scripts):
+For convenience you can drop the file into Premiere's Scripts folder
+(the menu still asks you to pick a file — Premiere doesn't auto-list
+scripts):
 
 | OS | Path |
 | --- | --- |
 | Windows | `C:\Program Files\Adobe\Adobe Premiere Pro <version>\Scripts\` |
 | macOS | `/Applications/Adobe Premiere Pro <version>/Scripts/` |
 
-### Run
+### Option 2: CEP panel (recommended for LVM-driven sync)
 
-In Premiere: **File → Scripts → Run Script File** → pick the `.jsx`.
+`companions/premiere/lvm_panel/`
 
-A summary appears in an `alert()` dialog.
+A small docked panel that watches for trigger files written by LVM and
+runs the rename automatically. Once installed, LVM's status-bar **Sync
+Premiere** button and the **Auto-sync after promote → Premiere**
+checkbox both work.
+
+#### Install
+
+Copy the entire `companions/premiere/lvm_panel/` folder to:
+
+| OS | Path |
+| --- | --- |
+| Windows | `%APPDATA%\Adobe\CEP\extensions\com.polisvfx.lvm.panel\` |
+| macOS | `~/Library/Application Support/Adobe/CEP/extensions/com.polisvfx.lvm.panel/` |
+
+The folder must contain `CSXS/manifest.xml` directly — i.e. the install
+path is `…\com.polisvfx.lvm.panel\CSXS\manifest.xml`, not nested inside
+another `lvm_panel` folder.
+
+**Enable unsigned extensions** (one-time, required because the panel is
+not Adobe-signed):
+
+| OS | What to do |
+| --- | --- |
+| Windows | Registry: set `HKEY_CURRENT_USER\Software\Adobe\CSXS.<N>\PlayerDebugMode` (DWORD) to `1`, where `<N>` is your CEP version (`11` for Premiere 2024+, `10` for 2022/2023). |
+| macOS | Terminal: `defaults write com.adobe.CSXS.11 PlayerDebugMode 1` (replace `11` with your CEP version). |
+
+Then **restart Premiere**. Open **Window → Extensions → LVM Sync
+Versions** to dock the panel.
+
+#### Use
+
+The panel writes a heartbeat file every ~10 s — that's how LVM's status
+bar knows it's connected. When LVM's **Sync Premiere** button is clicked
+(or auto-sync fires after a promote), LVM drops a JSON trigger file
+into `%APPDATA%\LVM\triggers\` (or platform equivalent); the panel
+picks it up within ~1 s, runs the rename, and deletes the trigger.
+
+The panel has its own **Sync Versions Now** button for manual runs
+without involving LVM.
+
+#### Free vs paid Adobe Premiere
+
+There is no Free/Studio split for Premiere — the CEP panel and the
+.jsx work in any licensed Premiere Pro install (CC subscription).
 
 ### ExtendScript vs UXP
 
-This script uses ExtendScript, which Adobe supports through **September
-2026**. A UXP panel port is on the roadmap (v2 — see `docs/companions.md`
-roadmap section once added) and will not change the on-disk sidecar
-contract this script depends on.
+Both options use ExtendScript, which Adobe supports through **September
+2026**. A UXP port of the panel is on the roadmap and will not change
+the on-disk sidecar contract these scripts depend on.
 
 ---
 
@@ -165,34 +210,47 @@ works.
 
 ---
 
-## Run from inside LVM (DaVinci Resolve Studio only)
+## Run from inside LVM
 
-> **Studio-only**: LVM-driven sync uses external Python scripting, which
-> Blackmagic gates behind a paid Studio license. Free Resolve users get
-> exactly the same renaming via the in-Resolve script described above —
-> the only difference is whether you click inside Resolve or inside LVM.
+LVM exposes the rename as two status-bar buttons (right-hand side):
+**Sync Resolve** and **Sync Premiere**. Each one is enabled when its
+target NLE is reachable — greyed out otherwise, with a tooltip
+explaining what's missing.
 
-When Studio is detected, LVM offers three entry points:
+The same actions are available from **Tools → Sync Names in NLE**, and
+each NLE has its own **auto-sync after promote** checkbox in
+**Project Settings → NLE Companion Scripts**.
 
-- **Status-bar "Sync NLE Names" button** (right-hand side of LVM's status
-  bar) — one click, runs immediately.
-- **Tools → Sync Names in NLE → DaVinci Resolve** menu entry.
-- **Project Settings → NLE Companion Scripts → Auto-sync** — opt-in
-  toggle that fires the script automatically after every successful
-  promote, so editors never see template-named clips.
+### DaVinci Resolve (Studio only)
 
-All three stream output to LVM's log dock (View → Log). Under the hood
-LVM shells out to a Python subprocess with the standard
-`RESOLVE_SCRIPT_API` / `RESOLVE_SCRIPT_LIB` / `PYTHONPATH` env vars set,
-then runs the same script you'd run from Workspace → Scripts.
+> **Studio-only**: LVM-driven sync needs external Python scripting,
+> which Blackmagic gates behind a paid Studio license. Free Resolve
+> users get exactly the same renaming via the in-Resolve script —
+> the only difference is whether you click inside Resolve or inside
+> LVM.
 
-The menu entry, button, and auto-sync toggle are all disabled (with a
-tooltip explaining why) when Resolve's scripting modules aren't detected
-on this machine — i.e. on Free Resolve, or when Resolve isn't installed.
+LVM imports `DaVinciResolveScript` directly into its own Python at
+runtime via ctypes, so renames run **in-process** and stream output
+to LVM's log dock (View → Log). No subprocess, no env-var setup, no
+Python interpreter required on the user's PATH.
+
+### Adobe Premiere
+
+LVM writes a JSON **trigger file** to `%APPDATA%\LVM\triggers\` (or
+platform equivalent). The installed CEP panel polls that directory,
+runs the rename inside Premiere, and deletes the trigger. The panel
+must be installed and Premiere must be running with the panel
+docked — see the install instructions above.
+
+LVM detects an alive panel via a heartbeat file the panel writes every
+~10 s; the **Sync Premiere** status-bar button stays disabled until
+the heartbeat is fresh. Auto-sync after promote also gates on the
+heartbeat (and logs a skip line if the panel isn't running).
 
 ## Roadmap
 
-- **v1.5 (in progress)** — Premiere side: a CEP panel that listens for
-  LVM triggers via a file watcher, so LVM's "Sync Names" menu can drive
-  Premiere too.
-- **v2** — Premiere CEP panel ported to UXP for long-term Adobe support.
+- **v2** — Port the Premiere CEP panel to UXP for long-term Adobe
+  support. ExtendScript / CEP are deprecated by Adobe in September 2026;
+  UXP keeps the same on-disk sidecar contract so this should be a
+  mechanical port for the host script and a more involved one for the
+  panel manifest + UI.

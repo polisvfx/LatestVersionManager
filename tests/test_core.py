@@ -365,6 +365,7 @@ class TestProjectConfig(unittest.TestCase):
         self.assertNotIn("skip_resolve", d)
         self.assertNotIn("source_list_columns", d)
         self.assertNotIn("nle_auto_sync_resolve", d)
+        self.assertNotIn("nle_auto_sync_premiere", d)
 
     def test_nle_auto_sync_roundtrip(self):
         config = ProjectConfig(project_name="Test", nle_auto_sync_resolve=True)
@@ -376,6 +377,14 @@ class TestProjectConfig(unittest.TestCase):
     def test_nle_auto_sync_default_false_for_old_config(self):
         config = ProjectConfig.from_dict({"project_name": "Old"})
         self.assertFalse(config.nle_auto_sync_resolve)
+        self.assertFalse(config.nle_auto_sync_premiere)
+
+    def test_nle_auto_sync_premiere_roundtrip(self):
+        config = ProjectConfig(project_name="Test", nle_auto_sync_premiere=True)
+        d = config.to_dict()
+        self.assertIs(d["nle_auto_sync_premiere"], True)
+        restored = ProjectConfig.from_dict(d)
+        self.assertTrue(restored.nle_auto_sync_premiere)
 
     def test_effective_project_root(self):
         config = ProjectConfig(project_name="Test", project_dir="/fallback")

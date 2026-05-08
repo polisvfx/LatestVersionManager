@@ -20,6 +20,15 @@ __all__ = [
     "prepare_resolve_command",
     "run_resolve_sync",
     "run_resolve_in_process",
+    # Premiere
+    "lvm_data_dir",
+    "premiere_trigger_dir",
+    "premiere_heartbeat_path",
+    "premiere_panel_install_dir",
+    "premiere_panel_source_dir",
+    "is_premiere_panel_alive",
+    "write_premiere_trigger",
+    "PREMIERE_HEARTBEAT_MAX_AGE",
 ]
 
 import os
@@ -330,3 +339,114 @@ def run_resolve_in_process(log) -> dict:
     except Exception as e:
         log("error", f"Rename run raised: {e}")
         return stats_failed
+
+
+# ---------------------------------------------------------------------------
+# Adobe Premiere Pro — file-based trigger bridge.
+#
+# Premiere doesn't expose external Python scripting like Resolve Studio. The
+# only practical way for LVM to drive a running Premiere is via an installed
+# CEP panel that watches a directory for trigger files. LVM writes a small
+# JSON trigger via temp+rename; the panel polls the directory, runs the
+# rename via CSInterface.evalScript, and deletes the trigger.
+#
+# Detection: the panel writes a heartbeat file every ~10s. LVM treats the
+# panel as "alive" when the heartbeat exists and was modified recently.
+# ---------------------------------------------------------------------------
+
+PREMIERE_HEARTBEAT_MAX_AGE = 60.0  # seconds; panel beats every ~10s
+
+
+def lvm_data_dir() -> Path:
+    """Per-user LVM data directory.
+
+    Mirrors the path the panel's main.js computes — keep them in sync.
+    """
+    if sys.platform == "darwin":
+        return (Path.home() / "Library" / "Application Support" / "LVM")
+    if sys.platform.startswith("win") or sys.platform.startswith("cygwin"):
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "LVM"
+        return Path.home() / "AppData" / "Roaming" / "LVM"
+    # linux / other unix
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg) / "LVM"
+    return Path.home() / ".local" / "share" / "LVM"
+
+
+def premiere_trigger_dir() -> Path:
+    return lvm_data_dir() / "triggers"
+
+
+def premiere_heartbeat_path() -> Path:
+    return lvm_data_dir() / "heartbeat" / "premiere.json"
+
+
+def premiere_panel_source_dir() -> Path:
+    """Path to the bundled CEP panel folder LVM ships."""
+    return companions_dir() / "premiere" / "lvm_panel"
+
+
+def premiere_panel_install_dir() -> Optional[Path]:
+    """Where Adobe expects user-installed CEP extensions on this OS.
+
+    Returns the directory the panel should be copied into. Doesn't check
+    whether it actually contains the panel — see :func:`is_premiere_panel_alive`
+    for runtime detection.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Adobe" / \
+               "CEP" / "extensions" / "com.polisvfx.lvm.panel"
+    if sys.platform.startswith("win") or sys.platform.startswith("cygwin"):
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "Adobe" / "CEP" / "extensions" / \
+                   "com.polisvfx.lvm.panel"
+        return Path.home() / "AppData" / "Roaming" / "Adobe" / "CEP" / \
+               "extensions" / "com.polisvfx.lvm.panel"
+    # Linux: Adobe doesn't ship Premiere on Linux; return None so the
+    # caller knows there's no realistic path here.
+    return None
+
+
+def is_premiere_panel_alive(max_age_seconds: float = PREMIERE_HEARTBEAT_MAX_AGE) -> bool:
+    """True when the panel has written a heartbeat within *max_age_seconds*.
+
+    Indicates that Premiere is running with the panel loaded and able to
+    process triggers. Stale heartbeats (Premiere closed) read as not alive.
+    """
+    hb = premiere_heartbeat_path()
+    try:
+        st = hb.stat()
+    except (OSError, FileNotFoundError):
+        return False
+    import time
+    return (time.time() - st.st_mtime) <= max_age_seconds
+
+
+def write_premiere_trigger(payload: Optional[dict] = None) -> Path:
+    """Drop a trigger JSON into the panel's watch directory.
+
+    Atomic temp+rename so the panel never reads a half-written file.
+    Returns the final trigger path.
+    """
+    import json
+    import time
+    import uuid
+
+    trig_dir = premiere_trigger_dir()
+    trig_dir.mkdir(parents=True, exist_ok=True)
+
+    body = dict(payload or {})
+    body.setdefault("id", uuid.uuid4().hex)
+    body.setdefault("issued_at", time.strftime("%Y-%m-%dT%H:%M:%S",
+                                                time.localtime()))
+    body.setdefault("source_app", "lvm")
+
+    final = trig_dir / f"{body['id']}.json"
+    tmp = trig_dir / f"{body['id']}.json.tmp"
+    tmp.write_text(json.dumps(body), encoding="utf-8")
+    tmp.replace(final)
+    return final
