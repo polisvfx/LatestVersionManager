@@ -19,6 +19,7 @@ __all__ = [
     "resolve_script_path",
     "prepare_resolve_command",
     "run_resolve_sync",
+    "run_resolve_in_process",
 ]
 
 import os
@@ -235,3 +236,97 @@ class ResolveSyncResult:
         return (f"ResolveSyncResult(ok={self.ok}, rc={self.returncode}, "
                 f"stdout={len(self.stdout)} chars, stderr={len(self.stderr)} chars, "
                 f"error={self.error!r})")
+
+
+def run_resolve_in_process(log) -> dict:
+    """Run the Resolve rename inside this Python process.
+
+    Loads the bundled companion script as a module, ensures
+    ``DaVinciResolveScript`` is on ``sys.path``, connects to a running
+    Resolve, and calls ``rename_clips``. Avoids subprocess entirely so
+    frozen PyInstaller builds work — ``sys.executable`` in a frozen build
+    is the LVM ``.exe`` itself, not a Python interpreter, so spawning
+    ``[sys.executable, script]`` opens a second LVM instance instead of
+    running the script.
+
+    Args:
+        log: ``log(level, message)`` callable. ``level`` is one of
+            ``"info"``, ``"warning"``, ``"error"``.
+
+    Returns:
+        Stats dict from :func:`rename_clips`. Always returns a dict; check
+        ``stats["ok"]`` to see if the rename ran. ``stats["errors"]`` is
+        non-zero on any failure including pre-flight.
+    """
+    stats_failed = {"renamed": 0, "idempotent": 0, "no_match": 0,
+                    "errors": 1, "ok": False}
+
+    modules = resolve_modules_path()
+    if not modules:
+        log("error",
+            "DaVinci Resolve scripting modules not found. Install "
+            "DaVinci Resolve Studio (or use the in-Resolve script: "
+            "Workspace -> Scripts -> Edit -> lvm_restore_versions).")
+        return stats_failed
+
+    modules_str = str(modules)
+    if modules_str not in sys.path:
+        sys.path.insert(0, modules_str)
+
+    try:
+        import DaVinciResolveScript as dvr_script  # type: ignore
+    except ImportError as e:
+        log("error",
+            f"Could not import DaVinciResolveScript from {modules_str}: {e}")
+        return stats_failed
+
+    # The library load is keyed off RESOLVE_SCRIPT_LIB; ensure it's set so
+    # ctypes can find fusionscript.dll/.so.
+    lib = resolve_script_lib_path()
+    if lib and not os.environ.get("RESOLVE_SCRIPT_LIB"):
+        os.environ["RESOLVE_SCRIPT_LIB"] = str(lib)
+
+    try:
+        resolve_app = dvr_script.scriptapp("Resolve")
+    except Exception as e:
+        log("error", f"DaVinciResolveScript.scriptapp raised: {e}")
+        return stats_failed
+
+    if not resolve_app:
+        log("error",
+            "Could not connect to DaVinci Resolve. Is Resolve Studio running?")
+        return stats_failed
+
+    # Load the companion script as a module and call its rename_clips().
+    # Bundled at companions/resolve/lvm_restore_versions.py both in source
+    # and frozen PyInstaller builds (see lvm.spec datas).
+    import importlib.util
+    script_path = resolve_script_path()
+    if not script_path.is_file():
+        log("error", f"Companion script missing at {script_path}")
+        return stats_failed
+
+    spec = importlib.util.spec_from_file_location(
+        "lvm_companion_resolve", str(script_path),
+    )
+    if spec is None or spec.loader is None:
+        log("error", f"Could not load companion script from {script_path}")
+        return stats_failed
+
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as e:
+        log("error", f"Companion script failed to load: {e}")
+        return stats_failed
+
+    rename_fn = getattr(module, "rename_clips", None)
+    if rename_fn is None:
+        log("error", "Companion script doesn't expose rename_clips().")
+        return stats_failed
+
+    try:
+        return rename_fn(resolve_app, log)
+    except Exception as e:
+        log("error", f"Rename run raised: {e}")
+        return stats_failed
