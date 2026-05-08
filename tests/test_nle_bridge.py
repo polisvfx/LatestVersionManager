@@ -414,5 +414,135 @@ class TestPremiereBridge(unittest.TestCase):
         self.assertTrue((d / "index.html").is_file())
 
 
+class TestPremiereInstaller(unittest.TestCase):
+    """install_premiere_panel / uninstall_premiere_panel — file copy is
+    hermetic, the OS-specific debug-mode toggle is mocked.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = Path(tempfile.mkdtemp(prefix="lvm_pr_install_"))
+        self._install_dir = self._tmp / "extensions" / "com.polisvfx.lvm.panel"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _patches(self, *, panel_source=None):
+        # Default: use the real bundled source so we exercise the actual
+        # tree copy. Tests can override via panel_source.
+        if panel_source is None:
+            panel_source = nle_bridge.premiere_panel_source_dir()
+        return mock.patch.multiple(
+            nle_bridge,
+            premiere_panel_install_dir=mock.MagicMock(return_value=self._install_dir),
+            premiere_panel_source_dir=mock.MagicMock(return_value=panel_source),
+            _set_premiere_debug_mode_windows=mock.MagicMock(return_value=4),
+            _set_premiere_debug_mode_macos=mock.MagicMock(return_value=4),
+        )
+
+    def test_install_copies_panel_and_sets_flags(self):
+        logged = []
+        with self._patches():
+            result = nle_bridge.install_premiere_panel(
+                log=lambda lvl, msg: logged.append((lvl, msg)))
+        self.assertTrue(result["ok"])
+        self.assertGreater(result["files_copied"], 0)
+        self.assertEqual(result["csxs_flags_set"], 4)
+        self.assertEqual(result["install_dir"], str(self._install_dir))
+        self.assertTrue(result["needs_premiere_restart"])
+        # Files actually landed
+        self.assertTrue((self._install_dir / "CSXS" / "manifest.xml").is_file())
+        self.assertTrue((self._install_dir / "host.jsx").is_file())
+
+    def test_install_replaces_existing_panel(self):
+        # Pre-create a stub install with a stale file.
+        (self._install_dir / "CSXS").mkdir(parents=True)
+        (self._install_dir / "stale.txt").write_text("delete me")
+
+        with self._patches():
+            result = nle_bridge.install_premiere_panel()
+        self.assertTrue(result["ok"])
+        self.assertFalse((self._install_dir / "stale.txt").exists())
+
+    def test_install_unsupported_os_returns_error(self):
+        with mock.patch.object(nle_bridge, "premiere_panel_install_dir",
+                                return_value=None):
+            result = nle_bridge.install_premiere_panel()
+        self.assertFalse(result["ok"])
+        self.assertIn("isn't supported", result["error"])
+
+    def test_install_missing_source_returns_error(self):
+        bogus_src = self._tmp / "missing"
+        with mock.patch.multiple(
+                nle_bridge,
+                premiere_panel_install_dir=mock.MagicMock(return_value=self._install_dir),
+                premiere_panel_source_dir=mock.MagicMock(return_value=bogus_src)):
+            result = nle_bridge.install_premiere_panel()
+        self.assertFalse(result["ok"])
+        self.assertIn("Bundled panel source not found", result["error"])
+
+    def test_uninstall_removes_panel_dir(self):
+        # Install first.
+        with self._patches():
+            nle_bridge.install_premiere_panel()
+            self.assertTrue(self._install_dir.is_dir())
+            result = nle_bridge.uninstall_premiere_panel()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["files_removed"])
+        self.assertFalse(self._install_dir.exists())
+        # Default uninstall doesn't touch debug-mode flags.
+        self.assertEqual(result["csxs_flags_cleared"], 0)
+
+    def test_uninstall_when_not_installed_is_noop(self):
+        with self._patches():
+            result = nle_bridge.uninstall_premiere_panel()
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["files_removed"])
+
+    def test_uninstall_with_clear_debug_mode_clears_flags(self):
+        with self._patches():
+            nle_bridge.install_premiere_panel()
+            result = nle_bridge.uninstall_premiere_panel(clear_debug_mode=True)
+        self.assertTrue(result["ok"])
+        # Hits the OS-specific clear path; mocked to return 4.
+        self.assertEqual(result["csxs_flags_cleared"], 4)
+
+
+class TestIsPremierePanelInstalled(unittest.TestCase):
+    """Probes the install marker (CSXS/manifest.xml) without touching
+    the real Adobe extensions folder.
+    """
+
+    def test_false_when_no_install_dir(self):
+        with mock.patch.object(nle_bridge, "premiere_panel_install_dir",
+                                return_value=None):
+            self.assertFalse(nle_bridge.is_premiere_panel_installed())
+
+    def test_false_when_manifest_missing(self):
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="lvm_inst_"))
+        try:
+            with mock.patch.object(nle_bridge, "premiere_panel_install_dir",
+                                    return_value=tmp):
+                self.assertFalse(nle_bridge.is_premiere_panel_installed())
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_true_when_manifest_present(self):
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="lvm_inst_"))
+        try:
+            (tmp / "CSXS").mkdir()
+            (tmp / "CSXS" / "manifest.xml").write_text("<x/>")
+            with mock.patch.object(nle_bridge, "premiere_panel_install_dir",
+                                    return_value=tmp):
+                self.assertTrue(nle_bridge.is_premiere_panel_installed())
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

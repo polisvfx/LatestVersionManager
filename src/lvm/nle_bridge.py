@@ -29,6 +29,12 @@ __all__ = [
     "is_premiere_panel_alive",
     "write_premiere_trigger",
     "PREMIERE_HEARTBEAT_MAX_AGE",
+    # Installer
+    "is_premiere_panel_installed",
+    "is_premiere_debug_mode_enabled",
+    "install_premiere_panel",
+    "uninstall_premiere_panel",
+    "PREMIERE_CSXS_VERSIONS",
 ]
 
 import os
@@ -450,3 +456,251 @@ def write_premiere_trigger(payload: Optional[dict] = None) -> Path:
     tmp.write_text(json.dumps(body), encoding="utf-8")
     tmp.replace(final)
     return final
+
+
+# ---------------------------------------------------------------------------
+# Premiere panel one-click installer.
+#
+# Adobe gates unsigned CEP extensions behind a per-user PlayerDebugMode flag
+# (registry on Windows, defaults on macOS) keyed by CSXS major version.
+# Premiere version → CSXS version (approximate, Adobe doesn't always bump it):
+#   Premiere 2019      → CSXS 9
+#   Premiere 2020-2023 → CSXS 10
+#   Premiere 2024+     → CSXS 11
+#   Premiere future    → CSXS 12 (preemptive)
+# Setting all of these is harmless — keys for unused CSXS versions are
+# ignored by Premiere and don't affect anything else on the system.
+# ---------------------------------------------------------------------------
+
+PREMIERE_CSXS_VERSIONS = (9, 10, 11, 12)
+
+
+def is_premiere_panel_installed() -> bool:
+    """True when the panel is present in Adobe's CEP extensions folder."""
+    install_dir = premiere_panel_install_dir()
+    if install_dir is None:
+        return False
+    manifest = install_dir / "CSXS" / "manifest.xml"
+    return manifest.is_file()
+
+
+def is_premiere_debug_mode_enabled() -> bool:
+    """True when *any* CSXS PlayerDebugMode flag is on for the current user.
+
+    Premiere only consults the CSXS version it was built against, but we
+    can't know which one the user has installed without launching Premiere,
+    so a true return here means at least one of the candidate versions is
+    enabled — sufficient to avoid prompting the user again.
+    """
+    if sys.platform.startswith("win") or sys.platform.startswith("cygwin"):
+        try:
+            import winreg
+        except ImportError:
+            return False
+        for v in PREMIERE_CSXS_VERSIONS:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                     fr"Software\Adobe\CSXS.{v}") as key:
+                    value, _ = winreg.QueryValueEx(key, "PlayerDebugMode")
+                    if str(value).strip() in ("1", "1.0"):
+                        return True
+            except OSError:
+                continue
+        return False
+
+    if sys.platform == "darwin":
+        for v in PREMIERE_CSXS_VERSIONS:
+            try:
+                proc = subprocess.run(
+                    ["defaults", "read", f"com.adobe.CSXS.{v}", "PlayerDebugMode"],
+                    capture_output=True, text=True, timeout=3,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if proc.returncode == 0 and proc.stdout.strip() == "1":
+                return True
+        return False
+
+    return False
+
+
+def _set_premiere_debug_mode_windows(enable: bool, log) -> int:
+    """Toggle PlayerDebugMode for every candidate CSXS version on Windows.
+
+    Returns the number of CSXS versions actually written/cleared.
+    """
+    try:
+        import winreg
+    except ImportError:
+        log("error", "winreg unavailable on this platform — cannot set "
+                     "PlayerDebugMode automatically.")
+        return 0
+
+    touched = 0
+    for v in PREMIERE_CSXS_VERSIONS:
+        sub = fr"Software\Adobe\CSXS.{v}"
+        try:
+            if enable:
+                with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, sub, 0,
+                                         winreg.KEY_SET_VALUE) as key:
+                    # PlayerDebugMode is documented as a string "1", but the
+                    # widely-followed community guidance also accepts a
+                    # DWORD. We write the string form Adobe uses.
+                    winreg.SetValueEx(key, "PlayerDebugMode", 0, winreg.REG_SZ, "1")
+                touched += 1
+                log("info", f"  CSXS.{v}: PlayerDebugMode = 1")
+            else:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub, 0,
+                                     winreg.KEY_SET_VALUE) as key:
+                    try:
+                        winreg.DeleteValue(key, "PlayerDebugMode")
+                        touched += 1
+                        log("info", f"  CSXS.{v}: PlayerDebugMode cleared")
+                    except FileNotFoundError:
+                        pass  # Value didn't exist; nothing to do.
+        except OSError as e:
+            log("warning", f"  CSXS.{v}: registry write failed: {e}")
+    return touched
+
+
+def _set_premiere_debug_mode_macos(enable: bool, log) -> int:
+    """Toggle PlayerDebugMode via `defaults` for each candidate CSXS version.
+
+    Returns the number of CSXS versions actually written/cleared.
+    """
+    touched = 0
+    for v in PREMIERE_CSXS_VERSIONS:
+        domain = f"com.adobe.CSXS.{v}"
+        try:
+            if enable:
+                args = ["defaults", "write", domain, "PlayerDebugMode", "1"]
+            else:
+                args = ["defaults", "delete", domain, "PlayerDebugMode"]
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log("warning", f"  CSXS.{v}: defaults call failed: {e}")
+            continue
+        if proc.returncode == 0:
+            touched += 1
+            verb = "set" if enable else "cleared"
+            log("info", f"  CSXS.{v}: PlayerDebugMode {verb}")
+    return touched
+
+
+def _copy_panel_tree(src: Path, dst: Path, log) -> int:
+    """Recursively copy the panel folder. Returns file count copied."""
+    import shutil
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+
+    count = 0
+    for _root, _dirs, files in os.walk(dst):
+        count += len(files)
+    log("info", f"  Copied {count} files into {dst}")
+    return count
+
+
+def install_premiere_panel(log=None) -> dict:
+    """One-click panel install: copy files + enable PlayerDebugMode.
+
+    Args:
+        log: optional ``log(level, message)`` callable (info/warning/error).
+
+    Returns a status dict::
+
+        {
+          "ok": bool,
+          "files_copied": int,
+          "csxs_flags_set": int,
+          "install_dir": str,
+          "needs_premiere_restart": bool,  # True when Premiere may already be open
+          "error": Optional[str],
+        }
+    """
+    if log is None:
+        log = lambda lvl, msg: None
+
+    install_dir = premiere_panel_install_dir()
+    if install_dir is None:
+        return {"ok": False, "files_copied": 0, "csxs_flags_set": 0,
+                "install_dir": "", "needs_premiere_restart": False,
+                "error": "Adobe Premiere isn't supported on this OS."}
+
+    src = premiere_panel_source_dir()
+    if not (src / "CSXS" / "manifest.xml").is_file():
+        return {"ok": False, "files_copied": 0, "csxs_flags_set": 0,
+                "install_dir": str(install_dir), "needs_premiere_restart": False,
+                "error": f"Bundled panel source not found at {src}. "
+                         "Reinstall LVM."}
+
+    log("info", f"Installing LVM Premiere panel to {install_dir}")
+    install_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        files = _copy_panel_tree(src, install_dir, log)
+    except OSError as e:
+        return {"ok": False, "files_copied": 0, "csxs_flags_set": 0,
+                "install_dir": str(install_dir), "needs_premiere_restart": False,
+                "error": f"File copy failed: {e}"}
+
+    log("info", "Enabling unsigned CEP extensions (PlayerDebugMode):")
+    if sys.platform.startswith("win") or sys.platform.startswith("cygwin"):
+        flags = _set_premiere_debug_mode_windows(True, log)
+    elif sys.platform == "darwin":
+        flags = _set_premiere_debug_mode_macos(True, log)
+    else:
+        flags = 0
+
+    return {
+        "ok": True,
+        "files_copied": files,
+        "csxs_flags_set": flags,
+        "install_dir": str(install_dir),
+        "needs_premiere_restart": True,
+        "error": None,
+    }
+
+
+def uninstall_premiere_panel(log=None, *, clear_debug_mode: bool = False) -> dict:
+    """Remove the installed panel folder.
+
+    By default leaves PlayerDebugMode enabled so any other unsigned CEP
+    panels keep working. Pass ``clear_debug_mode=True`` to also clear the
+    registry/defaults entries this installer set.
+    """
+    import shutil
+    if log is None:
+        log = lambda lvl, msg: None
+
+    install_dir = premiere_panel_install_dir()
+    if install_dir is None:
+        return {"ok": False, "files_removed": False, "csxs_flags_cleared": 0,
+                "error": "Adobe Premiere isn't supported on this OS."}
+
+    removed = False
+    if install_dir.exists():
+        try:
+            shutil.rmtree(install_dir)
+            removed = True
+            log("info", f"Removed panel directory: {install_dir}")
+        except OSError as e:
+            return {"ok": False, "files_removed": False, "csxs_flags_cleared": 0,
+                    "error": f"Could not remove panel directory: {e}"}
+    else:
+        log("info", f"Panel directory wasn't present: {install_dir}")
+
+    cleared = 0
+    if clear_debug_mode:
+        log("info", "Clearing PlayerDebugMode flags:")
+        if sys.platform.startswith("win") or sys.platform.startswith("cygwin"):
+            cleared = _set_premiere_debug_mode_windows(False, log)
+        elif sys.platform == "darwin":
+            cleared = _set_premiere_debug_mode_macos(False, log)
+
+    return {
+        "ok": True,
+        "files_removed": removed,
+        "csxs_flags_cleared": cleared,
+        "error": None,
+    }
