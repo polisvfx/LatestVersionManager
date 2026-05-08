@@ -68,6 +68,12 @@ a = Analysis(
         'src.lvm.timecode',
         'src.lvm.thumbnail',
         'src.lvm.updater',
+        'src.lvm.nle_bridge',
+        # Stdlib modules used by the bundled NLE companion script
+        # (companions/ is shipped as data, so PyInstaller can't see what
+        # those scripts import — list anything they need here).
+        'glob',
+        'importlib.util',
         # Bundled ffmpeg binary provider
         'imageio_ffmpeg',
         'imageio_ffmpeg._utils',

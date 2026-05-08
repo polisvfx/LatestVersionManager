@@ -21,11 +21,11 @@ Run from Workspace -> Scripts -> Edit -> lvm_restore_versions.
 Compatible with the script API exposed by DaVinci Resolve 17+.
 """
 
-import glob
 import json
 import os
 import re
 import sys
+from pathlib import Path
 
 
 def _default_modules_path():
@@ -137,8 +137,18 @@ def _match_sidecar_to_clip(clip_path):
     if not clip_dir or not clip_basename:
         return None, None
 
-    pattern = os.path.join(clip_dir, ".latest_history*.json")
-    for sc_path in sorted(glob.glob(pattern)):
+    # pathlib.Path.glob (rather than the stdlib ``glob`` module) keeps this
+    # script working in PyInstaller frozen builds where ``glob`` may not be
+    # bundled — the companion is shipped as a data file, not analysed for
+    # imports, so any stdlib it uses must also live somewhere in the host
+    # app's transitive imports. ``pathlib`` is used throughout LVM and is
+    # always available.
+    try:
+        sc_paths = sorted(str(p) for p in Path(clip_dir).glob(".latest_history*.json"))
+    except OSError:
+        sc_paths = []
+
+    for sc_path in sc_paths:
         data = _read_sidecar(sc_path)
         if not data:
             continue
