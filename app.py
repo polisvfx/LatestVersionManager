@@ -6107,14 +6107,17 @@ class MainWindow(QMainWindow):
         try:
             from src.lvm.nle_bridge import (
                 is_resolve_external_available,
+                is_resolve_running,
                 is_premiere_panel_alive,
                 premiere_panel_install_dir,
             )
             resolve_available = is_resolve_external_available()
+            resolve_alive = resolve_available and is_resolve_running()
             premiere_alive = is_premiere_panel_alive()
             premiere_install_dir = premiere_panel_install_dir()
         except ImportError:
             resolve_available = False
+            resolve_alive = False
             premiere_alive = False
             premiere_install_dir = None
 
@@ -6122,14 +6125,18 @@ class MainWindow(QMainWindow):
         running_resolve = (getattr(self, "_sync_names_worker", None) is not None and
                            self._sync_names_worker.isRunning())
 
-        if resolve_available:
-            r_tip = ("Run the LVM rename script against a running "
-                     "DaVinci Resolve Studio (Resolve must be open).")
-        else:
+        if not resolve_available:
             r_tip = ("Requires DaVinci Resolve Studio (free version supports "
                      "the in-NLE script only: Workspace -> Scripts -> Edit -> "
                      "lvm_restore_versions).")
-        self._sync_names_resolve_action.setEnabled(resolve_available and not running_resolve)
+        elif not resolve_alive:
+            r_tip = ("DaVinci Resolve isn't running. Open it first, then "
+                     "click Sync Resolve.")
+        else:
+            r_tip = ("Run the LVM rename script against the open "
+                     "DaVinci Resolve Studio project.")
+        self._sync_names_resolve_action.setEnabled(
+            resolve_available and resolve_alive and not running_resolve)
         self._sync_names_resolve_action.setToolTip(r_tip)
 
         if hasattr(self, "_nle_sync_btn"):
@@ -6137,7 +6144,15 @@ class MainWindow(QMainWindow):
                 self._nle_sync_btn.setText("Syncing Resolve…")
                 self._nle_sync_btn.setEnabled(False)
                 self._nle_sync_btn.setToolTip("Sync in progress — see log dock.")
-            elif resolve_available:
+            elif not resolve_available:
+                self._nle_sync_btn.setText("Resolve: not detected")
+                self._nle_sync_btn.setEnabled(False)
+                self._nle_sync_btn.setToolTip(r_tip)
+            elif not resolve_alive:
+                self._nle_sync_btn.setText("Resolve: not running")
+                self._nle_sync_btn.setEnabled(False)
+                self._nle_sync_btn.setToolTip(r_tip)
+            else:
                 self._nle_sync_btn.setText("Sync Resolve")
                 self._nle_sync_btn.setEnabled(True)
                 auto = (self.config and
@@ -6145,10 +6160,6 @@ class MainWindow(QMainWindow):
                 hint = " (auto-sync after promote enabled)" if auto else ""
                 self._nle_sync_btn.setToolTip(
                     "Click to run the Resolve rename script now." + hint)
-            else:
-                self._nle_sync_btn.setText("Resolve: not detected")
-                self._nle_sync_btn.setEnabled(False)
-                self._nle_sync_btn.setToolTip(r_tip)
 
         # ----- Premiere menu + button -----
         # The Premiere bridge is fire-and-forget — LVM writes a trigger
@@ -6197,6 +6208,45 @@ class MainWindow(QMainWindow):
                 self, "Sync Names",
                 "A sync is already in progress. Wait for it to finish.",
             )
+            return
+
+        # Fast pre-flight: even if the cached "Resolve running" state was
+        # stale and the button got clicked, re-check now so we surface a
+        # clear message instead of a 4-second timeout from the worker.
+        try:
+            from src.lvm.nle_bridge import (
+                is_resolve_external_available, is_resolve_running,
+                invalidate_resolve_running_cache,
+            )
+        except ImportError:
+            is_resolve_external_available = lambda: False
+            is_resolve_running = lambda force=False: False
+            invalidate_resolve_running_cache = lambda: None
+
+        invalidate_resolve_running_cache()
+        if not is_resolve_external_available():
+            self._refresh_sync_names_state()
+            if not automatic:
+                QMessageBox.information(
+                    self, "Sync Resolve",
+                    "DaVinci Resolve Studio isn't installed on this machine. "
+                    "Free Resolve users can run Workspace → Scripts → Edit → "
+                    "lvm_restore_versions from inside Resolve instead.",
+                )
+            else:
+                logger.info("Auto-sync Resolve: skipped (Resolve not detected).")
+            return
+
+        if not is_resolve_running(force=True):
+            self._refresh_sync_names_state()
+            if not automatic:
+                QMessageBox.information(
+                    self, "Sync Resolve",
+                    "DaVinci Resolve isn't running.\n\n"
+                    "Open Resolve and try again.",
+                )
+            else:
+                logger.info("Auto-sync Resolve: skipped (Resolve not running).")
             return
 
         self._refresh_sync_names_state()
@@ -6271,10 +6321,9 @@ class MainWindow(QMainWindow):
             return
 
         if getattr(self.config, "nle_auto_sync_resolve", False):
-            if is_resolve_external_available():
-                self._sync_names_resolve(automatic=True)
-            else:
-                logger.info("Auto-sync Resolve: skipped (Resolve not detected).")
+            # Let _sync_names_resolve do its own pre-flight (force-checks
+            # the running state and surfaces a clear log line on skip).
+            self._sync_names_resolve(automatic=True)
 
         if getattr(self.config, "nle_auto_sync_premiere", False):
             if is_premiere_panel_alive():
