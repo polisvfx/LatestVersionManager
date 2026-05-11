@@ -18,7 +18,7 @@ In a typical compositing or grading workflow, artists iterate through numbered v
 
 **Promote any version to "latest" with one click.** Select a source and a version, and LVM copies (or symlinks/hardlinks) all the files into the target directory your tools are reading from. File names are cleaned up automatically - version tags are stripped so the downstream tool sees a stable, predictable path regardless of which version is active.
 
-**Show the actual version inside DaVinci Resolve and Adobe Premiere.** Companion scripts read the LVM sidecar next to each imported `_latest.*` clip and rename the **clip's display name** in the NLE to the source's versioned filename (e.g. `SH0010_comp_v003.mov`). The on-disk file is untouched. Inside DaVinci Resolve, run **Workspace → Scripts → Edit → lvm_restore_versions** (works on **both Free and Studio**). DaVinci Resolve **Studio** users also get a one-click **"Sync Resolve"** button in LVM's status bar plus an opt-in **auto-sync after every promote** — Free Resolve doesn't expose external scripting, so those LVM-driven entry points stay disabled there. Premiere users get a bundled **CEP panel** that gives them the equivalent **"Sync Premiere"** button and auto-sync; install once into Adobe's CEP extensions folder and LVM can drive renames automatically. There's also a standalone `.jsx` for one-shot use via File → Scripts → Run Script File. Full setup in [docs/companions.md](docs/companions.md).
+**Show the actual version inside DaVinci Resolve and Adobe Premiere.** Companion scripts rename imported clips in the NLE to the real source version (e.g. `SH0010_comp_v003.mov`) without touching the file on disk. See [DaVinci Resolve & Premiere integration](#davinci-resolve--premiere-integration) below.
 
 **Track frame ranges and timecodes.** LVM detects frame ranges in image sequences and reads embedded timecodes. When you switch versions, it warns you if the frame range or timecode has changed - a common gotcha when swapping renders mid-project.
 
@@ -150,6 +150,16 @@ python main.py save-template myproject.json --name "VFX Default"
 # List available templates
 python main.py list-templates
 ```
+
+## DaVinci Resolve & Premiere integration
+
+LVM ships companion scripts that rename imported clips in your NLE to match the actual promoted version (e.g. `SH0010_comp_v003.mov`). The on-disk file is never modified — only the clip's display name in the project panel.
+
+- **DaVinci Resolve Studio** — one-click **Sync Resolve** button in LVM's status bar, plus optional auto-sync after every promote.
+- **DaVinci Resolve (Free)** — run **Workspace → Scripts → Edit → lvm_restore_versions** from inside Resolve.
+- **Adobe Premiere** — install the bundled CEP panel for a **Sync Premiere** button and auto-sync, or run the standalone `.jsx` via **File → Scripts → Run Script File** for one-shot renames.
+
+Setup, requirements, and troubleshooting: [docs/companions.md](docs/companions.md).
 
 ## Link Modes
 
