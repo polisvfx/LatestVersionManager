@@ -8,14 +8,26 @@ name: Build Distributables
 on:
   push:
     branches: [main, dev]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   release:
     types: [published]
   workflow_dispatch:
 
 permissions:
   contents: write   # Required to upload files to GitHub Releases
+
+# Cancel superseded runs on the same branch so rapid pushes don't pile up
+# artifact uploads. Release runs are never cancelled.
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
 
 jobs:
   build:
@@ -209,7 +221,7 @@ jobs:
       # format for macOS. Zip files strip extended attributes and can
       # re-trigger Gatekeeper warnings.
       - name: Create macOS DMG
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.event_name == 'release'
         run: |
           brew install create-dmg
 
@@ -254,29 +266,33 @@ jobs:
           zip -r ${{ matrix.artifact_name }}.zip LatestVersionManager/
 
       # ── Upload artifact (for every build — kept 7 days) ─────────────────
+      # Artifact uploads are skipped on direct pushes to main/dev — those runs
+      # are build-verification only and the zips are never downloaded. PR and
+      # workflow_dispatch runs upload with 1-day retention; release runs hand
+      # off to the publish job which attaches to the GitHub Release.
       - name: Upload build artifact (Windows / Linux)
-        if: runner.os != 'macOS'
+        if: runner.os != 'macOS' && github.event_name != 'push'
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}.zip
-          retention-days: 7
+          retention-days: 1
 
       - name: Upload build artifact (macOS DMG)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.event_name == 'release'
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}-dmg
           path: dist/${{ matrix.artifact_name }}.dmg
-          retention-days: 7
+          retention-days: 1
 
       - name: Upload build artifact (macOS ZIP)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.event_name != 'push'
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}.zip
-          retention-days: 7
+          retention-days: 1
 
   # ── Python source distribution (platform-independent zip) ───────────────────
   # Packages the raw Python scripts so users with Python already installed can
@@ -314,11 +330,12 @@ jobs:
             --exclude "**/*.pyc"
 
       - name: Upload Python source artifact
+        if: github.event_name != 'push'
         uses: actions/upload-artifact@v6
         with:
           name: LatestVersionManager-python
           path: dist/LatestVersionManager-python.zip
-          retention-days: 7
+          retention-days: 1
 
   # ── Attach all artifacts to GitHub Release (only when a release is published) ──
   # Runs after all matrix builds finish, so only one job touches the release.
