@@ -24,11 +24,13 @@ In a typical compositing or grading workflow, artists iterate through numbered v
 
 **Keep a full promotion history.** Every promotion is logged with the version, timestamp, frame range, and who made the change. You can review the history for any source to see exactly what was live and when - useful for debugging or rolling back.
 
+**Visualise the full promotion history.** A Gantt-style **View → History Timeline...** dialog plots every promotion across every source on one zoomable timeline — bars coloured by group, pinned and current promotes highlighted, click-to-select integration with the main window, and source-name / group / date-range filters. Reads from the existing `.latest_history.json` sidecars, no extra storage.
+
 **Verify integrity at any time.** The verify command checks that the files in every "latest" folder actually match what's expected - catching silent corruption, accidental deletions, or manual edits that went sideways.
 
 **Batch promote everything at once.** The "promote all" feature scans every source in your project and promotes each one to its highest available version in a single operation. A review dialog lets you inspect each pending promotion with frame range and status details, toggle individual sources on or off, and spot potential issues before committing.
 
-**Roll back to a previous version.** Made a mistake? The rollback command re-promotes the previous version from your history in one step, both from the CLI and the GUI.
+**Undo or roll back a promotion.** Made a mistake? *Undo* re-promotes the previous version as a brand-new history entry (so hooks fire and nothing is lost), while *rollback* discards the most recent history entry. Both are available from the CLI (`undo`, `rollback`) and the GUI (right-click → "Undo Last Promote", `Ctrl+Z` for the confirm dialog, `Ctrl+Shift+Z` to skip the dialog and undo one step immediately).
 
 **Run custom hooks before and after promotion.** Configure shell commands that run automatically around every promotion. Pre-promote hooks can gate the operation (a non-zero exit blocks the promote), while post-promote hooks can trigger downstream notifications, renders, or syncs. Hook commands receive environment variables (`LVM_SOURCE_NAME`, `LVM_VERSION`, `LVM_TARGET_DIR`, etc.) for full context.
 
