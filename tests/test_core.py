@@ -1894,6 +1894,157 @@ class TestPromoter(unittest.TestCase):
         self.assertIn("modified since promotion", result["message"])
 
 
+class TestUndoPromote(unittest.TestCase):
+    """Test Promoter.undo — re-promotes previous history entry, preserves history."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="lvm_undo_")
+        self.source_dir = str(Path(self.tmpdir) / "renders")
+        self.target_dir = str(Path(self.tmpdir) / "online")
+        Path(self.source_dir).mkdir()
+        Path(self.target_dir).mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_source(self, **kwargs):
+        defaults = {
+            "name": "shot",
+            "source_dir": self.source_dir,
+            "latest_target": self.target_dir,
+            "version_pattern": "_v{version}",
+            "file_extensions": [".exr"],
+            "link_mode": "copy",
+            "override_latest_target": True,
+        }
+        defaults.update(kwargs)
+        return WatchedSource(**defaults)
+
+    def _promote(self, promoter, version_str, version_num):
+        """Scan, find this version, promote it."""
+        scanner = VersionScanner(promoter.source, [])
+        versions = scanner.scan()
+        target = next(v for v in versions if v.version_number == version_num)
+        return promoter.promote(target, user="t")
+
+    def test_undo_n1_happy_path(self):
+        """Promote v003 -> v004 -> v005, undo, current is v004 and history grows."""
+        _make_versioned_dirs(self.source_dir, "shot", ["v003", "v004", "v005"])
+        source = self._make_source()
+        promoter = Promoter(source)
+
+        self._promote(promoter, "v003", 3)
+        self._promote(promoter, "v004", 4)
+        self._promote(promoter, "v005", 5)
+        self.assertEqual(promoter.get_current_version().version, "v005")
+        self.assertEqual(len(promoter.get_history()), 3)
+
+        entry = promoter.undo()
+        self.assertEqual(entry.version, "v004")
+        self.assertEqual(promoter.get_current_version().version, "v004")
+        self.assertEqual(len(promoter.get_history()), 4)
+
+        # The previously-current v005 entry must still be present in history
+        versions_in_history = [h.version for h in promoter.get_history()]
+        self.assertIn("v005", versions_in_history)
+
+    def test_undo_n3(self):
+        """Promote v001..v005, undo n=3, current becomes v002."""
+        _make_versioned_dirs(self.source_dir, "shot",
+                             ["v001", "v002", "v003", "v004", "v005"])
+        source = self._make_source()
+        promoter = Promoter(source)
+
+        for v, n in [("v001", 1), ("v002", 2), ("v003", 3), ("v004", 4), ("v005", 5)]:
+            self._promote(promoter, v, n)
+
+        entry = promoter.undo(n=3)
+        # history before undo (newest first): [v005, v004, v003, v002, v001]
+        # n=3 => history[3] = v002
+        self.assertEqual(entry.version, "v002")
+        self.assertEqual(promoter.get_current_version().version, "v002")
+
+    def test_undo_empty_history_errors(self):
+        """No promotes yet — undo raises PromotionError."""
+        source = self._make_source()
+        promoter = Promoter(source)
+        with self.assertRaises(PromotionError):
+            promoter.undo()
+
+    def test_undo_n_out_of_range_errors(self):
+        """Only 1 promote in history — undo(n=1) has nothing to revert to."""
+        _make_versioned_dirs(self.source_dir, "shot", ["v001"])
+        source = self._make_source()
+        promoter = Promoter(source)
+        self._promote(promoter, "v001", 1)
+        with self.assertRaises(PromotionError) as ctx:
+            promoter.undo(n=1)
+        self.assertIn("history", str(ctx.exception).lower())
+
+    def test_undo_missing_source_files_errors(self):
+        """If the previous version's source files are gone, undo errors clearly."""
+        _make_versioned_dirs(self.source_dir, "shot", ["v003", "v004"])
+        source = self._make_source()
+        promoter = Promoter(source)
+        self._promote(promoter, "v003", 3)
+        self._promote(promoter, "v004", 4)
+
+        # Delete the v003 source dir
+        shutil.rmtree(Path(self.source_dir) / "shot_v003")
+
+        with self.assertRaises(PromotionError) as ctx:
+            promoter.undo()
+        msg = str(ctx.exception)
+        self.assertIn("v003", msg)
+        self.assertIn("no longer exist", msg.lower())
+
+    def test_undo_fires_hooks(self):
+        """Pre + post hooks must both fire during undo (it's a real promote)."""
+        _make_versioned_dirs(self.source_dir, "shot", ["v001", "v002"])
+        pre_marker = Path(self.tmpdir) / "pre.flag"
+        post_marker = Path(self.tmpdir) / "post.flag"
+
+        if sys.platform == "win32":
+            pre_cmd = f'cmd /c "echo pre > {pre_marker}"'
+            post_cmd = f'cmd /c "echo post > {post_marker}"'
+        else:
+            pre_cmd = f'touch "{pre_marker}"'
+            post_cmd = f'touch "{post_marker}"'
+
+        source = self._make_source(
+            pre_promote_cmd=pre_cmd,
+            post_promote_cmd=post_cmd,
+        )
+        promoter = Promoter(source)
+        self._promote(promoter, "v001", 1)
+        self._promote(promoter, "v002", 2)
+
+        # Reset markers so we only see hooks fired by the undo
+        pre_marker.unlink(missing_ok=True)
+        post_marker.unlink(missing_ok=True)
+
+        promoter.undo()
+        self.assertTrue(pre_marker.exists(), "Pre-promote hook did not fire on undo")
+        self.assertTrue(post_marker.exists(), "Post-promote hook did not fire on undo")
+
+    def test_undo_dry_run_returns_mapping(self):
+        """dry_run=True returns a file map without modifying history or target."""
+        _make_versioned_dirs(self.source_dir, "shot", ["v001", "v002"])
+        source = self._make_source()
+        promoter = Promoter(source)
+        self._promote(promoter, "v001", 1)
+        self._promote(promoter, "v002", 2)
+        hist_before = len(promoter.get_history())
+        current_before = promoter.get_current_version().version
+
+        result = promoter.undo(dry_run=True)
+        self.assertIn("file_map", result)
+        self.assertGreater(result["total_files"], 0)
+        # History and current must be unchanged
+        self.assertEqual(len(promoter.get_history()), hist_before)
+        self.assertEqual(promoter.get_current_version().version, current_before)
+
+
 class TestRemapFilename(unittest.TestCase):
     """Test Promoter._remap_filename."""
 

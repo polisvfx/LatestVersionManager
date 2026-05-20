@@ -128,6 +128,20 @@ class HistoryManager:
         data = self.load()
         return data["history"]
 
+    def get_previous(self, n: int = 1) -> Optional[HistoryEntry]:
+        """Return the entry that was current n promotes ago.
+
+        n=1 → the entry immediately before the current one (history[1]).
+        Returns None when the history doesn't go back that far. Raises
+        ValueError for n < 1.
+        """
+        if n < 1:
+            raise ValueError(f"n must be >= 1, got {n}")
+        history = self.get_history()
+        if len(history) <= n:
+            return None
+        return history[n]
+
     def record_promotion(self, entry: HistoryEntry):
         """
         Record a new promotion: set as current and prepend to history.

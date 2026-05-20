@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QToolBar, QSizePolicy, QFrame, QAbstractItemView,
     QColorDialog, QInputDialog, QStyledItemDelegate, QStyle,
     QTextEdit, QDockWidget, QPlainTextEdit, QScrollArea,
-    QToolButton,
+    QToolButton, QSpinBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData, QTimer
 from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence

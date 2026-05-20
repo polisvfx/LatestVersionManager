@@ -135,6 +135,11 @@ python main.py promote myproject.json hero_comp v003 --dry-run
 # Roll back to the previous version
 python main.py rollback myproject.json hero_comp
 
+# Undo the last promote (re-promotes the previous version; history is preserved)
+python main.py undo myproject.json hero_comp
+# Undo the last 2 promotes
+python main.py undo myproject.json hero_comp --steps 2 -y
+
 # View promotion history
 python main.py history myproject.json hero_comp
 

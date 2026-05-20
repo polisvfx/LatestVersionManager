@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.lvm.config import load_config, create_example_config, create_project
 from src.lvm.scanner import VersionScanner
-from src.lvm.promoter import Promoter, generate_report
+from src.lvm.promoter import Promoter, PromotionError, generate_report
 from src.lvm.models import WatchedSource, version_strings_match
 from src.lvm.discovery import discover, format_discovery_report
 from src.lvm.timecode import populate_timecodes
@@ -503,6 +503,64 @@ def cmd_rollback(args):
         print(f"Report written to: {args.report}")
 
 
+def cmd_undo(args):
+    """Undo the last promote(s) by re-promoting the previous version."""
+    config = load_config(args.config)
+
+    source = _find_source(config, args.source_name)
+    if not source:
+        print(f"Source '{args.source_name}' not found.")
+        sys.exit(1)
+
+    promoter = Promoter(source, config.task_tokens, config.project_name,
+                        nle_rename_options=config.nle_rename_options())
+
+    history = promoter.get_history()
+    if len(history) <= args.steps:
+        print(f"Cannot undo {args.steps} step(s): history has {len(history)} entr"
+              f"{'y' if len(history) == 1 else 'ies'}.")
+        sys.exit(1)
+
+    current = history[0]
+    target = history[args.steps]
+    print(f"Current: {current.version}")
+    print(f"Undo target: {target.version} (originally promoted by {target.set_by} at {target.set_at})")
+
+    # Diff hints
+    if current.frame_range != target.frame_range:
+        print(f"  Frame range: {current.frame_range} -> {target.frame_range}")
+    if current.start_timecode != target.start_timecode:
+        print(f"  Start TC:    {current.start_timecode} -> {target.start_timecode}")
+
+    if args.dry_run:
+        try:
+            result = promoter.undo(n=args.steps, dry_run=True)
+        except PromotionError as e:
+            print(f"Undo failed: {e}")
+            sys.exit(1)
+        print(f"\n[dry-run] Would copy {result['total_files']} files "
+              f"({_human_size(result['total_size_bytes'])}) "
+              f"using {result['link_mode']} mode.")
+        return
+
+    if not args.yes:
+        confirm = input("\nProceed with undo? [y/N] ").strip().lower()
+        if confirm != "y":
+            print("Cancelled.")
+            return
+
+    def progress(current_n, total, filename):
+        pct = int(current_n / total * 100) if total else 0
+        print(f"\r  Copying: {current_n}/{total} ({pct}%) - {filename}", end="", flush=True)
+
+    try:
+        entry = promoter.undo(n=args.steps, progress_callback=progress)
+    except PromotionError as e:
+        print(f"\nUndo failed: {e}")
+        sys.exit(1)
+    print(f"\n\nUndo complete. {source.name} is now at {entry.version}")
+
+
 def cmd_validate(args):
     """Validate a project config file."""
     try:
@@ -663,6 +721,14 @@ def main():
     p_rollback.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
     p_rollback.add_argument("--report", help="Write report to file (JSON)")
 
+    # undo
+    p_undo = subparsers.add_parser("undo", help="Undo the last promote (re-promotes the previous version)")
+    p_undo.add_argument("config", help="Path to project config JSON")
+    p_undo.add_argument("source_name", help="Name of the watched source")
+    p_undo.add_argument("--steps", type=int, default=1, help="Undo N promotes back (default 1)")
+    p_undo.add_argument("--dry-run", action="store_true", help="Preview without copying")
+    p_undo.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+
     # verify
     p_verify = subparsers.add_parser("verify", help="Verify integrity of latest targets")
     p_verify.add_argument("config", help="Path to project config JSON")
@@ -701,6 +767,7 @@ def main():
         "promote-all": cmd_promote_all,
         "history": cmd_history,
         "rollback": cmd_rollback,
+        "undo": cmd_undo,
         "verify": cmd_verify,
         "validate": cmd_validate,
         "save-template": cmd_save_template,

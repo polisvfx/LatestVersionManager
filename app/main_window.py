@@ -26,7 +26,7 @@ from app.workers import (
 )
 from app.widgets import VersionTreeWidget, SourceItemDelegate
 from app.dialogs.about import AboutDialog
-from app.dialogs.batch_promote import BatchPromoteReviewDialog
+from app.dialogs.batch_promote import BatchPromoteReviewDialog, UndoPromoteDialog
 from app.dialogs.discovery import DiscoveryDialog
 from app.dialogs.dry_run import DryRunDialog
 from app.dialogs.history_timeline import HistoryTimelineDialog
@@ -224,6 +224,16 @@ class MainWindow(QMainWindow):
         self.source_list.itemSelectionChanged.connect(self._on_source_selection_changed)
         self.source_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.source_list.customContextMenuRequested.connect(self._source_context_menu)
+        # Ctrl+Z = undo with confirmation; Ctrl+Shift+Z = skip the dialog
+        from PySide6.QtGui import QShortcut
+        undo_shortcut = QShortcut(QKeySequence.Undo, self.source_list)
+        undo_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        undo_shortcut.activated.connect(self._undo_selected_source)
+        undo_skip_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Z"), self.source_list)
+        undo_skip_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        undo_skip_shortcut.activated.connect(
+            lambda: self._undo_selected_source(skip_confirm=True)
+        )
         # Header context menu for column visibility
         self.source_list.header().setContextMenuPolicy(Qt.CustomContextMenu)
         self.source_list.header().customContextMenuRequested.connect(self._source_header_context_menu)
@@ -1058,6 +1068,17 @@ class MainWindow(QMainWindow):
             menu.addAction("Refresh Source", lambda: self._refresh_selected_sources(selected_indices))
         else:
             menu.addAction(f"Refresh {len(selected_indices)} Sources", lambda: self._refresh_selected_sources(selected_indices))
+
+        # Undo last promote (single source only)
+        if len(selected_indices) == 1:
+            menu.addSeparator()
+            idx = selected_indices[0]
+            source = self.config.watched_sources[idx]
+            promoter = self._promoters.get(source.name)
+            can_undo = bool(promoter and len(promoter.get_history()) >= 2)
+            undo_action = menu.addAction("Undo Last Promote", lambda: self._undo_source(idx))
+            undo_action.setShortcut(QKeySequence.Undo)
+            undo_action.setEnabled(can_undo)
 
         # Reveal in file browser
         menu.addSeparator()
@@ -3066,6 +3087,71 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
+        self._start_promotion(promoter, target_version)
+
+    def _undo_selected_source(self, skip_confirm: bool = False):
+        """Ctrl+Z handler — undoes the currently-selected source's last promote.
+
+        When *skip_confirm* is True (Ctrl+Shift+Z), bypass the confirmation
+        dialog and immediately undo a single step.
+        """
+        items = self.source_list.selectedItems()
+        if not items:
+            return
+        idx = self._resolve_source_index_from_item(items[0])
+        if idx < 0:
+            return
+        self._undo_source(idx, skip_confirm=skip_confirm)
+
+    def _undo_source(self, index: int, skip_confirm: bool = False):
+        """Open the undo confirmation dialog for source at *index* and dispatch.
+
+        When *skip_confirm* is True, undo one step immediately without a dialog.
+        """
+        if index < 0 or index >= len(self.config.watched_sources):
+            return
+        source = self.config.watched_sources[index]
+        promoter = self._promoters.get(source.name)
+        scanner = self._scanners.get(source.name)
+        if not promoter or not scanner:
+            QMessageBox.warning(self, "Undo Unavailable",
+                                f"No scanner/promoter loaded for {source.name}.")
+            return
+        if len(promoter.get_history()) < 2:
+            QMessageBox.information(self, "Nothing to Undo",
+                                    f"{source.name} has fewer than two history entries.")
+            return
+
+        if skip_confirm:
+            # Resolve previous version using the same logic the dialog uses,
+            # so we can surface a useful error instead of silently failing.
+            from src.lvm.promoter import PromotionError
+            try:
+                versions = scanner.scan()
+                prev = promoter.history.get_previous(1)
+                target_version = None
+                if prev is not None:
+                    for v in versions:
+                        if version_strings_match(v.version_string, prev.version, v.version_number):
+                            target_version = v
+                            break
+                if target_version is None:
+                    raise PromotionError(
+                        f"Source files for {prev.version if prev else 'previous version'} "
+                        f"no longer exist on disk."
+                    )
+            except PromotionError as e:
+                QMessageBox.warning(self, "Cannot Undo", str(e))
+                return
+            self._start_promotion(promoter, target_version)
+            return
+
+        dlg = UndoPromoteDialog(source, promoter, scanner, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        target_version = dlg.get_target_version()
+        if not target_version:
+            return
         self._start_promotion(promoter, target_version)
 
     def _start_promotion(self, promoter: Promoter, version: VersionInfo,
