@@ -408,7 +408,8 @@ class StatusWorker(QThread):
             promoter = None
 
             if source.latest_target:
-                promoter = Promoter(source, self._config.task_tokens, self._config.project_name)
+                promoter = Promoter(source, self._config.task_tokens, self._config.project_name,
+                                    nle_rename_options=self._config.nle_rename_options())
                 current = promoter.get_current_version()
 
                 if not current:
@@ -1501,6 +1502,8 @@ class ProjectSettingsDialog(QDialog):
 
         from src.lvm.nle_bridge import (
             is_resolve_external_available,
+            is_resolve_running,
+            invalidate_resolve_running_cache,
             is_premiere_panel_alive,
             is_premiere_panel_installed,
             premiere_panel_install_dir,
@@ -1520,20 +1523,121 @@ class ProjectSettingsDialog(QDialog):
         nle_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
         nle.addRow("", nle_help)
 
+        # ==================================================================
+        # Clip rename composition — applies to BOTH Resolve and Premiere, so
+        # it lives above the NLE-specific blocks below.
+        # ==================================================================
+        # The three toggles control what gets appended to the precomputed
+        # stem at sync time. Custom-template mode swaps the default
+        # {source_name} for a user template — frame/extension still come
+        # from the checkboxes because there are no tokens for them.
+        self.nle_rename_version_cb = QCheckBox("Version")
+        self.nle_rename_version_cb.setChecked(
+            getattr(config, "nle_rename_include_version", True))
+        self.nle_rename_frame_cb = QCheckBox("Frame number (.1001)")
+        self.nle_rename_frame_cb.setChecked(
+            getattr(config, "nle_rename_include_frame", False))
+        self.nle_rename_ext_cb = QCheckBox("File extension (.mov/.exr)")
+        self.nle_rename_ext_cb.setChecked(
+            getattr(config, "nle_rename_include_extension", False))
+
+        include_row = QHBoxLayout()
+        include_row.addWidget(self.nle_rename_version_cb)
+        include_row.addWidget(self.nle_rename_frame_cb)
+        include_row.addWidget(self.nle_rename_ext_cb)
+        include_row.addStretch()
+        nle.addRow("Clip rename:", include_row)
+
+        self.nle_rename_custom_cb = QCheckBox("Use custom template")
+        self.nle_rename_custom_cb.setChecked(
+            getattr(config, "nle_rename_custom_enabled", False))
+        self.nle_rename_custom_edit = QLineEdit(
+            getattr(config, "nle_rename_custom_template", "") or "{source_name}")
+        self.nle_rename_custom_edit.setEnabled(self.nle_rename_custom_cb.isChecked())
+        self.nle_rename_custom_edit.setPlaceholderText("{source_name}")
+        self.nle_rename_custom_edit.setToolTip(
+            "Tokens: {source_name}, {source_basename}, {source_fullname}, "
+            "{source_title}, {group}. Version / frame / extension are "
+            "appended based on the checkboxes above — they have no token."
+        )
+
+        custom_row = QHBoxLayout()
+        custom_row.addWidget(self.nle_rename_custom_cb, 0)
+        custom_row.addWidget(self.nle_rename_custom_edit, 1)
+        nle.addRow("", custom_row)
+
+        # Live preview — always shown, no paths.
+        self._nle_rename_preview = QLabel()
+        self._nle_rename_preview.setWordWrap(True)
+        self._nle_rename_preview.setStyleSheet(
+            "color: #c8c8c8; font-size: 11pt; font-family: Consolas, monospace;"
+        )
+        nle.addRow("Preview:", self._nle_rename_preview)
+
+        # Wire every input that affects the preview.
+        self.nle_rename_custom_cb.toggled.connect(
+            self.nle_rename_custom_edit.setEnabled)
+        for w in (self.nle_rename_version_cb, self.nle_rename_frame_cb,
+                  self.nle_rename_ext_cb, self.nle_rename_custom_cb):
+            w.toggled.connect(self._update_nle_rename_preview)
+        self.nle_rename_custom_edit.textChanged.connect(
+            self._update_nle_rename_preview)
+        self._update_nle_rename_preview()
+
         resolve_available = is_resolve_external_available()
-        status_text = ("DaVinci Resolve Studio: detected"
-                       if resolve_available
-                       else "DaVinci Resolve Studio: not detected — LVM-driven "
-                            "sync needs Studio. Free Resolve users can still "
-                            "run Workspace → Scripts → Edit → "
-                            "lvm_restore_versions from inside Resolve.")
-        resolve_status = QLabel(status_text)
-        resolve_status.setWordWrap(True)
-        resolve_status.setStyleSheet(
+
+        # ----- Resolve scripting library row (install detection) -----
+        install_text = ("Scripting library: found — LVM-driven sync available "
+                        "when Resolve Studio is running."
+                        if resolve_available
+                        else "Scripting library: not found — LVM-driven sync "
+                             "needs DaVinci Resolve Studio. Free Resolve users "
+                             "can still run Workspace → Scripts → Edit → "
+                             "lvm_restore_versions from inside Resolve.")
+        resolve_install_label = QLabel(install_text)
+        resolve_install_label.setWordWrap(True)
+        resolve_install_label.setStyleSheet(
             "color: #3aaa88; font-size: 11pt;" if resolve_available
             else "color: #ffaa00; font-size: 11pt;"
         )
-        nle.addRow("Status:", resolve_status)
+        nle.addRow("Status:", resolve_install_label)
+
+        # ----- Resolve running-process row -----
+        # Surfaced here so the user can answer "is the LVM-driven sync going
+        # to find a Resolve to talk to right now?" without leaving Settings.
+        # Running state is cached in nle_bridge — the Refresh button calls
+        # invalidate_resolve_running_cache() so the next probe is fresh.
+        self._resolve_running_label = QLabel()
+        self._resolve_running_label.setWordWrap(True)
+        resolve_refresh_btn = QPushButton("Refresh")
+        resolve_refresh_btn.setMaximumWidth(90)
+        resolve_refresh_btn.setToolTip(
+            "Re-check whether DaVinci Resolve is currently running. "
+            "The running state is otherwise cached for 10 seconds."
+        )
+
+        def _refresh_resolve_running(force: bool = True) -> None:
+            if force:
+                invalidate_resolve_running_cache()
+            running = is_resolve_running(force=True)
+            if running:
+                self._resolve_running_label.setText("DaVinci Resolve: running")
+                self._resolve_running_label.setStyleSheet(
+                    "color: #3aaa88; font-size: 11pt;"
+                )
+            else:
+                self._resolve_running_label.setText("DaVinci Resolve: not running")
+                self._resolve_running_label.setStyleSheet(
+                    "color: #ffaa00; font-size: 11pt;"
+                )
+
+        resolve_refresh_btn.clicked.connect(_refresh_resolve_running)
+        _refresh_resolve_running(force=False)  # initial fill without busting cache
+
+        running_row = QHBoxLayout()
+        running_row.addWidget(self._resolve_running_label, 1)
+        running_row.addWidget(resolve_refresh_btn, 0)
+        nle.addRow("Running:", running_row)
 
         self.nle_auto_sync_resolve_cb = QCheckBox(
             "Run the Resolve script automatically after every successful promote"
@@ -1655,6 +1759,77 @@ class ProjectSettingsDialog(QDialog):
 
         # Compute initial preview now that all fields exist
         self._update_path_preview()
+
+    def _update_nle_rename_preview(self):
+        """Recompute the NLE clip-rename preview from the current dialog state.
+
+        Shows two example renderings — one for a sequence frame and one for
+        a single-file clip — so the user can see how the toggles interact
+        without needing a real promote first.
+        """
+        try:
+            from src.lvm.task_tokens import (
+                compose_nle_display_stem, derive_source_tokens,
+            )
+        except ImportError:
+            self._nle_rename_preview.setText("(preview unavailable)")
+            return
+
+        include_version = self.nle_rename_version_cb.isChecked()
+        include_frame = self.nle_rename_frame_cb.isChecked()
+        include_ext = self.nle_rename_ext_cb.isChecked()
+        custom_enabled = self.nle_rename_custom_cb.isChecked()
+        custom_template = (
+            self.nle_rename_custom_edit.text().strip() or "{source_name}"
+        )
+
+        # Two representative inputs — one sequence-shaped, one container-shaped.
+        # If a source is selected, prefer its sample filename so the preview
+        # reflects the user's actual project; otherwise fall back to canned
+        # examples that exercise both shapes.
+        frame_ext_re = re.compile(r"([._])(\d+)\.(\w+)$")
+        if self._selected_source and self._selected_source.sample_filename:
+            samples = [("Source", self._selected_source.sample_filename)]
+        else:
+            samples = [
+                ("Sequence", "SH0010_comp_v003.1001.exr"),
+                ("Movie",    "SH0010_comp_v003.mov"),
+            ]
+        lines = []
+        for label, sample in samples:
+            try:
+                tokens = derive_source_tokens(
+                    sample,
+                    self._config.task_tokens,
+                    self._config.default_date_format,
+                    source_title=(self._selected_source.name
+                                  if self._selected_source else ""),
+                )
+            except Exception:
+                tokens = {"source_name": "", "source_basename": "",
+                          "source_fullname": "", "source_filename": sample,
+                          "source_title": ""}
+            stem = compose_nle_display_stem(
+                tokens,
+                include_version=include_version,
+                custom_enabled=custom_enabled,
+                custom_template=custom_template,
+                group_token_expander=_expand_group_token,
+                group="",
+            )
+            frame_match = frame_ext_re.search(sample)
+            name = stem
+            if frame_match and include_frame:
+                name = f"{name}{frame_match.group(1)}{frame_match.group(2)}"
+            if include_ext:
+                if frame_match:
+                    ext = frame_match.group(3)
+                else:
+                    _, _, ext = sample.rpartition(".")
+                if ext:
+                    name = f"{name}.{ext}"
+            lines.append(f"{label:9s} {sample}  →  {name or '(empty)'}")
+        self._nle_rename_preview.setText("\n".join(lines))
 
     def _update_path_preview(self):
         """Update the resolved path preview based on the current templates.
@@ -1974,6 +2149,13 @@ class ProjectSettingsDialog(QDialog):
         # NLE companion scripts
         config.nle_auto_sync_resolve = self.nle_auto_sync_resolve_cb.isChecked()
         config.nle_auto_sync_premiere = self.nle_auto_sync_premiere_cb.isChecked()
+        config.nle_rename_include_version = self.nle_rename_version_cb.isChecked()
+        config.nle_rename_include_frame = self.nle_rename_frame_cb.isChecked()
+        config.nle_rename_include_extension = self.nle_rename_ext_cb.isChecked()
+        config.nle_rename_custom_enabled = self.nle_rename_custom_cb.isChecked()
+        config.nle_rename_custom_template = (
+            self.nle_rename_custom_edit.text().strip() or "{source_name}"
+        )
 
         # Re-apply defaults to non-overridden sources
         apply_project_defaults(config)
@@ -5269,7 +5451,8 @@ class MainWindow(QMainWindow):
         for source, version in promote_list:
             promoter = self._promoters.get(source.name)
             if not promoter and source.latest_target:
-                promoter = Promoter(source, self.config.task_tokens, self.config.project_name)
+                promoter = Promoter(source, self.config.task_tokens, self.config.project_name,
+                                    nle_rename_options=self.config.nle_rename_options())
                 self._promoters[source.name] = promoter
             if promoter:
                 obsolete = promoter.detect_obsolete_layers(version)
@@ -5346,7 +5529,8 @@ class MainWindow(QMainWindow):
         if not promoter:
             # Create promoter if needed
             if source.latest_target:
-                promoter = Promoter(source, self.config.task_tokens, self.config.project_name)
+                promoter = Promoter(source, self.config.task_tokens, self.config.project_name,
+                                    nle_rename_options=self.config.nle_rename_options())
                 self._promoters[source.name] = promoter
             else:
                 self._batch_promote_index += 1

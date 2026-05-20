@@ -151,6 +151,13 @@ class HistoryEntry:
     latest_basename: str = ""              # stem of the latest output filename (no frame, no ext)
                                             # e.g. "hero_comp_latest" — used by NLE companion scripts
                                             # to match a clip on disk back to its source version.
+    # ----- NLE clip-rename, precomputed by LVM at promote time -----
+    # Companion scripts (Resolve .py, Premiere .jsx) read these fields from
+    # the sidecar and rename clips to:  <stem>[.<frame>][.<ext>] — the flags
+    # are toggled per-project from Settings → NLE → Clip rename.
+    nle_display_stem: str = ""                  # final stem to set as the NLE clip name
+    nle_display_include_frame: bool = False     # append the frame digits for image sequences
+    nle_display_include_extension: bool = False # append the file extension
 
     def to_dict(self) -> dict:
         d = {
@@ -177,6 +184,12 @@ class HistoryEntry:
             d["pinned"] = True
         if self.latest_basename:
             d["latest_basename"] = self.latest_basename
+        if self.nle_display_stem:
+            d["nle_display_stem"] = self.nle_display_stem
+        if self.nle_display_include_frame:
+            d["nle_display_include_frame"] = True
+        if self.nle_display_include_extension:
+            d["nle_display_include_extension"] = True
         return d
 
     @classmethod
@@ -197,6 +210,9 @@ class HistoryEntry:
             target_mtime=data.get("target_mtime"),
             pinned=data.get("pinned", False),
             latest_basename=data.get("latest_basename", ""),
+            nle_display_stem=data.get("nle_display_stem", ""),
+            nle_display_include_frame=data.get("nle_display_include_frame", False),
+            nle_display_include_extension=data.get("nle_display_include_extension", False),
         )
 
     @classmethod
@@ -436,8 +452,32 @@ class ProjectConfig:
     # Auto-write a Premiere trigger (picked up by the installed CEP panel)
     # after a successful promote. Off by default.
     nle_auto_sync_premiere: bool = False
+    # ----- NLE clip-rename composition (per-project) -----
+    # The companions (Resolve .py, Premiere .jsx) read the precomputed stem
+    # from the sidecar; the flags below control how LVM composes that stem
+    # plus per-file frame/extension suffixes at promote time.
+    nle_rename_include_version: bool = True        # append version segment (e.g. "_v003")
+    nle_rename_include_frame: bool = False         # append frame digits for image sequences
+    nle_rename_include_extension: bool = False     # append file extension
+    nle_rename_custom_enabled: bool = False        # use a custom token template instead of the default
+    nle_rename_custom_template: str = "{source_name}"  # template; tokens: {source_name}, {shot}, {sequence}, {task}
     # Runtime only — not serialized, set by config loader
     project_dir: str = field(default="", repr=False)
+
+    def nle_rename_options(self) -> dict:
+        """Bundle the NLE rename-composition fields into a single dict.
+
+        Consumed by :class:`Promoter` so it doesn't need to know the field
+        names individually. Kept as a method (not a property) to mirror the
+        other Promoter inputs that are passed in as plain values/dicts.
+        """
+        return {
+            "include_version":   self.nle_rename_include_version,
+            "include_frame":     self.nle_rename_include_frame,
+            "include_extension": self.nle_rename_include_extension,
+            "custom_enabled":    self.nle_rename_custom_enabled,
+            "custom_template":   self.nle_rename_custom_template or "{source_name}",
+        }
 
     @property
     def effective_project_root(self) -> str:
@@ -499,6 +539,17 @@ class ProjectConfig:
             d["nle_auto_sync_resolve"] = True
         if self.nle_auto_sync_premiere:
             d["nle_auto_sync_premiere"] = True
+        # Rename composition — only persist when non-default to keep JSON tidy.
+        if not self.nle_rename_include_version:
+            d["nle_rename_include_version"] = False
+        if self.nle_rename_include_frame:
+            d["nle_rename_include_frame"] = True
+        if self.nle_rename_include_extension:
+            d["nle_rename_include_extension"] = True
+        if self.nle_rename_custom_enabled:
+            d["nle_rename_custom_enabled"] = True
+        if self.nle_rename_custom_template and self.nle_rename_custom_template != "{source_name}":
+            d["nle_rename_custom_template"] = self.nle_rename_custom_template
         return d
 
     @classmethod
@@ -534,6 +585,11 @@ class ProjectConfig:
             ],
             nle_auto_sync_resolve=data.get("nle_auto_sync_resolve", False),
             nle_auto_sync_premiere=data.get("nle_auto_sync_premiere", False),
+            nle_rename_include_version=data.get("nle_rename_include_version", True),
+            nle_rename_include_frame=data.get("nle_rename_include_frame", False),
+            nle_rename_include_extension=data.get("nle_rename_include_extension", False),
+            nle_rename_custom_enabled=data.get("nle_rename_custom_enabled", False),
+            nle_rename_custom_template=data.get("nle_rename_custom_template", "{source_name}"),
         )
 
 

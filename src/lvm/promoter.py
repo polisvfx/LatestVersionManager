@@ -23,7 +23,7 @@ from typing import Optional, Callable
 from .models import VersionInfo, WatchedSource, HistoryEntry, has_media_extension
 from .history import HistoryManager
 from .hooks import run_pre_promote_hook, run_post_promote_hook, HookError
-from .task_tokens import derive_source_tokens
+from .task_tokens import derive_source_tokens, compose_nle_display_stem
 from .config import _expand_group_token
 from .fast_copy import smart_copy
 from .scanner import _group_files_by_sequence
@@ -95,10 +95,20 @@ def has_frame_gaps(version: VersionInfo) -> bool:
 class Promoter:
     """Handles promoting a version to the latest target."""
 
-    def __init__(self, watched_source: WatchedSource, task_tokens: list = None, project_name: str = ""):
+    def __init__(self, watched_source: WatchedSource, task_tokens: list = None,
+                 project_name: str = "", nle_rename_options: dict = None):
         self.source = watched_source
         self.task_tokens = task_tokens or []
         self.project_name = project_name
+        # Per-project clip-rename composition. Optional — when None the
+        # legacy companion fallback (full source basename) kicks in. Callers
+        # that own a ProjectConfig should pass a dict with keys:
+        #   include_version (bool, default True)
+        #   include_frame   (bool)
+        #   include_extension (bool)
+        #   custom_enabled  (bool)
+        #   custom_template (str)
+        self.nle_rename_options = nle_rename_options
 
         if not watched_source.latest_target:
             raise PromotionError(
@@ -297,6 +307,9 @@ class Promoter:
         # Capture the on-disk stem so NLE companion scripts can match this
         # sidecar to its clip even when several sources share a target dir.
         entry.latest_basename = self._compute_latest_basename(version, own_target_files)
+        # Precompute the NLE clip-rename stem + frame/extension flags so the
+        # companion scripts don't have to know about project settings.
+        self._populate_nle_display_fields(entry, version)
         # Extract clip frame count for container files
         if source_path.is_file() and source_path.suffix.lower() in (".mov", ".mxf", ".mp4", ".avi"):
             try:
@@ -518,6 +531,42 @@ class Promoter:
             return file_source_name[len(base_source_name):]
 
         return ""
+
+    def _populate_nle_display_fields(self, entry: HistoryEntry,
+                                      version: VersionInfo) -> None:
+        """Set entry.nle_display_stem and frame/extension flags from project options.
+
+        No-ops when no rename options were provided (legacy callers / tests) —
+        the companion scripts then fall back to the historical "use source
+        basename verbatim" behaviour.
+        """
+        opts = self.nle_rename_options
+        if not opts:
+            return
+
+        # Build tokens from the source's representative filename — falls back
+        # to the version's source path so promotes from sources without a
+        # sample filename still produce a sensible stem.
+        token_input = self.source.sample_filename or Path(version.source_path).name
+        tokens = derive_source_tokens(
+            token_input,
+            self.task_tokens,
+            getattr(self.source, "date_format", ""),
+            source_title=self.source.name,
+        )
+
+        stem = compose_nle_display_stem(
+            tokens,
+            include_version=bool(opts.get("include_version", True)),
+            custom_enabled=bool(opts.get("custom_enabled", False)),
+            custom_template=opts.get("custom_template") or "{source_name}",
+            group_token_expander=_expand_group_token,
+            group=self.source.group,
+        )
+
+        entry.nle_display_stem = stem
+        entry.nle_display_include_frame = bool(opts.get("include_frame", False))
+        entry.nle_display_include_extension = bool(opts.get("include_extension", False))
 
     def _compute_latest_basename(self, version: VersionInfo,
                                   written_files: Optional[list] = None) -> str:

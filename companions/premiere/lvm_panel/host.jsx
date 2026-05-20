@@ -130,16 +130,40 @@ var LVM = LVM || {};
         return false;
     }
 
-    function newDisplayName(sourcePath, clipBasename) {
+    function newDisplayName(sourcePath, clipBasename, cur) {
+        cur = cur || {};
+        var m = clipBasename.match(FRAME_EXT_RE);
+        var stem = cur.nle_display_stem || "";
+
+        if (stem) {
+            var includeFrame = !!cur.nle_display_include_frame;
+            var includeExt = !!cur.nle_display_include_extension;
+            var name = stem;
+            if (m && includeFrame) {
+                name = name + m[1] + m[2];
+            }
+            if (includeExt) {
+                var ext;
+                if (m) {
+                    ext = m[3];
+                } else {
+                    var dotI = clipBasename.lastIndexOf(".");
+                    ext = dotI > 0 ? clipBasename.substring(dotI + 1) : "";
+                }
+                if (ext) name = name + "." + ext;
+            }
+            return name;
+        }
+
+        // Legacy fallback for sidecars written by older LVM versions.
         if (!sourcePath) return "";
         var sourceBase = dirAndBaseFromPath(sourcePath).base;
         if (!sourceBase) return "";
-        var m = clipBasename.match(FRAME_EXT_RE);
         if (m) {
-            var sep = m[1], frame = m[2], ext = m[3];
+            var sep = m[1], frame = m[2], ext2 = m[3];
             var dot = sourceBase.lastIndexOf(".");
             var sourceStem = dot > 0 ? sourceBase.substring(0, dot) : sourceBase;
-            return sourceStem + sep + frame + "." + ext;
+            return sourceStem + sep + frame + "." + ext2;
         }
         return sourceBase;
     }
@@ -291,7 +315,8 @@ var LVM = LVM || {};
             if (!match) { skippedMatch++; return; }
 
             var clipBase = dirAndBaseFromPath(clipPath).base;
-            var newName = newDisplayName(match.sidecar.current.source || "", clipBase);
+            var cur = match.sidecar.current || {};
+            var newName = newDisplayName(cur.source || "", clipBase, cur);
             if (!newName) { skippedMatch++; return; }
 
             // Always queue the timeline rename even when the project-item

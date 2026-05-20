@@ -169,7 +169,7 @@ def cmd_scan(args):
             populate_timecodes(versions)
 
         # Check current version
-        promoter = Promoter(source, config.task_tokens, config.project_name)
+        promoter = Promoter(source, config.task_tokens, config.project_name, nle_rename_options=config.nle_rename_options())
         current = promoter.get_current_version()
         current_ver = current.version if current else None
 
@@ -190,7 +190,7 @@ def cmd_status(args):
     print(f"Project: {config.project_name}\n")
 
     for source in config.watched_sources:
-        promoter = Promoter(source, config.task_tokens, config.project_name)
+        promoter = Promoter(source, config.task_tokens, config.project_name, nle_rename_options=config.nle_rename_options())
         current = promoter.get_current_version()
         integrity = promoter.verify()
 
@@ -238,7 +238,7 @@ def cmd_promote(args):
         print(f"Available: {', '.join(v.version_string for v in versions)}")
         sys.exit(1)
 
-    promoter = Promoter(source, config.task_tokens, config.project_name)
+    promoter = Promoter(source, config.task_tokens, config.project_name, nle_rename_options=config.nle_rename_options())
     current_entry = promoter.get_current_version()
 
     # Dry run mode
@@ -324,7 +324,7 @@ def cmd_promote_all(args):
             continue
 
         highest = versions[-1]
-        promoter = Promoter(source, config.task_tokens, config.project_name)
+        promoter = Promoter(source, config.task_tokens, config.project_name, nle_rename_options=config.nle_rename_options())
         current = promoter.get_current_version()
 
         if not args.force and current and current.version == highest.version_string:
@@ -408,7 +408,7 @@ def cmd_history(args):
         print(f"Source '{args.source_name}' not found.")
         sys.exit(1)
 
-    promoter = Promoter(source, config.task_tokens, config.project_name)
+    promoter = Promoter(source, config.task_tokens, config.project_name, nle_rename_options=config.nle_rename_options())
     history = promoter.get_history()
 
     if not history:
@@ -430,7 +430,7 @@ def cmd_verify(args):
 
     all_ok = True
     for source in config.watched_sources:
-        promoter = Promoter(source, config.task_tokens, config.project_name)
+        promoter = Promoter(source, config.task_tokens, config.project_name, nle_rename_options=config.nle_rename_options())
         result = promoter.verify()
         icon = "OK" if result["valid"] else "!!"
         print(f"  [{icon}] {source.name}: {result['message']}")
@@ -452,7 +452,7 @@ def cmd_rollback(args):
         print(f"Source '{args.source_name}' not found.")
         sys.exit(1)
 
-    promoter = Promoter(source, config.task_tokens, config.project_name)
+    promoter = Promoter(source, config.task_tokens, config.project_name, nle_rename_options=config.nle_rename_options())
     history = promoter.get_history()
 
     if len(history) < 2:

@@ -108,18 +108,43 @@ def _stem_matches_clip(stem, clip_basename):
     return False
 
 
-def _new_display_name(source_path, clip_basename):
-    """Compose the new display name for *clip_basename* using *source_path*.
+def _new_display_name(source_path, clip_basename, cur=None):
+    """Compose the new display name for *clip_basename*.
 
-    For a single file: returns the source filename verbatim
-    (e.g. ``hero_comp_v003.mov``). For a sequence frame, preserves the
-    frame suffix and extension from the clip and uses the source's stem.
+    When the sidecar's ``current`` block (passed via *cur*) carries the
+    precomputed ``nle_display_stem`` field, that stem is used together with
+    the ``nle_display_include_frame`` / ``nle_display_include_extension``
+    booleans — this is the path taken whenever LVM produced the sidecar.
+
+    When those fields are absent (older sidecars), falls back to the legacy
+    behaviour: source filename verbatim for single files; ``stem.frame.ext``
+    for sequence frames. Keeps in-place upgrades working.
     """
+    cur = cur or {}
+    stem = cur.get("nle_display_stem") or ""
+    frame_match = _FRAME_EXT_RE.search(clip_basename)
+
+    if stem:
+        include_frame = bool(cur.get("nle_display_include_frame", False))
+        include_ext = bool(cur.get("nle_display_include_extension", False))
+        name = stem
+        if frame_match and include_frame:
+            sep = frame_match.group(1)
+            frame = frame_match.group(2)
+            name = f"{name}{sep}{frame}"
+        if include_ext:
+            if frame_match:
+                ext = frame_match.group(3)
+            else:
+                _, _, ext = clip_basename.rpartition(".")
+            if ext:
+                name = f"{name}.{ext}"
+        return name
+
+    # ---- legacy fallback (old sidecars without nle_display_stem) ----
     source_basename = os.path.basename(source_path) if source_path else ""
     if not source_basename:
         return ""
-
-    frame_match = _FRAME_EXT_RE.search(clip_basename)
     if frame_match:
         sep = frame_match.group(1)
         frame = frame_match.group(2)
@@ -240,7 +265,7 @@ def rename_clips(resolve, log=None):
             continue
 
         cur = sidecar["current"]
-        new_name = _new_display_name(cur.get("source", ""), os.path.basename(clip_path))
+        new_name = _new_display_name(cur.get("source", ""), os.path.basename(clip_path), cur)
         if not new_name:
             skipped_match += 1
             continue
