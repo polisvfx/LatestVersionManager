@@ -16,7 +16,7 @@ __all__ = [
     "strip_version", "strip_frame_and_ext", "strip_date",
     "derive_source_tokens", "compute_source_name", "get_naming_options",
     "validate_date_string", "parse_date_to_sortable", "format_date_display",
-    "parse_date_formats",
+    "parse_date_formats", "compose_nle_display_stem",
 ]
 
 import calendar
@@ -452,6 +452,69 @@ def compute_source_name(
 
     # Default: use source_name
     return tokens["source_name"]
+
+
+def compose_nle_display_stem(
+    tokens: dict,
+    *,
+    include_version: bool = True,
+    custom_enabled: bool = False,
+    custom_template: str = "{source_name}",
+    group_token_expander=None,
+    group: str = "",
+) -> str:
+    """Compose the NLE clip-rename stem from source tokens + project options.
+
+    Reuses the same token vocabulary as ``file_rename_template`` so users get
+    consistent behaviour across LVM's two naming systems.
+
+    Args:
+        tokens: Token dict from ``derive_source_tokens`` — needs at least
+            ``source_name``, ``source_basename``, ``source_fullname``,
+            ``source_filename``, ``source_title``.
+        include_version: When True the recovered version segment
+            (e.g. ``_v003``) is appended to the rendered template. When False
+            any version present in the template's expansion is stripped.
+        custom_enabled: When True render ``custom_template``; otherwise the
+            built-in default ``{source_name}`` is used.
+        custom_template: User-supplied template containing
+            ``{source_name}`` / ``{source_basename}`` / ``{source_fullname}``
+            / ``{source_title}`` / ``{group}`` tokens.
+        group_token_expander: Optional callable
+            ``f(text, group_name) -> text`` used to substitute the
+            ``{group}`` token. Passed in from the caller so this module
+            stays free of config-layer dependencies.
+        group: Group name forwarded to *group_token_expander*.
+
+    Frame digits and file extension are **not** handled here — those are
+    per-file decisions made at sync time by the companion scripts based on
+    the boolean flags stored alongside the stem in the sidecar.
+    """
+    base = custom_template if custom_enabled else "{source_name}"
+
+    base = base.replace("{source_title}",    tokens.get("source_title", ""))
+    base = base.replace("{source_name}",     tokens.get("source_name", ""))
+    base = base.replace("{source_basename}", tokens.get("source_basename", ""))
+    base = base.replace("{source_fullname}", tokens.get("source_fullname", ""))
+    if group_token_expander is not None:
+        base = group_token_expander(base, group)
+
+    # Strip any version baked into the expansion (e.g. {source_fullname}
+    # already contains "_v003") so we don't double-append below.
+    base = VERSION_RE.sub("", base, count=1)
+    base = re.sub(r"[_.\-]{2,}", lambda m: m.group()[0], base)
+    base = base.strip(DIVIDERS)
+
+    if include_version:
+        # Recover version from a token that preserves it.
+        for key in ("source_fullname", "source_filename"):
+            m = VERSION_RE.search(tokens.get(key, ""))
+            if m:
+                base = f"{base}{m.group()}"
+                break
+
+    base = re.sub(r"[_.\-]{2,}", lambda m: m.group()[0], base)
+    return base.strip(DIVIDERS)
 
 
 def get_naming_options(

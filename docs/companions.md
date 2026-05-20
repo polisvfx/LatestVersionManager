@@ -35,6 +35,35 @@ the new version automatically.
 
 ---
 
+## Clip-rename composition
+
+The display name a companion writes back to the NLE is **composed by LVM at
+promote time** and stored in the sidecar. Companions just apply it. Configure
+the composition in **Settings → NLE Companion Scripts → Clip rename**:
+
+- **Version (`_v003`)** — append the version segment recovered from the
+  source filename. On by default.
+- **Frame number (`.1001`)** — for image sequences only, append the frame
+  digits from the on-disk file at sync time. Off by default.
+- **File extension (`.mov` / `.exr` / …)** — append the on-disk file's
+  extension. Off by default.
+- **Use custom template** — swap the default `{source_name}` for a custom
+  template. Supports `{source_name}`, `{source_basename}`,
+  `{source_fullname}`, `{source_title}`, `{group}` — the same tokens used
+  by `file_rename_template`. Off by default. There is **no token** for
+  version, frame, or extension — those are appended via the checkboxes
+  above when enabled.
+
+A live preview in the Settings dialog shows what a representative sequence
+and movie clip would be renamed to.
+
+Backwards compatibility: sidecars produced by older LVM versions don't
+carry the precomputed stem; companions fall back to using the full source
+filename in that case (the previous behaviour). Promote once with a newer
+LVM build to upgrade the sidecar.
+
+---
+
 ## DaVinci Resolve
 
 `companions/resolve/lvm_restore_versions.py`
