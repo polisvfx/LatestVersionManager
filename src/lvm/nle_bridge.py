@@ -31,6 +31,8 @@ __all__ = [
     "is_premiere_panel_alive",
     "write_premiere_trigger",
     "PREMIERE_HEARTBEAT_MAX_AGE",
+    "PREMIERE_TRIGGER_SCHEMA_VERSION",
+    "collect_premiere_renames",
     # Installer
     "is_premiere_panel_installed",
     "is_premiere_debug_mode_enabled",
@@ -511,11 +513,128 @@ def is_premiere_panel_alive(max_age_seconds: float = PREMIERE_HEARTBEAT_MAX_AGE)
     return (time.time() - st.st_mtime) <= max_age_seconds
 
 
+PREMIERE_TRIGGER_SCHEMA_VERSION = 2
+
+# Mirrors the regex host.jsx uses to detect a ".<frame>.<ext>" suffix on
+# image-sequence frame files. Kept in sync with FRAME_EXT_RE there.
+_PREMIERE_FRAME_EXT_RE = __import__("re").compile(r"([._])(\d+)\.(\w+)$")
+
+
+def _premiere_display_name(clip_basename: str, cur: dict) -> str:
+    """Compose the panel display name for a clip basename + sidecar entry.
+
+    Mirrors ``newDisplayName`` in [host.jsx](companions/premiere/lvm_panel/host.jsx)
+    and ``_new_display_name`` in
+    [lvm_restore_versions.py](companions/resolve/lvm_restore_versions.py) so
+    the rename LVM precomputes matches what the panel would have derived
+    on its own. Single source of truth lives in those companions; this is
+    the Python mirror used for the v2 batched trigger path.
+    """
+    stem = (cur or {}).get("nle_display_stem") or ""
+    m = _PREMIERE_FRAME_EXT_RE.search(clip_basename)
+    if stem:
+        name = stem
+        if m and cur.get("nle_display_include_frame"):
+            name = f"{name}{m.group(1)}{m.group(2)}"
+        if cur.get("nle_display_include_extension"):
+            ext = m.group(3) if m else clip_basename.rpartition(".")[2]
+            if ext:
+                name = f"{name}.{ext}"
+        return name
+    # Legacy fallback — sidecars without nle_display_stem.
+    source = (cur or {}).get("source") or ""
+    if not source:
+        return ""
+    source_base = os.path.basename(source)
+    if m:
+        source_stem = source_base.rpartition(".")[0] or source_base
+        return f"{source_stem}{m.group(1)}{m.group(2)}.{m.group(3)}"
+    return source_base
+
+
+def collect_premiere_renames(latest_dirs) -> list:
+    """Build the v2 trigger ``renames`` list by reading sidecars on disk.
+
+    Walks every directory in *latest_dirs*, opens each
+    ``.latest_history*.json`` sidecar, and emits one rename entry per
+    on-disk file whose basename matches the sidecar's stem (i.e. the
+    files Premiere would have imported as that clip). Result entries:
+
+        {"clip_match_key": "<absolute file path>",
+         "new_display_name": "<panel-visible name>"}
+
+    Skips dirs that don't exist, sidecars without a ``current`` block,
+    and stems that don't match anything on disk — callers shouldn't have
+    to filter further.
+    """
+    import json
+    from pathlib import Path
+
+    seen = set()
+    renames: list = []
+    for d in latest_dirs:
+        if not d:
+            continue
+        dir_path = Path(d)
+        if not dir_path.is_dir():
+            continue
+        try:
+            sidecars = sorted(dir_path.glob(".latest_history*.json"))
+        except OSError:
+            continue
+        for sc in sidecars:
+            try:
+                data = json.loads(sc.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            cur = data.get("current") if isinstance(data, dict) else None
+            if not cur:
+                continue
+            stem = cur.get("latest_basename") or ""
+            if not stem:
+                continue
+            try:
+                entries = list(dir_path.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                base = entry.name
+                if base.startswith("."):
+                    continue
+                # Same stem-match rules as host.jsx stemMatchesClip().
+                stem_dot = base[:len(stem) + 1] in (stem + ".", stem + "_")
+                exact_with_ext = (base.rpartition(".")[0] == stem and "." in base)
+                if not (stem_dot or exact_with_ext):
+                    continue
+                key = str(entry)
+                if key in seen:
+                    continue
+                seen.add(key)
+                new_name = _premiere_display_name(base, cur)
+                if not new_name:
+                    continue
+                renames.append({
+                    "clip_match_key": key,
+                    "new_display_name": new_name,
+                })
+    return renames
+
+
 def write_premiere_trigger(payload: Optional[dict] = None) -> Path:
     """Drop a trigger JSON into the panel's watch directory.
 
     Atomic temp+rename so the panel never reads a half-written file.
     Returns the final trigger path.
+
+    When ``payload`` contains a ``renames`` list (the v2 batched form —
+    each entry ``{"clip_match_key": ..., "new_display_name": ...}``) the
+    writer stamps ``schema_version = 2`` so panels can dispatch to the
+    inline-rename path and skip a full sidecar scan. Legacy payloads
+    without ``renames`` are left at no schema_version so older
+    installed panels that don't know the field still treat them as a
+    plain "scan and rename" kick.
     """
     import json
     import time
@@ -529,6 +648,8 @@ def write_premiere_trigger(payload: Optional[dict] = None) -> Path:
     body.setdefault("issued_at", time.strftime("%Y-%m-%dT%H:%M:%S",
                                                 time.localtime()))
     body.setdefault("source_app", "lvm")
+    if "renames" in body and "schema_version" not in body:
+        body["schema_version"] = PREMIERE_TRIGGER_SCHEMA_VERSION
 
     final = trig_dir / f"{body['id']}.json"
     tmp = trig_dir / f"{body['id']}.json.tmp"

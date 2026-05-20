@@ -455,11 +455,127 @@ class TestPremiereBridge(unittest.TestCase):
         leftovers = list(path.parent.glob("*.tmp"))
         self.assertEqual(leftovers, [])
 
+    def test_write_trigger_batched_payload_stamps_schema_v2(self):
+        """v2 batched payload — renames list present, schema_version auto-stamped."""
+        import json
+        renames = [
+            {"clip_match_key": "/proj/shots/sh010/online/hero_latest.exr",
+             "new_display_name": "hero_v007.exr"},
+            {"clip_match_key": "/proj/shots/sh020/online/hero_latest.exr",
+             "new_display_name": "hero_v004.exr"},
+        ]
+        with self._patch_data_dir():
+            path = nle_bridge.write_premiere_trigger({"renames": renames})
+
+        body = json.loads(path.read_text())
+        self.assertEqual(body["schema_version"],
+                         nle_bridge.PREMIERE_TRIGGER_SCHEMA_VERSION)
+        self.assertEqual(body["renames"], renames)
+        self.assertIn("id", body)
+        self.assertEqual(body["source_app"], "lvm")
+
+    def test_write_trigger_legacy_payload_omits_schema_version(self):
+        """Old-style kick payload — no renames, no schema_version stamped.
+
+        Older installed panels predate the schema_version field; emitting
+        it would risk them taking the wrong path. The bridge stays silent
+        unless the caller opts into v2 by passing renames.
+        """
+        import json
+        with self._patch_data_dir():
+            path = nle_bridge.write_premiere_trigger({"automatic": True})
+
+        body = json.loads(path.read_text())
+        self.assertNotIn("schema_version", body)
+        self.assertNotIn("renames", body)
+        self.assertTrue(body["automatic"])
+
+    def test_write_trigger_caller_supplied_schema_version_preserved(self):
+        """An explicit schema_version from the caller wins over the default."""
+        import json
+        with self._patch_data_dir():
+            path = nle_bridge.write_premiere_trigger({
+                "renames": [],
+                "schema_version": 99,
+            })
+        body = json.loads(path.read_text())
+        self.assertEqual(body["schema_version"], 99)
+
     def test_write_trigger_creates_dir_if_missing(self):
         with self._patch_data_dir():
             self.assertFalse((self._tmp / "triggers").exists())
             nle_bridge.write_premiere_trigger()
             self.assertTrue((self._tmp / "triggers").is_dir())
+
+    def test_collect_renames_single_file_source(self):
+        """One sidecar + matching latest file → one rename entry with display name."""
+        import json
+        latest = self._tmp / "latest_single"
+        latest.mkdir()
+        (latest / "hero_latest.mov").write_text("x")
+        (latest / ".latest_history.json").write_text(json.dumps({
+            "current": {
+                "latest_basename": "hero_latest",
+                "nle_display_stem": "hero",
+                "nle_display_include_extension": True,
+                "source": "/wherever/hero_v007.mov",
+            },
+        }))
+        out = nle_bridge.collect_premiere_renames([str(latest)])
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0]["clip_match_key"].endswith("hero_latest.mov"))
+        self.assertEqual(out[0]["new_display_name"], "hero.mov")
+
+    def test_collect_renames_image_sequence_emits_per_frame(self):
+        """Sequence stem with several frame files → one entry per matching file."""
+        import json
+        latest = self._tmp / "latest_seq"
+        latest.mkdir()
+        for f in ("comp_latest.1001.exr", "comp_latest.1002.exr", "comp_latest.1003.exr"):
+            (latest / f).write_text("x")
+        # Unrelated neighbour shouldn't be picked up.
+        (latest / "other_thing.exr").write_text("x")
+        (latest / ".latest_history.json").write_text(json.dumps({
+            "current": {
+                "latest_basename": "comp_latest",
+                "nle_display_stem": "comp_v004",
+                "nle_display_include_frame": True,
+                "nle_display_include_extension": True,
+            },
+        }))
+        out = nle_bridge.collect_premiere_renames([str(latest)])
+        self.assertEqual(len(out), 3)
+        names = sorted(e["new_display_name"] for e in out)
+        self.assertEqual(names, ["comp_v004.1001.exr",
+                                  "comp_v004.1002.exr",
+                                  "comp_v004.1003.exr"])
+
+    def test_collect_renames_skips_missing_dir_and_bad_sidecar(self):
+        import json
+        latest = self._tmp / "latest_ok"
+        latest.mkdir()
+        (latest / "ok_latest.mov").write_text("x")
+        (latest / ".latest_history.json").write_text("not json{")
+        # Second source dir doesn't exist at all.
+        out = nle_bridge.collect_premiere_renames(
+            [str(latest), str(self._tmp / "does_not_exist")])
+        self.assertEqual(out, [])
+
+    def test_collect_renames_dedupes_across_dirs(self):
+        """Same latest_target appearing twice doesn't double-emit."""
+        import json
+        latest = self._tmp / "latest_dup"
+        latest.mkdir()
+        (latest / "x_latest.mov").write_text("x")
+        (latest / ".latest_history.json").write_text(json.dumps({
+            "current": {
+                "latest_basename": "x_latest",
+                "nle_display_stem": "x",
+                "nle_display_include_extension": True,
+            },
+        }))
+        out = nle_bridge.collect_premiere_renames([str(latest), str(latest)])
+        self.assertEqual(len(out), 1)
 
     def test_panel_install_dir_returns_path_on_supported_oses(self):
         # On Win/macOS we expect a concrete path; Linux returns None.
