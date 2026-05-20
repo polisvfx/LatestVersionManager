@@ -128,6 +128,142 @@ class BatchPromoteReviewDialog(QDialog):
         return selected
 
 
+class UndoPromoteDialog(QDialog):
+    """Confirmation dialog for Undo Promote.
+
+    Shows current -> target diff for a single source with a Steps spinbox.
+    Reuses the diff/coloring conventions from BatchPromoteReviewDialog.
+    """
+
+    def __init__(self, source, promoter, scanner, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Undo Last Promote")
+        self.setMinimumSize(720, 240)
+        self._source = source
+        self._promoter = promoter
+        self._scanner = scanner
+        self._versions = scanner.scan()
+        self._history = promoter.get_history()
+        self._target_version = None  # VersionInfo for accepted undo
+
+        layout = QVBoxLayout(self)
+
+        header = QLabel(f"<b>{source.name}</b>")
+        header.setStyleSheet("font-size: 13pt; padding: 4px;")
+        layout.addWidget(header)
+
+        steps_row = QHBoxLayout()
+        steps_row.addWidget(QLabel("Undo steps:"))
+        self.steps_spin = QSpinBox()
+        self.steps_spin.setMinimum(1)
+        self.steps_spin.setMaximum(max(1, len(self._history) - 1))
+        self.steps_spin.setValue(1)
+        self.steps_spin.valueChanged.connect(self._refresh)
+        steps_row.addWidget(self.steps_spin)
+        steps_row.addStretch()
+        layout.addLayout(steps_row)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(
+            ["Source", "Current", "Undo Target", "Files", "Frame Range", "Timecode", "Status"]
+        )
+        self.tree.setRootIsDecorated(False)
+        layout.addWidget(self.tree)
+
+        self.warn_label = QLabel("")
+        self.warn_label.setStyleSheet("color: #ff6666; padding: 4px;")
+        self.warn_label.setVisible(False)
+        layout.addWidget(self.warn_label)
+
+        hint = QLabel("Tip: Ctrl+Shift+Z skips this dialog and undoes one step immediately.")
+        hint.setStyleSheet("color: #8c8c8c; font-size: 10pt; padding: 2px 4px;")
+        layout.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.btn_ok = QPushButton("Undo")
+        self.btn_ok.setStyleSheet(
+            "QPushButton { background-color: #336699; color: white; padding: 8px 20px; "
+            "border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #4d7aae; }"
+        )
+        self.btn_ok.clicked.connect(self.accept)
+        btn_row.addWidget(self.btn_ok)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+        self._refresh()
+
+    def _refresh(self):
+        from src.lvm.models import version_strings_match
+        self.tree.clear()
+        self.warn_label.setVisible(False)
+        self._target_version = None
+
+        n = self.steps_spin.value()
+        if len(self._history) <= n:
+            self.warn_label.setText(
+                f"Not enough history to undo {n} step(s) — only {len(self._history)} entries."
+            )
+            self.warn_label.setVisible(True)
+            self.btn_ok.setEnabled(False)
+            return
+
+        current = self._history[0]
+        target = self._history[n]
+
+        # Match the historical entry against currently-scanned versions
+        target_version = None
+        for v in self._versions:
+            if version_strings_match(v.version_string, target.version, v.version_number):
+                target_version = v
+                break
+
+        if target_version is None:
+            self.warn_label.setText(
+                f"Source files for {target.version} no longer exist on disk."
+            )
+            self.warn_label.setVisible(True)
+            self.btn_ok.setEnabled(False)
+            return
+
+        self._target_version = target_version
+
+        row_status = "normal"
+        status_text = "OK"
+        if current.frame_range and target_version.frame_range and current.frame_range != target_version.frame_range:
+            row_status = "orange"
+            status_text = "Range changed"
+        elif current.start_timecode and target_version.start_timecode and current.start_timecode != target_version.start_timecode:
+            row_status = "orange"
+            status_text = "TC changed"
+
+        item = QTreeWidgetItem([
+            self._source.name,
+            current.version,
+            target_version.version_string,
+            str(target_version.file_count),
+            target_version.frame_range or "---",
+            target_version.start_timecode or "---",
+            status_text,
+        ])
+        color_map = {"normal": "#4ec9a0", "orange": "#ffaa00", "red": "#ff6666"}
+        color = QColor(color_map[row_status])
+        for col in range(0, 7):
+            item.setForeground(col, color)
+        self.tree.addTopLevelItem(item)
+        self.btn_ok.setEnabled(True)
+
+    def get_target_version(self):
+        """Return the VersionInfo to re-promote, or None if invalid."""
+        return self._target_version
+
+    def get_steps(self) -> int:
+        return self.steps_spin.value()
+
+
 # ---------------------------------------------------------------------------
 # Obsolete Layer Conflict Dialog
 # ---------------------------------------------------------------------------

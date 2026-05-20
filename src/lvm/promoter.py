@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Callable
 
-from .models import VersionInfo, WatchedSource, HistoryEntry, has_media_extension
+from .models import VersionInfo, WatchedSource, HistoryEntry, has_media_extension, version_strings_match
 from .history import HistoryManager
 from .hooks import run_pre_promote_hook, run_post_promote_hook, HookError
 from .task_tokens import derive_source_tokens, compose_nle_display_stem
@@ -821,6 +821,61 @@ class Promoter:
     def get_history(self) -> list[HistoryEntry]:
         """Get the full promotion history."""
         return self.history.get_history()
+
+    def undo(
+        self,
+        n: int = 1,
+        dry_run: bool = False,
+        user: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ):
+        """Undo the last N promotes by re-promoting the previous version.
+
+        The targeted historical version is *re-promoted* as a new promote —
+        hooks fire, and a new history entry is prepended (older entries are
+        preserved, never deleted).
+
+        Returns the new HistoryEntry on a real undo, or the dry_run dict
+        when dry_run=True. Raises PromotionError when there isn't enough
+        history or the source files for the target version are missing.
+        """
+        if n < 1:
+            raise PromotionError(f"undo steps must be >= 1, got {n}")
+
+        prev = self.history.get_previous(n)
+        if prev is None:
+            depth = len(self.history.get_history())
+            raise PromotionError(
+                f"Cannot undo {n} step(s): history only has {depth} entr"
+                f"{'y' if depth == 1 else 'ies'}."
+            )
+
+        # Re-scan the source so we have a fresh VersionInfo with current
+        # file paths / sizes — historical metadata alone is not enough.
+        from .scanner import VersionScanner
+        scanner = VersionScanner(self.source, self.task_tokens)
+        versions = scanner.scan()
+
+        target_version = None
+        for v in versions:
+            if version_strings_match(v.version_string, prev.version, v.version_number):
+                target_version = v
+                break
+
+        if target_version is None:
+            raise PromotionError(
+                f"Cannot undo: source files for {prev.version} no longer "
+                f"exist on disk."
+            )
+
+        if dry_run:
+            return self.dry_run(target_version)
+
+        return self.promote(
+            target_version,
+            user=user,
+            progress_callback=progress_callback,
+        )
 
     def dry_run(self, version: VersionInfo) -> dict:
         """Preview the file mapping for a promotion without copying anything.
