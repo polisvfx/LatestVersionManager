@@ -241,7 +241,7 @@ def _apply_filters(
     return filtered
 
 
-def _scan_version_dir(vdir: Path, ver_num: int, extensions: set):
+def _scan_version_dir(vdir: Path, ver_num: int, ver_pad: int, extensions: set):
     """Scan a single versioned directory for its metadata.
 
     Runs file collection, frame detection, and size computation.
@@ -250,7 +250,7 @@ def _scan_version_dir(vdir: Path, ver_num: int, extensions: set):
     Returns (VersionInfo, found_extensions_set, sample_filename) to avoid
     re-scanning the directory for extensions or sample filenames.
     """
-    ver_str = f"v{ver_num:03d}"
+    ver_str = f"v{ver_num:0{ver_pad}d}"
     files, total_size, found_exts = _collect_media_files_with_stats(vdir, extensions)
     frame_range, frame_count, sub_sequences = _detect_frame_range(files)
 
@@ -350,8 +350,9 @@ def _walk_for_versions(
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 future_to_entry = {}
                 for vdir, match in versioned_dirs:
-                    ver_num = int(match.group(1))
-                    future = executor.submit(_scan_version_dir, vdir, ver_num, extensions)
+                    raw = match.group(1)
+                    ver_num = int(raw)
+                    future = executor.submit(_scan_version_dir, vdir, ver_num, len(raw), extensions)
                     future_to_entry[future] = (vdir, match)
 
                 for future in as_completed(future_to_entry):
@@ -365,8 +366,9 @@ def _walk_for_versions(
                         logger.debug(f"Error scanning {vdir}: {e}")
         else:
             for vdir, match in versioned_dirs:
-                ver_num = int(match.group(1))
-                vi, exts_found, sample = _scan_version_dir(vdir, ver_num, extensions)
+                raw = match.group(1)
+                ver_num = int(raw)
+                vi, exts_found, sample = _scan_version_dir(vdir, ver_num, len(raw), extensions)
                 _populate_date_on_vi(vi, vdir.name)
                 scan_results.append((vdir, match, vi, exts_found, sample))
 
@@ -468,8 +470,9 @@ def _walk_for_versions(
             seen_versions = {}
 
             for vfile, match in cluster_files:
-                ver_num = int(match.group(1))
-                ver_str = f"v{ver_num:03d}"
+                raw = match.group(1)
+                ver_num = int(raw)
+                ver_str = f"v{ver_num:0{len(raw)}d}"
                 found_extensions.add(vfile.suffix.lower())
 
                 if ver_num in seen_versions:

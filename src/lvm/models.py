@@ -7,9 +7,11 @@ __all__ = [
     "resolve_path", "make_relative",
     "VersionInfo", "HistoryEntry", "WatchedSource",
     "ProjectConfig", "DiscoveryResult",
+    "version_strings_match",
 ]
 
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +19,40 @@ from typing import Optional
 
 # Default file extensions including video formats
 DEFAULT_FILE_EXTENSIONS = [".exr", ".dpx", ".tiff", ".tif", ".png", ".jpg", ".mov", ".mxf", ".mp4"]
+
+
+_VERSION_DIGITS_RE = re.compile(r"\d+")
+
+
+def version_strings_match(version_string: Optional[str], other: Optional[str],
+                          version_number: Optional[int] = None) -> bool:
+    """Compare two version display strings tolerantly across padding changes.
+
+    Two strings match when their leading numeric digit runs decode to the
+    same integer (so "v001", "v01", and "v1" are equivalent). When *other*
+    has no digits (e.g. a date-only version like "2024-02-26"), falls back
+    to exact string equality.
+
+    If *version_number* is provided, it is used in place of parsing
+    *version_string* — useful when matching a VersionInfo against a stored
+    history version recorded with different padding.
+    """
+    if version_string is None or other is None:
+        return version_string == other
+    if version_string == other:
+        return True
+    a_match = _VERSION_DIGITS_RE.search(version_string) if version_number is None else None
+    b_match = _VERSION_DIGITS_RE.search(other)
+    if b_match is None:
+        # Date-only or non-numeric: require exact string equality.
+        return False
+    if version_number is not None:
+        a_num = version_number
+    elif a_match is not None:
+        a_num = int(a_match.group(0))
+    else:
+        return False
+    return a_num == int(b_match.group(0))
 
 
 def has_media_extension(filename: str, valid_extensions: set) -> bool:
