@@ -29,6 +29,7 @@ from app.dialogs.about import AboutDialog
 from app.dialogs.batch_promote import BatchPromoteReviewDialog
 from app.dialogs.discovery import DiscoveryDialog
 from app.dialogs.dry_run import DryRunDialog
+from app.dialogs.history_timeline import HistoryTimelineDialog
 from app.dialogs.latest_path import LatestPathDialog
 from app.dialogs.manage_groups import ManageGroupsDialog
 from app.dialogs.obsolete_layer import ObsoleteLayerDialog
@@ -595,6 +596,12 @@ class MainWindow(QMainWindow):
         self.log_dock_action = self.log_dock.toggleViewAction()
         self.log_dock_action.setShortcut(QKeySequence("Ctrl+L"))
         view_menu.addAction(self.log_dock_action)
+
+        view_menu.addSeparator()
+        self._history_timeline_action = QAction("History &Timeline...", self)
+        self._history_timeline_action.triggered.connect(self._open_history_timeline)
+        self._history_timeline_action.setEnabled(False)
+        view_menu.addAction(self._history_timeline_action)
 
         source_menu = menubar.addMenu("&Sources")
 
@@ -1216,6 +1223,24 @@ class MainWindow(QMainWindow):
             self.config.groups[name] = {"color": color}
         self._assign_group(indices, name)
 
+    def _open_history_timeline(self):
+        """Open the Gantt-style promotion history viewer."""
+        if not self.config:
+            QMessageBox.information(self, "No Project", "Open or create a project first.")
+            return
+        dlg = HistoryTimelineDialog(self.config, parent=self)
+        dlg.source_activated.connect(self._select_source_by_name)
+        dlg.exec()
+
+    def _select_source_by_name(self, name: str):
+        """Select the named source in the main source list (no-op if missing)."""
+        for i in range(self.source_list.topLevelItemCount()):
+            item = self.source_list.topLevelItem(i)
+            if item.data(0, Qt.UserRole) == name:
+                self.source_list.setCurrentItem(item)
+                self.source_list.scrollToItem(item)
+                return
+
     def _open_manage_groups(self):
         """Open the Manage Groups dialog."""
         if not self.config:
@@ -1487,6 +1512,7 @@ class MainWindow(QMainWindow):
         enabled = self.config is not None
         self.btn_project_settings.setEnabled(enabled)
         self.btn_manage_groups.setEnabled(enabled)
+        self._history_timeline_action.setEnabled(enabled)
         self.btn_refresh.setEnabled(False)
         self.btn_import_version.setEnabled(False)
         self.btn_refresh_versions.setEnabled(False)
