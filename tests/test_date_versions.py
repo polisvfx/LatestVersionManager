@@ -240,7 +240,7 @@ class TestScannerPatternCompilation(unittest.TestCase):
         result = scanner._extract_version("shotname_260224_v03")
         self.assertIsNotNone(result)
         ver_str, ver_num, date_str, date_sortable = result
-        self.assertEqual(ver_str, "v003")
+        self.assertEqual(ver_str, "v03")
         self.assertEqual(ver_num, 3)
         self.assertEqual(date_str, "260224")
         self.assertEqual(date_sortable, 20240226)
@@ -287,7 +287,7 @@ class TestScannerPatternCompilation(unittest.TestCase):
         result = scanner._extract_version("260224_shotname_v03")
         self.assertIsNotNone(result)
         ver_str, ver_num, date_str, date_sortable = result
-        self.assertEqual(ver_str, "v003")
+        self.assertEqual(ver_str, "v03")
         self.assertEqual(ver_num, 3)
         self.assertEqual(date_str, "260224")
 
@@ -335,11 +335,11 @@ class TestScannerDateVersionedFiles(unittest.TestCase):
 
         self.assertEqual(len(versions), 3)
         # Sorted by (date_sortable, version_number)
-        self.assertEqual(versions[0].version_string, "v001")  # 260224 v01
+        self.assertEqual(versions[0].version_string, "v01")  # 260224 v01
         self.assertEqual(versions[0].date_sortable, 20240226)
-        self.assertEqual(versions[1].version_string, "v002")  # 260224 v02
+        self.assertEqual(versions[1].version_string, "v02")  # 260224 v02
         self.assertEqual(versions[1].date_sortable, 20240226)
-        self.assertEqual(versions[2].version_string, "v001")  # 270224 v01
+        self.assertEqual(versions[2].version_string, "v01")  # 270224 v01
         self.assertEqual(versions[2].date_sortable, 20240227)
 
     def test_scan_date_only_files(self):
@@ -383,6 +383,57 @@ class TestScannerDateVersionedFiles(unittest.TestCase):
         for v in versions:
             self.assertIsNone(v.date_string)
             self.assertEqual(v.date_sortable, 0)
+
+
+# ---------------------------------------------------------------------------
+# Version padding preservation
+# ---------------------------------------------------------------------------
+
+class TestVersionPaddingPreservation(unittest.TestCase):
+    """Scanned version_string should preserve the digit width found on disk."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _scan_one(self, filename):
+        Path(self.tmpdir, filename).write_bytes(b"\x00" * 100)
+        source = WatchedSource(
+            name="t", source_dir=self.tmpdir,
+            version_pattern="_v{version}",
+            file_extensions=[".mov"],
+        )
+        from lvm.scanner import VersionScanner
+        versions = VersionScanner(source).scan()
+        self.assertEqual(len(versions), 1)
+        return versions[0]
+
+    def test_pad_1(self):
+        self.assertEqual(self._scan_one("shot_v1.mov").version_string, "v1")
+
+    def test_pad_2(self):
+        self.assertEqual(self._scan_one("shot_v01.mov").version_string, "v01")
+
+    def test_pad_3(self):
+        self.assertEqual(self._scan_one("shot_v001.mov").version_string, "v001")
+
+    def test_pad_4(self):
+        self.assertEqual(self._scan_one("shot_v0001.mov").version_string, "v0001")
+
+    def test_history_compat_match(self):
+        """A history entry written as 'v001' still matches a scanned 'v01'."""
+        from lvm.models import version_strings_match
+        v = self._scan_one("shot_v01.mov")
+        self.assertEqual(v.version_string, "v01")
+        # Pre-change history would have recorded this version as "v001":
+        self.assertTrue(version_strings_match(v.version_string, "v001", v.version_number))
+        # And as "v1" if the user had originally used single-digit padding:
+        self.assertTrue(version_strings_match(v.version_string, "v1", v.version_number))
+        # But not a different version number:
+        self.assertFalse(version_strings_match(v.version_string, "v002", v.version_number))
 
 
 # ---------------------------------------------------------------------------

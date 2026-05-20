@@ -30,7 +30,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeDat
 from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
 from PySide6.QtSvg import QSvgRenderer
 
-from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEntry, make_relative, DEFAULT_FILE_EXTENSIONS
+from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEntry, make_relative, DEFAULT_FILE_EXTENSIONS, version_strings_match
 from src.lvm.config import load_config, save_config, create_example_config, create_project, apply_project_defaults, _expand_group_token, _resolve_group_root
 from src.lvm.scanner import VersionScanner, detect_sequence_from_file, scan_directory_as_version, create_manual_version
 from src.lvm.promoter import Promoter, PromotionError, generate_report
@@ -401,7 +401,9 @@ class StatusWorker(QThread):
         def _compute_one(source):
             versions = self._versions_cache.get(source.name, [])
             scanner = VersionScanner(source, self._config.task_tokens)
-            highest_ver = versions[-1].version_string if versions else None
+            highest = versions[-1] if versions else None
+            highest_ver = highest.version_string if highest else None
+            highest_num = highest.version_number if highest else None
             current = None
             status = "no_target"
             integrity = None
@@ -414,7 +416,7 @@ class StatusWorker(QThread):
 
                 if not current:
                     status = "no_version"
-                elif current.version == highest_ver:
+                elif version_strings_match(highest_ver, current.version, highest_num):
                     integrity = promoter.verify()
                     if integrity["valid"]:
                         status = "highest"
@@ -5190,7 +5192,7 @@ class MainWindow(QMainWindow):
         source = self._current_source
         promoter = self._promoters.get(source.name) if source else None
         current = promoter.get_current_version() if promoter else None
-        is_promoted = current and version.version_string == current.version
+        is_promoted = current and version_strings_match(version.version_string, current.version, version.version_number)
 
         menu = QMenu(self)
 
@@ -6664,7 +6666,8 @@ class MainWindow(QMainWindow):
         elif current:
             # Check if current version is the highest available
             highest_ver = versions[-1].version_string if versions else None
-            is_highest = (current.version == highest_ver)
+            highest_num = versions[-1].version_number if versions else None
+            is_highest = bool(versions) and version_strings_match(highest_ver, current.version, highest_num)
             if is_highest:
                 self.current_label.setText(f"Current: {current.version}   ({source.name})")
                 self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #4ec9a0;")
@@ -6715,7 +6718,8 @@ class MainWindow(QMainWindow):
         highest_ver = versions[-1].version_number if versions else 0
         has_new = (
             current is not None
-            and current_ver != (versions[-1].version_string if versions else None)
+            and versions
+            and not version_strings_match(versions[-1].version_string, current_ver, versions[-1].version_number)
             and (not getattr(current, 'pinned', False) or has_newer_versions_since(current, versions))
         )
 
@@ -6760,7 +6764,7 @@ class MainWindow(QMainWindow):
                 for col in range(7):
                     item.setForeground(col, manual_color)
 
-            if v.version_string == current_ver:
+            if version_strings_match(v.version_string, current_ver, v.version_number):
                 is_highest = (v.version_number == highest_ver)
                 if is_highest:
                     # Promoted version IS the highest — bright green
@@ -6783,7 +6787,7 @@ class MainWindow(QMainWindow):
             # Highlight timecode changes vs current promoted version
             if (current_tc and v.start_timecode
                     and v.start_timecode != current_tc
-                    and v.version_string != current_ver):
+                    and not version_strings_match(v.version_string, current_ver, v.version_number)):
                 item.setForeground(5, QColor("#ff9944"))
 
             self.version_tree.addTopLevelItem(item)
@@ -6834,7 +6838,7 @@ class MainWindow(QMainWindow):
             promoter = self._promoters.get(source.name) if source else None
             current = promoter.get_current_version() if promoter else None
 
-            if current and version.version_string == current.version:
+            if current and version_strings_match(version.version_string, current.version, version.version_number):
                 self.btn_promote.setText("Keep This Version")
                 self.btn_promote.setStyleSheet(self._KEEP_STYLE)
             else:
@@ -6859,6 +6863,22 @@ class MainWindow(QMainWindow):
             return max(v.version_number for v in all_versions) + 1
         return 1
 
+    def _infer_manual_padding(self, source_name: str) -> int:
+        """Pick a padding width for a manually added version.
+
+        Matches the padding used by the highest-numbered existing version in
+        the source (scanned or manual) so manual versions visually match the
+        rest of the list. Falls back to 3 when the source has no versions.
+        """
+        scanned = self._versions_cache.get(source_name, [])
+        manual = self._manual_versions.get(source_name, [])
+        all_versions = scanned + manual
+        if not all_versions:
+            return 3
+        highest = max(all_versions, key=lambda v: v.version_number)
+        digits = "".join(ch for ch in (highest.version_string or "") if ch.isdigit())
+        return len(digits) if digits else 3
+
     def _add_manual_version(self, source: WatchedSource, paths: list[Path]):
         """Process dropped/browsed paths and add as manual versions."""
         extensions = source.file_extensions
@@ -6878,6 +6898,7 @@ class MainWindow(QMainWindow):
                     total_size_bytes=total_size,
                     frame_range=frame_range,
                     frame_count=frame_count,
+                    padding=self._infer_manual_padding(source.name),
                 )
                 self._manual_versions.setdefault(source.name, []).append(version)
                 added += 1
@@ -6901,6 +6922,7 @@ class MainWindow(QMainWindow):
                     total_size_bytes=total_size,
                     frame_range=frame_range,
                     frame_count=frame_count,
+                    padding=self._infer_manual_padding(source.name),
                 )
                 self._manual_versions.setdefault(source.name, []).append(version)
                 added += 1
@@ -7019,7 +7041,7 @@ class MainWindow(QMainWindow):
 
         # Detect "keep" vs normal promote
         current = promoter.get_current_version()
-        is_keep = current and version.version_string == current.version
+        is_keep = current and version_strings_match(version.version_string, current.version, version.version_number)
 
         if is_keep:
             msg = (
@@ -7073,7 +7095,7 @@ class MainWindow(QMainWindow):
         versions = self._versions_cache.get(source.name, scanner.scan())
         target_version = None
         for v in versions:
-            if v.version_string == entry.version:
+            if version_strings_match(v.version_string, entry.version, v.version_number):
                 target_version = v
                 break
 
@@ -7352,7 +7374,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if current_entry.version == highest.version_string:
+        if version_strings_match(highest.version_string, current_entry.version, highest.version_number):
             return  # Already on highest
 
         # Compare frame ranges (normalized to strip gap annotations)

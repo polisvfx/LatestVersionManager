@@ -242,7 +242,7 @@ class VersionScanner:
             else:
                 ver_str, date_str = groups[0], groups[1]
             version_num = int(ver_str)
-            version_string = f"v{version_num:03d}"
+            version_string = f"v{version_num:0{len(ver_str)}d}"
             date_sortable = parse_date_to_sortable(date_str, self._date_format)
             return version_string, version_num, date_str, date_sortable
 
@@ -255,8 +255,9 @@ class VersionScanner:
 
         else:
             # Version-only or raw regex (existing behavior)
-            version_num = int(match.group(1))
-            version_string = f"v{version_num:03d}"
+            raw = match.group(1)
+            version_num = int(raw)
+            version_string = f"v{version_num:0{len(raw)}d}"
             return version_string, version_num, None, 0
 
     def _scan_version_folder(self, folder: Path) -> Optional[VersionInfo]:
@@ -662,6 +663,7 @@ def create_manual_version(
     total_size_bytes: int,
     frame_range: Optional[str] = None,
     frame_count: int = 0,
+    padding: int = 3,
 ) -> VersionInfo:
     """Create a VersionInfo for a manually imported version.
 
@@ -672,9 +674,10 @@ def create_manual_version(
         total_size_bytes: Total size in bytes.
         frame_range: Frame range string or None.
         frame_count: Number of frames.
+        padding: Digit width for the formatted version_string (default 3).
     """
     return VersionInfo(
-        version_string=f"v{version_number:03d}",
+        version_string=f"v{version_number:0{padding}d}",
         version_number=version_number,
         source_path=source_path,
         frame_range=frame_range,

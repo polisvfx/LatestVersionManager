@@ -438,7 +438,7 @@ class TestScanner(unittest.TestCase):
 
         # Check first version has correct frame range
         v01 = versions[0]
-        self.assertEqual(v01.version_string, "v001")
+        self.assertEqual(v01.version_string, "v01")
         self.assertTrue(v01.file_count > 0, "v01 should have files")
         self.assertIsNotNone(v01.frame_range, "v01 should have a frame range")
         self.assertIn("991", v01.frame_range, "Frame range should include 991")

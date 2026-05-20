@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.lvm.config import load_config, create_example_config, create_project
 from src.lvm.scanner import VersionScanner
 from src.lvm.promoter import Promoter, generate_report
-from src.lvm.models import WatchedSource
+from src.lvm.models import WatchedSource, version_strings_match
 from src.lvm.discovery import discover, format_discovery_report
 from src.lvm.timecode import populate_timecodes
 from src.lvm.conflicts import detect_target_conflicts
@@ -174,7 +174,7 @@ def cmd_scan(args):
         current_ver = current.version if current else None
 
         for v in versions:
-            marker = " <-- CURRENT" if v.version_string == current_ver else ""
+            marker = " <-- CURRENT" if version_strings_match(v.version_string, current_ver, v.version_number) else ""
             frames = f"  frames: {v.frame_range}" if v.frame_range else ""
             tc = f"  TC: {v.start_timecode}" if v.start_timecode else ""
             print(
@@ -229,7 +229,7 @@ def cmd_promote(args):
 
     target_version = None
     for v in versions:
-        if v.version_string == args.version or str(v.version_number) == args.version:
+        if version_strings_match(v.version_string, args.version, v.version_number) or str(v.version_number) == args.version:
             target_version = v
             break
 
@@ -327,7 +327,7 @@ def cmd_promote_all(args):
         promoter = Promoter(source, config.task_tokens, config.project_name, nle_rename_options=config.nle_rename_options())
         current = promoter.get_current_version()
 
-        if not args.force and current and current.version == highest.version_string:
+        if not args.force and current and version_strings_match(highest.version_string, current.version, highest.version_number):
             integrity = promoter.verify()
             if integrity["valid"]:
                 already_current.append(f"{source.name} (already on {highest.version_string})")
@@ -470,7 +470,7 @@ def cmd_rollback(args):
     versions = scanner.scan()
     target_version = None
     for v in versions:
-        if v.version_string == previous.version:
+        if version_strings_match(v.version_string, previous.version, v.version_number):
             target_version = v
             break
 
