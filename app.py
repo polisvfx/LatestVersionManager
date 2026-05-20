@@ -5924,11 +5924,6 @@ class MainWindow(QMainWindow):
             enabled = ["version", "status"]
         else:
             enabled = list(self.config.source_list_columns)
-            # Auto-show group column when groups exist
-            if self.config.groups and "group" not in enabled:
-                enabled.append("group")
-                self.config.source_list_columns = enabled
-                self._mark_dirty()
         for i, key in enumerate(self._source_col_keys):
             if key == "name":
                 # Name column is always visible
