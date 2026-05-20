@@ -544,10 +544,17 @@ class Promoter:
         if not opts:
             return
 
-        # Build tokens from the source's representative filename — falls back
-        # to the version's source path so promotes from sources without a
-        # sample filename still produce a sensible stem.
-        token_input = self.source.sample_filename or Path(version.source_path).name
+        # Derive tokens from the *actual version being promoted* so the
+        # recovered version digits (used when include_version is on) reflect
+        # this promote, not whichever version happened to be the sample at
+        # source-add time. source_name/basename are version-stripped during
+        # derivation, so swapping the input only changes the version segment.
+        # Falls back to the source's sample filename when the version has no
+        # source_path (manual entries / tests).
+        token_input = (
+            Path(version.source_path).name if version.source_path
+            else self.source.sample_filename
+        )
         tokens = derive_source_tokens(
             token_input,
             self.task_tokens,

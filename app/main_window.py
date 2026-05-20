@@ -2360,6 +2360,7 @@ class MainWindow(QMainWindow):
             from src.lvm.nle_bridge import (
                 write_premiere_trigger,
                 is_premiere_panel_alive,
+                collect_premiere_renames,
             )
         except ImportError:
             logger.error("Sync Names → Premiere: bridge unavailable in this build.")
@@ -2378,17 +2379,39 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Precompute the rename list so the panel can apply the whole
+        # batch in one ExtendScript call instead of polling N triggers.
+        renames: list = []
+        if self.config:
+            latest_dirs = []
+            seen = set()
+            for src in self.config.watched_sources:
+                d = src.latest_target
+                if d and d not in seen:
+                    seen.add(d)
+                    latest_dirs.append(d)
+            try:
+                renames = collect_premiere_renames(latest_dirs)
+            except Exception as e:
+                logger.warning("Sync Names → Premiere: rename precompute "
+                               "failed (%s); falling back to scan trigger.", e)
+                renames = []
+
+        payload = {"automatic": bool(automatic)}
+        if renames:
+            payload["renames"] = renames
+
         try:
-            path = write_premiere_trigger({
-                "automatic": bool(automatic),
-            })
+            path = write_premiere_trigger(payload)
         except OSError as e:
             logger.error("Sync Names → Premiere: could not write trigger: %s", e)
             return
 
         prefix = "auto-sync after promote" if automatic else "manual sync"
-        logger.info("Sync Names → Premiere (%s): trigger %s written; panel "
-                    "should process it shortly.", prefix, path.name)
+        mode = f"batched x{len(renames)}" if renames else "scan"
+        logger.info("Sync Names → Premiere (%s, %s): trigger %s written; "
+                    "panel should process it shortly.",
+                    prefix, mode, path.name)
 
     def _maybe_auto_sync_nle(self):
         """Trigger NLE renames if the project opted in.

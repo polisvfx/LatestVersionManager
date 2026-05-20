@@ -349,8 +349,101 @@ var LVM = LVM || {};
         };
     }
 
+    // ----- batched rename path (trigger schema_version >= 2) -----
+    //
+    // Driven by an explicit renames list LVM computed ahead of time:
+    //   [{ clip_match_key: "<media path>", new_display_name: "..." }, ...]
+    //
+    // clip_match_key is the absolute media path of the clip as LVM wrote
+    // it (the "latest" file). Matching is done on a normalised form
+    // (forward slashes, case-folded on Windows where filesystems are
+    // case-insensitive) so we tolerate path-separator and casing drift
+    // between what LVM serialises and what Premiere reports.
+
+    function normMediaPath(p) {
+        if (!p) return "";
+        var n = String(p).replace(/\\/g, "/");
+        // Windows: case-insensitive FS, fold for matching.
+        if ($.os && $.os.indexOf("Windows") >= 0) n = n.toLowerCase();
+        return n;
+    }
+
+    function renameBatch(renames) {
+        if (!app.project) {
+            return { ok: false, error: "No project is open." };
+        }
+        if (!renames || !renames.length) {
+            return {
+                ok: true, renamed: 0, idempotent: 0, no_match: 0,
+                errors: 0, timeline_renamed: 0
+            };
+        }
+
+        // path -> new display name
+        var wanted = {};
+        var requested = 0;
+        for (var i = 0; i < renames.length; i++) {
+            var r = renames[i];
+            if (!r) continue;
+            var key = normMediaPath(r.clip_match_key);
+            var name = r.new_display_name;
+            if (!key || !name) continue;
+            wanted[key] = name;
+            requested++;
+        }
+
+        var renamed = 0;
+        var idempotent = 0;
+        var errors = 0;
+        var matchedKeys = {};
+        var itemKeyToName = {};  // projectItemKey -> new name, for timeline pass
+
+        walkProjectItems(app.project.rootItem, function (clip) {
+            var clipPath = "";
+            try { clipPath = clip.getMediaPath() || ""; } catch (e) { clipPath = ""; }
+            if (!clipPath) return;
+            var key = normMediaPath(clipPath);
+            if (!wanted.hasOwnProperty(key)) return;
+
+            matchedKeys[key] = true;
+            var target = wanted[key];
+            var itemKey = projectItemKey(clip);
+            if (itemKey) itemKeyToName[itemKey] = target;
+
+            var current = "";
+            try { current = clip.name || ""; } catch (e2) { current = ""; }
+            if (current === target) { idempotent++; return; }
+
+            try {
+                clip.name = target;
+                renamed++;
+            } catch (e3) {
+                errors++;
+            }
+        });
+
+        var noMatch = 0;
+        for (var k in wanted) {
+            if (wanted.hasOwnProperty(k) && !matchedKeys[k]) noMatch++;
+        }
+
+        var tlResult = renameTrackItemsForRenames(itemKeyToName);
+
+        return {
+            ok: true,
+            renamed: renamed,
+            idempotent: idempotent,
+            no_match: noMatch,
+            errors: errors + tlResult.errors,
+            timeline_renamed: tlResult.renamed,
+            requested: requested
+        };
+    }
+
     ns.renameOnce = renameOnce;
+    ns.renameBatch = renameBatch;
     ns.stringifyJSON = stringifyJSON;
+    ns.parseJSON = parseJSON;
 })(LVM);
 
 // Top-level callable for CSInterface.evalScript. Returns a string with
@@ -360,6 +453,25 @@ function lvmRestoreVersions() {
     var result;
     try {
         result = LVM.renameOnce();
+    } catch (e) {
+        result = { ok: false, error: "Host raised: " + e };
+    }
+    return "__LVM_RESULT__" + LVM.stringifyJSON(result);
+}
+
+// Batched rename entry point — called for trigger schema_version >= 2.
+// Receives the renames array as a JSON string (evalScript hands us a
+// single string arg). Avoids a full sidecar scan by trusting the
+// pre-computed match keys LVM wrote into the trigger.
+function lvmRenameBatch(renamesJson) {
+    var result;
+    try {
+        var arr = LVM.parseJSON(renamesJson);
+        if (!arr || arr.length === undefined) {
+            result = { ok: false, error: "renames payload was not a JSON array." };
+        } else {
+            result = LVM.renameBatch(arr);
+        }
     } catch (e) {
         result = { ok: false, error: "Host raised: " + e };
     }

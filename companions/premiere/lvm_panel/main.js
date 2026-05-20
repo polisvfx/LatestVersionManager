@@ -153,19 +153,30 @@
     }
 
     function handleTrigger(triggerPath) {
-        var payload = "(unparsed)";
+        var parsed = null;
         try {
             var raw = fs.readFileSync(triggerPath, "utf8");
-            payload = raw;
-            JSON.parse(raw);  // validate; not used for anything yet
+            parsed = JSON.parse(raw);
         } catch (e) {
             appendLog("warn", "Trigger " + path.basename(triggerPath) +
                       " was unreadable: " + e);
         }
         appendLog("info", "Trigger received: " + path.basename(triggerPath));
-        runRename("trigger " + path.basename(triggerPath), function () {
-            tryDelete(triggerPath);
-        });
+
+        // Schema v2+: trigger carries the renames inline. One ExtendScript
+        // round-trip applies the whole batch. Older payloads (no
+        // schema_version, or v1) fall back to the full sidecar scan so
+        // panels that pre-date this change keep working.
+        var schema = parsed && parsed.schema_version;
+        var renames = parsed && parsed.renames;
+        if (schema && schema >= 2 && renames && renames.length !== undefined) {
+            runBatchRename(renames, "trigger " + path.basename(triggerPath),
+                function () { tryDelete(triggerPath); });
+        } else {
+            runRename("trigger " + path.basename(triggerPath), function () {
+                tryDelete(triggerPath);
+            });
+        }
     }
 
     function tryDelete(p) {
@@ -199,6 +210,46 @@
             } else if (stats) {
                 setStatus("error", stats.error || "Failed (see log)");
                 appendLog("error", stats.error || "Rename failed");
+            } else {
+                setStatus("error", "ExtendScript returned: " + result);
+                appendLog("error", "Unparseable host result: " + result);
+            }
+            if (done) done();
+        });
+    }
+
+    function runBatchRename(renames, reason, done) {
+        if (renaming) {
+            appendLog("warn", "Already running, ignoring: " + reason);
+            if (done) done();
+            return;
+        }
+        renaming = true;
+        btn.disabled = true;
+        setStatus("busy", "Renaming " + renames.length + " clip(s)… (" + reason + ")");
+
+        // ExtendScript wants a single string-quoted arg. JSON-encode
+        // twice so the inner JSON survives evalScript's parser.
+        var payload = JSON.stringify(JSON.stringify(renames));
+        cs.evalScript("lvmRenameBatch(" + payload + ")", function (result) {
+            renaming = false;
+            btn.disabled = false;
+
+            var stats = parseStats(result);
+            if (stats && stats.ok) {
+                setStatus("ready", "Done. Watching " + triggerDir);
+                var req = (typeof stats.requested === "number")
+                    ? ("/" + stats.requested) : "";
+                var tl = (typeof stats.timeline_renamed === "number")
+                    ? (", timeline " + stats.timeline_renamed) : "";
+                appendLog("info",
+                    "Batch: renamed " + stats.renamed + req +
+                    ", up-to-date " + stats.idempotent +
+                    ", no-match " + stats.no_match + tl +
+                    ", errors " + stats.errors);
+            } else if (stats) {
+                setStatus("error", stats.error || "Failed (see log)");
+                appendLog("error", stats.error || "Batch rename failed");
             } else {
                 setStatus("error", "ExtendScript returned: " + result);
                 appendLog("error", "Unparseable host result: " + result);
