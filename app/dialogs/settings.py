@@ -19,7 +19,74 @@ from app._common import (
     _expand_group_token,
     _resolve_group_root,
 )
-from app.widgets import CollapsibleSection, TagInputWidget
+from app.widgets import CollapsibleSection, TagInputWidget, TokenChipBar
+
+
+# Tokens accepted by the Latest Path Template (path-shaped output).
+# {source_filename} is intentionally excluded — a full filename inside a path
+# template rarely makes sense; that token belongs to File Rename instead.
+_PATH_TOKENS: dict[str, str] = {
+    "source_dir":      "Absolute directory of the watched source",
+    "source_title":    "In-project display name of the source",
+    "source_name":     "Filename without version / frame / extension",
+    "source_basename": "source_name with task tokens stripped",
+    "source_fullname": "Filename without frame / extension (keeps version)",
+    "project_root":    "The project's root directory",
+    "group":           "Group name (omitted with its divider when empty)",
+    "group_root":      "Root directory of the group (falls back to project_root)",
+}
+
+# Tokens accepted by the File Rename Template (filename-shaped; no path tokens).
+_RENAME_TOKENS: dict[str, str] = {
+    "source_title":    "In-project display name of the source",
+    "source_name":     "Filename without version / frame / extension",
+    "source_basename": "source_name with task tokens stripped",
+    "source_fullname": "Filename without frame / extension (keeps version)",
+    "source_filename": "Raw original filename (including extension)",
+    "group":           "Group name (omitted with its divider when empty)",
+}
+
+# Tokens accepted by Promotion Hook commands. Mirror src.lvm.hooks._build_hook_tokens.
+_HOOK_TOKENS: dict[str, str] = {
+    "source_name":  "Name of the source being promoted",
+    "version":      "Version string being promoted (e.g. v003)",
+    "source_dir":   "Absolute path to the version's source files",
+    "target_dir":   "Absolute path of the latest target directory",
+    "link_mode":    "Materialisation mode used: copy, hardlink or symlink",
+    "user":         "Local username running the promotion",
+    "project_name": "Name of the LVM project",
+    "frame_range":  "Frame range of the sequence, e.g. 1001-1240 (empty for single files)",
+    "file_count":   "Number of files being promoted",
+}
+
+
+def _tokens_tooltip(tokens: dict[str, str]) -> str:
+    """Build a multi-line tooltip listing each token with its description."""
+    return "Available tokens:\n" + "\n".join(
+        f"  {{{name}}} — {desc}" for name, desc in tokens.items()
+    )
+
+
+def _stack_with_chips(edit: QLineEdit, tokens: dict[str, str]) -> QWidget:
+    """Return a field-column widget holding *edit* stacked above a chip bar.
+
+    Using a single form-row field (rather than two rows: one with the edit
+    and a second with an empty label and the chips) keeps the chips
+    naturally aligned with the input column and lets us control the gap
+    directly via the inner QVBoxLayout.
+    """
+    container = QWidget()
+    v = QVBoxLayout(container)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(2)
+    v.addWidget(edit)
+    v.addWidget(TokenChipBar(edit, tokens))
+    return container
+
+
+def _unknown_tokens(text: str, allowed: set[str]) -> list[str]:
+    """Return any {token} names referenced in *text* that are not in *allowed*."""
+    return [m for m in re.findall(r"\{(\w+)\}", text or "") if m not in allowed]
 
 
 class ProjectSettingsDialog(QDialog):
@@ -31,8 +98,8 @@ class ProjectSettingsDialog(QDialog):
     def __init__(self, config: ProjectConfig, selected_source: WatchedSource = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Project Settings")
-        self.setMinimumWidth(620)
-        self.setMinimumHeight(400)
+        self.setMinimumWidth(900)
+        self.setMinimumHeight(500)
         if ProjectSettingsDialog._last_geometry:
             self.restoreGeometry(ProjectSettingsDialog._last_geometry)
         else:
@@ -44,41 +111,62 @@ class ProjectSettingsDialog(QDialog):
         self._naming_reset = False
         self._sections: list = []  # (title, CollapsibleSection) for state save
 
-        # Outer layout with scroll area
+        # Outer layout: left nav bar + right scroll area, with bottom bar.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Left nav + right scroll, separated by a draggable splitter.
+        body_splitter = QSplitter(Qt.Horizontal)
+        body_splitter.setChildrenCollapsible(False)
+        body_splitter.setHandleWidth(4)
+        self._body_splitter = body_splitter
+
+        # Left navigation list — clicking a row jumps to the matching section
+        # and collapses all other sections (accordion behavior).
+        self._nav_list = QListWidget()
+        self._nav_list.setMinimumWidth(140)
+        self._nav_list.setFrameShape(QFrame.NoFrame)
+        self._nav_list.setStyleSheet(
+            "QListWidget { background: #1c1c1c; border-right: 1px solid #2a2a2a;"
+            " padding: 8px 0; outline: 0; }"
+            "QListWidget::item { padding: 8px 12px; color: #c0c0c0; }"
+            "QListWidget::item:hover { background: #242424; color: #fff; }"
+            "QListWidget::item:selected { background: #2d4a63; color: #fff; }"
+        )
+        body_splitter.addWidget(self._nav_list)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_widget = QWidget()
         top_layout = QVBoxLayout(scroll_widget)
         top_layout.setContentsMargins(12, 12, 12, 12)
-        top_layout.setSpacing(12)
+        top_layout.setSpacing(8)
+        self._scroll = scroll
 
         # ==================================================================
-        # GENERAL (always visible, not collapsible)
+        # GENERAL
         # ==================================================================
-        general_form = QFormLayout()
-        general_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        general_form.setContentsMargins(0, 0, 0, 0)
+        general_section = self._make_section("General")
+        general = general_section.content_layout()
 
         self.name_edit = QLineEdit(config.project_name)
-        general_form.addRow("Project Name:", self.name_edit)
+        self.name_edit.setToolTip("Display name for this project — shown in the title bar and recent-projects list.")
+        general.addRow("Project Name:", self.name_edit)
 
         self.root_edit = QLineEdit(config.effective_project_root)
+        self.root_edit.setToolTip("The root directory of the project. Expanded by the {project_root} token in templates.")
         self.root_edit.textChanged.connect(self._update_path_preview)
         self.root_browse_btn = QPushButton("Browse...")
         self.root_browse_btn.clicked.connect(self._browse_root)
         root_row = QHBoxLayout()
         root_row.addWidget(self.root_edit, 1)
         root_row.addWidget(self.root_browse_btn)
-        root_help = QLabel("The root directory of the project (used for {project_root} token).")
-        root_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
-        general_form.addRow("Project Root:", root_row)
-        general_form.addRow("", root_help)
+        general.addRow("Project Root:", root_row)
 
-        top_layout.addLayout(general_form)
+        top_layout.addWidget(general_section)
 
         # ==================================================================
         # OUTPUT PATHS
@@ -87,33 +175,47 @@ class ProjectSettingsDialog(QDialog):
         paths = paths_section.content_layout()
 
         template_help = QLabel(
-            "Relative paths resolve from each source's directory.\n"
-            "Tokens: {source_dir}, {source_title}, {source_name}, {source_basename},\n"
-            "{source_fullname}, {source_filename}, {project_root}, {group}, {group_root}\n"
+            "Relative paths resolve from each source's directory. "
             "If {group} is empty, the token and its trailing divider are omitted.\n"
-            "{group_root} resolves to the group's root directory (falls back to {project_root}).\n"
-            "{source_title} is the source's in-project display name.\n"
-            "Examples: {group_root}/online/{source_name}  |  latest/{group}/{source_basename}_latest"
+            "Examples:  {group_root}/online/{source_name}  |  latest/{group}/{source_basename}_latest"
         )
         template_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
+        template_help.setWordWrap(True)
         paths.addRow("", template_help)
 
+        # --- Latest Path Template ---
         self.latest_template_edit = QLineEdit(config.latest_path_template)
         self.latest_template_edit.setPlaceholderText("latest/{source_basename}_latest")
+        self._latest_base_tooltip = _tokens_tooltip(_PATH_TOKENS)
+        self.latest_template_edit.setToolTip(self._latest_base_tooltip)
         self.latest_template_edit.textChanged.connect(self._update_path_preview)
-        paths.addRow("Latest Path Template:", self.latest_template_edit)
+        self.latest_template_edit.textChanged.connect(
+            lambda _t: self._validate_template(
+                self.latest_template_edit, set(_PATH_TOKENS), self._latest_base_tooltip))
+        paths.addRow("Latest Path Template:",
+                     _stack_with_chips(self.latest_template_edit, _PATH_TOKENS))
 
-        rename_help = QLabel(
-            "Controls the output filename (without frame/ext).\n"
-            "Tokens: {source_title}, {source_name}, {source_basename}, {source_fullname}, {group}"
-        )
+        # --- File Rename Template ---
+        rename_help = QLabel("Controls the output filename (without frame / extension).")
         rename_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
         paths.addRow("", rename_help)
 
         self.rename_template_edit = QLineEdit(config.default_file_rename_template)
         self.rename_template_edit.setPlaceholderText("{source_basename}_latest")
+        self._rename_base_tooltip = _tokens_tooltip(_RENAME_TOKENS)
+        self.rename_template_edit.setToolTip(self._rename_base_tooltip)
         self.rename_template_edit.textChanged.connect(self._update_path_preview)
-        paths.addRow("File Rename Template:", self.rename_template_edit)
+        self.rename_template_edit.textChanged.connect(
+            lambda _t: self._validate_template(
+                self.rename_template_edit, set(_RENAME_TOKENS), self._rename_base_tooltip))
+        paths.addRow("File Rename Template:",
+                     _stack_with_chips(self.rename_template_edit, _RENAME_TOKENS))
+
+        # Run initial validation pass.
+        self._validate_template(
+            self.latest_template_edit, set(_PATH_TOKENS), self._latest_base_tooltip)
+        self._validate_template(
+            self.rename_template_edit, set(_RENAME_TOKENS), self._rename_base_tooltip)
 
         self.path_preview_label = QLabel("")
         self.path_preview_label.setStyleSheet("color: #3aaa88; font-size: 11pt;")
@@ -125,12 +227,56 @@ class ProjectSettingsDialog(QDialog):
         top_layout.addWidget(paths_section)
 
         # ==================================================================
-        # SOURCE NAMING & DETECTION
+        # DETECTION (controls how versioned content is found on disk)
         # ==================================================================
-        naming_section = self._make_section("Source Naming && Detection")
+        detection_section = self._make_section("Detection")
+        detection = detection_section.content_layout()
+
+        # --- Version pattern ---
+        self.pattern_edit = QLineEdit(config.default_version_pattern)
+        self.pattern_edit.setToolTip(
+            "Pattern that identifies the version in filenames. "
+            "Use {version} as the placeholder, e.g. _v{version} matches _v001, _v042."
+        )
+        detection.addRow("Version Pattern:", self.pattern_edit)
+
+        # --- File extensions ---
+        self.extensions_edit = QLineEdit(" ".join(config.default_file_extensions))
+        self.extensions_edit.setToolTip(
+            "Space-separated list of file extensions recognised when scanning "
+            "for versioned content (e.g. exr dpx mov mp4)."
+        )
+        detection.addRow("File Extensions:", self.extensions_edit)
+
+        # --- Date format (multi-select; 0 boxes checked == "(none)") ---
+        from src.lvm.task_tokens import parse_date_formats as _parse_dfmts_proj
+        self.date_format_checks: dict[str, QCheckBox] = {}
+        _date_tooltips = {
+            "DDMMYY":   "Day-month-year, two digits each — matches 210526",
+            "YYMMDD":   "Year-month-day, two digits each — matches 260521",
+            "DDMMYYYY": "Day-month-year, four-digit year — matches 21052026",
+            "YYYYMMDD": "Year-month-day, four-digit year — matches 20260521",
+        }
+        date_row = QHBoxLayout()
+        for fmt in ("DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"):
+            cb = QCheckBox(fmt)
+            cb.setToolTip(_date_tooltips[fmt])
+            self.date_format_checks[fmt] = cb
+            date_row.addWidget(cb)
+        date_row.addStretch(1)
+        for fmt in _parse_dfmts_proj(config.default_date_format):
+            if fmt in self.date_format_checks:
+                self.date_format_checks[fmt].setChecked(True)
+        detection.addRow("Date Format:", date_row)
+
+        top_layout.addWidget(detection_section)
+
+        # ==================================================================
+        # SOURCE NAMING (controls how detected sources are named)
+        # ==================================================================
+        naming_section = self._make_section("Source Naming")
         naming = naming_section.content_layout()
 
-        # --- Naming rule (improved display) ---
         naming_row = QHBoxLayout()
         self.naming_label = QLabel()
         self.naming_label.setWordWrap(True)
@@ -142,40 +288,24 @@ class ProjectSettingsDialog(QDialog):
         naming_row.addWidget(self.reset_naming_btn)
         naming.addRow("Naming Rule:", naming_row)
 
-        # --- Task names ---
         task_help = QLabel(
-            "Task names stripped from filenames to produce cleaner source names.\n"
-            "Each % matches one character (e.g. comp_%% matches comp_mp). Bounded by: _ - ."
+            "Task names stripped from filenames to produce cleaner source names. "
+            "Each % matches one character (e.g. comp_%% matches comp_mp). "
+            "Bounded by: _ - ."
         )
         task_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
+        task_help.setWordWrap(True)
         naming.addRow("", task_help)
 
         self.tasks_edit = QLineEdit(", ".join(config.task_tokens))
         self.tasks_edit.setPlaceholderText("comp, grade, dmp, fx, roto, paint")
+        self.tasks_edit.setToolTip(
+            "Comma-separated task tokens stripped from filenames to derive "
+            "{source_basename}. Use % as a single-character wildcard "
+            "(e.g. comp_%% matches comp_mp)."
+        )
         self.tasks_edit.textChanged.connect(self._update_path_preview)
         naming.addRow("Task Names:", self.tasks_edit)
-
-        # --- Version pattern ---
-        self.pattern_edit = QLineEdit(config.default_version_pattern)
-        naming.addRow("Version Pattern:", self.pattern_edit)
-
-        # --- Date format (multi-select; 0 boxes checked == "(none)") ---
-        from src.lvm.task_tokens import parse_date_formats as _parse_dfmts_proj
-        self.date_format_checks: dict[str, QCheckBox] = {}
-        date_row = QHBoxLayout()
-        for fmt in ("DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD"):
-            cb = QCheckBox(fmt)
-            self.date_format_checks[fmt] = cb
-            date_row.addWidget(cb)
-        date_row.addStretch(1)
-        for fmt in _parse_dfmts_proj(config.default_date_format):
-            if fmt in self.date_format_checks:
-                self.date_format_checks[fmt].setChecked(True)
-        naming.addRow("Date Format:", date_row)
-
-        # --- File extensions ---
-        self.extensions_edit = QLineEdit(" ".join(config.default_file_extensions))
-        naming.addRow("File Extensions:", self.extensions_edit)
 
         top_layout.addWidget(naming_section)
 
@@ -194,29 +324,34 @@ class ProjectSettingsDialog(QDialog):
         top_layout.addWidget(filters_section)
 
         # ==================================================================
-        # ADVANCED (collapsed by default)
+        # COPY OPERATIONS (collapsed by default)
         # ==================================================================
-        advanced_section = self._make_section("Advanced", collapsed=True)
+        advanced_section = self._make_section("Copy Operations", collapsed=True)
         adv = advanced_section.content_layout()
 
         # Link mode
         self.link_mode_combo = QComboBox()
         self.link_mode_combo.addItems(["copy", "hardlink", "symlink"])
         self.link_mode_combo.setCurrentText(config.default_link_mode)
+        self.link_mode_combo.setToolTip(
+            "How promoted files are materialised at the latest path:\n"
+            "  copy      — full duplicate (safest, uses disk space)\n"
+            "  hardlink  — same inode (instant, same volume only)\n"
+            "  symlink   — pointer (instant; needs admin on Windows)"
+        )
         adv.addRow("Default Link Mode:", self.link_mode_combo)
 
         # Timecode mode
         self.timecode_combo = QComboBox()
         self.timecode_combo.addItems(["always", "lazy", "never"])
         self.timecode_combo.setCurrentText(config.timecode_mode)
-        tc_help = QLabel(
-            "Always: read timecodes during scan (slower, all TCs visible immediately)\n"
-            "Lazy: read on demand when a source is viewed (fast scan)\n"
-            "Never: skip timecode extraction entirely (fastest)"
+        self.timecode_combo.setToolTip(
+            "When to read media timecodes during discovery:\n"
+            "  always — read during scan (slower, all TCs visible immediately)\n"
+            "  lazy   — read on demand when a source is viewed (fast scan)\n"
+            "  never  — skip timecode extraction entirely (fastest)"
         )
-        tc_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
         adv.addRow("Timecode Mode:", self.timecode_combo)
-        adv.addRow("", tc_help)
 
         # Promotion hooks
         hooks_header = QLabel("Promotion Hooks")
@@ -224,19 +359,27 @@ class ProjectSettingsDialog(QDialog):
         adv.addRow("", hooks_header)
 
         hooks_help = QLabel(
-            "Shell commands to run before/after each promotion.\n"
-            "Leave empty to disable. Tokens: {source_name}, {version}, {target_dir}"
+            "Shell commands run before / after each promotion. "
+            "Click a chip to insert a token. Leave empty to disable. "
+            "Same tokens are also exported as LVM_* environment variables."
         )
         hooks_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
+        hooks_help.setWordWrap(True)
         adv.addRow("", hooks_help)
 
+        hook_tokens_tip = _tokens_tooltip(_HOOK_TOKENS)
+
         self.pre_promote_edit = QLineEdit(getattr(config, 'pre_promote_cmd', '') or '')
-        self.pre_promote_edit.setPlaceholderText("e.g. echo 'Starting promotion of {source_name}'")
-        adv.addRow("Pre-Promote Command:", self.pre_promote_edit)
+        self.pre_promote_edit.setPlaceholderText("e.g. echo 'Promoting {source_name} {version}'")
+        self.pre_promote_edit.setToolTip(hook_tokens_tip)
+        adv.addRow("Pre-Promote Command:",
+                   _stack_with_chips(self.pre_promote_edit, _HOOK_TOKENS))
 
         self.post_promote_edit = QLineEdit(getattr(config, 'post_promote_cmd', '') or '')
         self.post_promote_edit.setPlaceholderText("e.g. python notify.py --source {source_name} --version {version}")
-        adv.addRow("Post-Promote Command:", self.post_promote_edit)
+        self.post_promote_edit.setToolTip(hook_tokens_tip)
+        adv.addRow("Post-Promote Command:",
+                   _stack_with_chips(self.post_promote_edit, _HOOK_TOKENS))
 
         # Sequence validation
         seq_header = QLabel("Sequence Validation")
@@ -245,6 +388,9 @@ class ProjectSettingsDialog(QDialog):
 
         self.block_incomplete_cb = QCheckBox("Block promotion of incomplete sequences (warn on frame gaps)")
         self.block_incomplete_cb.setChecked(getattr(config, 'block_incomplete_sequences', False))
+        self.block_incomplete_cb.setToolTip(
+            "When enabled, promotion is blocked if the selected version has missing frames."
+        )
         adv.addRow("", self.block_incomplete_cb)
 
         # Network / SMB performance
@@ -254,15 +400,12 @@ class ProjectSettingsDialog(QDialog):
 
         self.skip_resolve_cb = QCheckBox("Skip symlink resolution during discovery (faster over SMB)")
         self.skip_resolve_cb.setChecked(getattr(config, 'skip_resolve', True))
-        adv.addRow("", self.skip_resolve_cb)
-
-        skip_resolve_help = QLabel(
-            "Skips Path.resolve() on each directory, eliminating extra network\n"
-            "round-trips. Safe for SMB/NFS shares which rarely use symlinks.\n"
-            "Disable only if your source directories contain symlink loops."
+        self.skip_resolve_cb.setToolTip(
+            "Skips Path.resolve() per directory, eliminating extra network "
+            "round-trips on SMB/NFS shares. Safe when source directories do "
+            "not contain symlink loops."
         )
-        skip_resolve_help.setStyleSheet("color: #8c8c8c; font-size: 11pt;")
-        adv.addRow("", skip_resolve_help)
+        adv.addRow("", self.skip_resolve_cb)
 
         top_layout.addWidget(advanced_section)
 
@@ -514,7 +657,20 @@ class ProjectSettingsDialog(QDialog):
         # ==================================================================
         top_layout.addStretch()
         scroll.setWidget(scroll_widget)
-        outer.addWidget(scroll, 1)
+        body_splitter.addWidget(scroll)
+        body_splitter.setStretchFactor(0, 0)
+        body_splitter.setStretchFactor(1, 1)
+        body_splitter.setSizes([170, 730])
+        outer.addWidget(body_splitter, 1)
+
+        # Populate the left nav now that all sections are registered.
+        # QListWidget treats text literally — strip Qt's '&&' mnemonic escape
+        # so labels read naturally ("Source Naming & Detection", not "&&").
+        for title, _section in self._sections:
+            self._nav_list.addItem(title.replace("&&", "&"))
+        self._nav_list.currentRowChanged.connect(self._on_nav_changed)
+        if self._sections:
+            self._nav_list.setCurrentRow(0)
 
         # Bottom bar outside scroll
         bottom = QHBoxLayout()
@@ -863,6 +1019,39 @@ class ProjectSettingsDialog(QDialog):
                 "Reinstall panel..." if installed else "Install panel...")
         if hasattr(self, "_premiere_uninstall_btn"):
             self._premiere_uninstall_btn.setEnabled(installed)
+
+    def _validate_template(self, edit: QLineEdit, allowed: set, base_tooltip: str) -> None:
+        """Highlight *edit* red if its text references tokens outside *allowed*.
+
+        Restores the empty stylesheet and base tooltip on clean input.
+        """
+        bad = _unknown_tokens(edit.text(), allowed)
+        if bad:
+            edit.setStyleSheet("QLineEdit { border: 1px solid #c0504d; }")
+            edit.setToolTip(
+                base_tooltip + "\n\nUnknown token"
+                + ("s: " if len(bad) > 1 else ": ")
+                + ", ".join("{" + b + "}" for b in bad)
+            )
+        else:
+            edit.setStyleSheet("")
+            edit.setToolTip(base_tooltip)
+
+    def _on_nav_changed(self, row: int) -> None:
+        """Accordion: expand only the section matching the selected nav row."""
+        if row < 0 or row >= len(self._sections):
+            return
+        target_title, target_section = self._sections[row]
+        for title, section in self._sections:
+            should_expand = (section is target_section)
+            if section._collapsed == (not should_expand):
+                continue  # already in desired state
+            section._collapsed = not should_expand
+            section._toggle_btn.setChecked(should_expand)
+            section._toggle_btn.setArrowType(Qt.DownArrow if should_expand else Qt.RightArrow)
+            section._content.setVisible(should_expand)
+        # Scroll target into view (deferred so the layout has time to settle).
+        QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(target_section, 0, 12))
 
     def _make_section(self, title: str, collapsed: bool = False) -> CollapsibleSection:
         """Create a CollapsibleSection that remembers its collapsed state.

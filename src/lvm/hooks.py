@@ -56,6 +56,40 @@ def _build_hook_env(
     return env
 
 
+def _build_hook_tokens(
+    source: WatchedSource,
+    version: VersionInfo,
+    user: str,
+    project_name: str,
+) -> dict:
+    """Build {token} → value map for hook command substitution.
+
+    Lowercase tokens mirror the LVM_* env vars so users can write either
+    ``echo {source_name}`` or ``echo $LVM_SOURCE_NAME`` / ``%LVM_SOURCE_NAME%``.
+    """
+    return {
+        "source_name":  source.name,
+        "version":      version.version_string,
+        "source_dir":   version.source_path,
+        "target_dir":   source.latest_target or "",
+        "link_mode":    source.link_mode,
+        "user":         user,
+        "project_name": project_name,
+        "frame_range": version.frame_range or "",
+        "file_count":   str(version.file_count),
+    }
+
+
+def _substitute_tokens(cmd: str, tokens: dict) -> str:
+    """Replace ``{token}`` occurrences in *cmd* using *tokens*. Unknown tokens
+    are left untouched so users notice typos rather than getting silent empties."""
+    if not cmd or "{" not in cmd:
+        return cmd
+    for name, value in tokens.items():
+        cmd = cmd.replace("{" + name + "}", value)
+    return cmd
+
+
 def run_hook(
     cmd: str,
     env: dict,
@@ -111,7 +145,11 @@ def run_pre_promote_hook(
     if not source.pre_promote_cmd:
         return 0, "", ""
     env = _build_hook_env(source, version, user, project_name)
-    rc, stdout, stderr = run_hook(source.pre_promote_cmd, env, "pre-promote hook")
+    cmd = _substitute_tokens(
+        source.pre_promote_cmd,
+        _build_hook_tokens(source, version, user, project_name),
+    )
+    rc, stdout, stderr = run_hook(cmd, env, "pre-promote hook")
     if rc != 0:
         raise HookError(
             f"Pre-promote hook exited with code {rc}.\n"
@@ -131,8 +169,12 @@ def run_post_promote_hook(
     if not source.post_promote_cmd:
         return 0, "", ""
     env = _build_hook_env(source, version, user, project_name)
+    cmd = _substitute_tokens(
+        source.post_promote_cmd,
+        _build_hook_tokens(source, version, user, project_name),
+    )
     try:
-        return run_hook(source.post_promote_cmd, env, "post-promote hook")
+        return run_hook(cmd, env, "post-promote hook")
     except HookError as e:
         logger.error(f"Post-promote hook failed: {e}")
         return -1, "", str(e)

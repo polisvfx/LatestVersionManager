@@ -1,5 +1,8 @@
 """Custom Qt widgets used by the GUI."""
 
+from PySide6.QtCore import QRect, QPoint
+from PySide6.QtWidgets import QLayout
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -223,6 +226,160 @@ class TagInputWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Wrapping flow layout (true line-wrap, unlike the legacy FlowLayout above)
+# ---------------------------------------------------------------------------
+
+
+class WrapFlowLayout(QLayout):
+    """QLayout that arranges items left-to-right and wraps to the next row
+    when the parent's width is exceeded. Adapted from Qt's official
+    FlowLayout example.
+    """
+
+    def __init__(self, parent=None, margin=0, spacing=4):
+        super().__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+        self._items: list = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        # Single-row width when unconstrained; container will compress us and
+        # heightForWidth handles the actual wrapping.
+        spacing = self.spacing()
+        w = 0
+        h = 0
+        for i, item in enumerate(self._items):
+            sh = item.sizeHint()
+            w += sh.width() + (spacing if i else 0)
+            h = max(h, sh.height())
+        m = self.contentsMargins()
+        return QSize(w + m.left() + m.right(), h + m.top() + m.bottom())
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        spacing = self.spacing()
+        for item in self._items:
+            item_w = item.sizeHint().width()
+            item_h = item.sizeHint().height()
+            next_x = x + item_w + spacing
+            if next_x - spacing > effective.right() and line_height > 0:
+                x = effective.x()
+                y = y + line_height + spacing
+                next_x = x + item_w + spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+            x = next_x
+            line_height = max(line_height, item_h)
+        return y + line_height - rect.y() + m.bottom()
+
+
+# ---------------------------------------------------------------------------
+# Clickable token chip bar (for template fields)
+# ---------------------------------------------------------------------------
+
+
+class TokenChipBar(QWidget):
+    """Row of clickable chips that insert {token} text into a target QLineEdit.
+
+    Each chip is a flat button labelled with the token (e.g. ``{source_name}``)
+    and carrying a tooltip describing what the token expands to. Clicking a
+    chip inserts the token at the target's current cursor position, replacing
+    any selection (QLineEdit.insert handles both cases).
+    """
+
+    def __init__(self, target: QLineEdit, tokens: dict, parent=None):
+        super().__init__(parent)
+        self._target = target
+        # Tell Qt our height depends on our width — required for QFormLayout
+        # to allocate only the wrapped height rather than the layout's
+        # unconstrained sizeHint (which would over-reserve vertical space).
+        sp = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        sp.setHeightForWidth(True)
+        self.setSizePolicy(sp)
+        layout = WrapFlowLayout(self, margin=0, spacing=4)
+        for name, tip in tokens.items():
+            btn = QPushButton("{" + name + "}")
+            btn.setToolTip(tip)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.setFlat(True)
+            btn.setStyleSheet(
+                "QPushButton {"
+                " background: #2a2a2a; color: #c8c8c8;"
+                " border: 1px solid #3a3a3a; border-radius: 9px;"
+                " padding: 2px 8px; font-family: Consolas, monospace;"
+                " font-size: 10pt; }"
+                "QPushButton:hover { background: #3a3a3a; color: #fff;"
+                " border-color: #4a90c4; }"
+                "QPushButton:pressed { background: #1f1f1f; }"
+            )
+            btn.clicked.connect(
+                lambda _checked=False, n=name: self._insert(n))
+            layout.addWidget(btn)
+
+    def _insert(self, name: str) -> None:
+        self._target.insert("{" + name + "}")
+        self._target.setFocus()
+
+    # Forward heightForWidth from the inner WrapFlowLayout so QFormLayout
+    # asks the wrapped height for the row's actual width instead of the
+    # layout's (much larger) sizeHint.
+    def hasHeightForWidth(self) -> bool:  # noqa: D401
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        return self.layout().heightForWidth(w)
+
+    def sizeHint(self):
+        # Width hint is irrelevant (form row stretches us); height is the
+        # single-row case so the form starts compact.
+        h = self.layout().heightForWidth(10_000)
+        return QSize(0, h)
+
+    def minimumSizeHint(self):
+        return QSize(0, self.layout().heightForWidth(60))
+
+
+# ---------------------------------------------------------------------------
 # Collapsible Section Widget
 # ---------------------------------------------------------------------------
 
@@ -263,6 +420,7 @@ class CollapsibleSection(QWidget):
         self._content_layout = QFormLayout(self._content)
         self._content_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self._content_layout.setContentsMargins(8, 4, 4, 8)
+        self._content_layout.setVerticalSpacing(4)
         self._content.setVisible(not collapsed)
 
         main_layout.addWidget(self._toggle_btn)
