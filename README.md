@@ -5,11 +5,11 @@ A desktop tool for managing versioned renders and media in VFX and post-producti
 In a typical compositing or grading workflow, artists iterate through numbered versions of their renders (`hero_comp_v001`, `hero_comp_v002`, `hero_comp_v003`...) while downstream tools like DaVinci Resolve or Premiere sometimes read from a single "latest" folder or file. LVM helps keeping track - it lets you pick which version is live, copies or links the files into the target location, and keeps a full history of what was promoted and when.
 
 
-<img width="1919" height="989" alt="Screenshot 2026-02-16 232233" src="https://github.com/user-attachments/assets/03e9952e-198c-48e4-a645-3ec862697565" />
-<img width="1153" height="786" alt="Screenshot 2026-02-16 232045" src="https://github.com/user-attachments/assets/f1d7146e-161b-4538-8a00-500153c13636" />
-<img width="815" height="801" alt="Screenshot 2026-02-16 232057" src="https://github.com/user-attachments/assets/c532c403-0f57-487a-85cc-61183f83cbc0" />
-<img width="1418" height="1158" alt="Screenshot 2026-02-16 232548" src="https://github.com/user-attachments/assets/5c312f5e-e832-4adf-bc24-ea480da9649d" />
-<img width="835" height="515" alt="Screenshot 2026-02-16 233813" src="https://github.com/user-attachments/assets/0618d082-62f3-40d7-97f1-bd92c51ae5b8" />
+<img width="1261" height="837" alt="Screenshot 2026-05-21 190606" src="https://github.com/user-attachments/assets/962ab987-4b52-4d4b-8342-190e999c9329" />
+<img width="1033" height="1182" alt="Screenshot 2026-05-21 190720" src="https://github.com/user-attachments/assets/a6e1a5c3-2f61-4e2c-9049-1b2195e12cff" />
+<img width="1261" height="724" alt="Screenshot 2026-05-21 190733" src="https://github.com/user-attachments/assets/5079fd96-bfea-47cb-bda6-28e492ca05e6" />
+<img width="976" height="665" alt="Screenshot 2026-05-21 190749" src="https://github.com/user-attachments/assets/afe9087d-fa51-4dc6-b0d2-d64a6be7e846" />
+<img width="627" height="436" alt="Screenshot 2026-05-21 190845" src="https://github.com/user-attachments/assets/9e664495-3832-47c8-9480-8c0167d177d4" />
 
 
 ## What It Does
