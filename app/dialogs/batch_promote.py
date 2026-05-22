@@ -128,6 +128,113 @@ class BatchPromoteReviewDialog(QDialog):
         return selected
 
 
+class DiscoverPromotePreviewDialog(QDialog):
+    """Preview the one-click Discover & Promote roundtrip before it runs.
+
+    Shows the discovery root, sources about to be added, and sources about
+    to be promoted. Includes an opt-out checkbox so subsequent clicks can
+    skip this confirmation.
+    """
+
+    def __init__(self, root_dir: str, new_results, non_latest_names,
+                 source_status: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Discover & Promote — Preview")
+        self.setMinimumSize(720, 480)
+
+        layout = QVBoxLayout(self)
+
+        intro = QLabel(
+            "This one-click action will rediscover the directory below, "
+            "auto-add any new versioned sources it finds, then promote every "
+            "source that isn't on its latest version."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("font-size: 12pt; padding: 4px;")
+        layout.addWidget(intro)
+
+        root_label = QLabel(f"<b>Discovery directory:</b> {root_dir}")
+        root_label.setStyleSheet("padding: 2px 4px;")
+        root_label.setWordWrap(True)
+        layout.addWidget(root_label)
+
+        summary = QLabel(
+            f"<b>{len(new_results)}</b> new source(s) to add &nbsp;|&nbsp; "
+            f"<b>{len(non_latest_names)}</b> existing source(s) to promote"
+        )
+        summary.setStyleSheet("font-size: 12pt; padding: 4px;")
+        layout.addWidget(summary)
+
+        tree = QTreeWidget()
+        tree.setHeaderLabels(["Action", "Source", "Current", "Target", "Path"])
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        header = tree.header()
+        header.resizeSection(0, 80)
+        header.resizeSection(1, 180)
+        header.resizeSection(2, 90)
+        header.resizeSection(3, 90)
+
+        add_color = QColor("#7abbe0")
+        promote_color = QColor("#4ec9a0")
+
+        for r in new_results:
+            highest = ""
+            if r.versions_found:
+                try:
+                    highest = r.versions_found[-1].version_string
+                except (AttributeError, IndexError):
+                    highest = ""
+            item = QTreeWidgetItem(["Add", r.name, "—", highest or "—", r.path])
+            for col in range(5):
+                item.setForeground(col, add_color)
+            tree.addTopLevelItem(item)
+
+        for name in non_latest_names:
+            info = source_status.get(name, {}) or {}
+            current = info.get("current")
+            highest = info.get("highest")
+            current_ver = current.version if current else "—"
+            highest_ver = ""
+            if highest is not None:
+                highest_ver = getattr(highest, "version_string", "") or getattr(highest, "version", "")
+            item = QTreeWidgetItem([
+                "Promote", name, current_ver, highest_ver or "(latest)", "",
+            ])
+            for col in range(5):
+                item.setForeground(col, promote_color)
+            tree.addTopLevelItem(item)
+
+        layout.addWidget(tree)
+
+        self.skip_cb = QCheckBox(
+            "Don't show this preview again for this project"
+        )
+        self.skip_cb.setToolTip(
+            "Future Discover & Promote clicks will skip straight to running "
+            "the action. Re-enable from Project Settings → General."
+        )
+        layout.addWidget(self.skip_cb)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_run = QPushButton("Run Discover && Promote")
+        btn_run.setStyleSheet(
+            "QPushButton { background-color: #2f6a4a; color: white; padding: 8px 20px; "
+            "border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #3d8a60; }"
+        )
+        btn_run.clicked.connect(self.accept)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_run)
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+    def skip_future_previews(self) -> bool:
+        return self.skip_cb.isChecked()
+
+
 class UndoPromoteDialog(QDialog):
     """Confirmation dialog for Undo Promote.
 

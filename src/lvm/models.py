@@ -497,6 +497,13 @@ class ProjectConfig:
     nle_rename_include_extension: bool = False     # append file extension
     nle_rename_custom_enabled: bool = False        # use a custom token template instead of the default
     nle_rename_custom_template: str = "{source_name}"  # template; tokens: {source_name}, {shot}, {sequence}, {task}
+    # ----- Discover & Promote (one-click roundtrip) -----
+    # Enables the "Discover & Promote" button below the Promote row in the
+    # main window. Disabled by default — opt-in from Project Settings.
+    discover_and_promote_enabled: bool = False
+    # When True, the first-run preview dialog is suppressed on subsequent
+    # clicks. Set by the user via an opt-out checkbox in the preview dialog.
+    discover_and_promote_skip_preview: bool = False
     # Runtime only — not serialized, set by config loader
     project_dir: str = field(default="", repr=False)
 
@@ -586,6 +593,10 @@ class ProjectConfig:
             d["nle_rename_custom_enabled"] = True
         if self.nle_rename_custom_template and self.nle_rename_custom_template != "{source_name}":
             d["nle_rename_custom_template"] = self.nle_rename_custom_template
+        if self.discover_and_promote_enabled:
+            d["discover_and_promote_enabled"] = True
+        if self.discover_and_promote_skip_preview:
+            d["discover_and_promote_skip_preview"] = True
         return d
 
     @classmethod
@@ -626,6 +637,8 @@ class ProjectConfig:
             nle_rename_include_extension=data.get("nle_rename_include_extension", False),
             nle_rename_custom_enabled=data.get("nle_rename_custom_enabled", False),
             nle_rename_custom_template=data.get("nle_rename_custom_template", "{source_name}"),
+            discover_and_promote_enabled=data.get("discover_and_promote_enabled", False),
+            discover_and_promote_skip_preview=data.get("discover_and_promote_skip_preview", False),
         )
 
 

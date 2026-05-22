@@ -674,135 +674,10 @@ class DiscoveryDialog(QDialog):
                 self._config.latest_path_template = path_dlg.get_template()
                 self._config.default_file_rename_template = path_dlg.get_rename_template()
 
-        # Add sources using the naming rule.
-        # Names must be unique across the project, so detect collisions and
-        # auto-disambiguate. This matters when several discovery results share
-        # the same source_dir (multi-shot flat folder) and the user's naming
-        # rule (e.g. parent:0) yields the same name for all of them.
-        existing_names = {s.name for s in self._config.watched_sources}
-
-        # Pre-build an index of existing latest_target -> history filenames so
-        # we can disambiguate a new source's history file when it'd land in a
-        # directory that another source is already writing to. Without this,
-        # several sources sharing a target dir all read/write the same
-        # .latest_history.json and stomp each other's promotion records.
-        def _resolved(p: str) -> str:
-            try:
-                return str(Path(p).resolve())
-            except (OSError, ValueError):
-                return p
-
-        target_history_map: dict[str, set[str]] = {}
-        for s in self._config.watched_sources:
-            if s.latest_target:
-                target_history_map.setdefault(_resolved(s.latest_target), set()).add(
-                    s.history_filename or ".latest_history.json"
-                )
-
-        renamed_count = 0
-        history_disambiguated = 0
-        added = 0
-        for result in selected_results:
-            source_name = compute_source_name(
-                result,
-                self._config.default_naming_rule,
-                self._config.task_tokens,
-            )
-            if source_name in existing_names:
-                # Fall back to the per-cluster source_name rule, which is
-                # naturally unique because discovery clustered by basename.
-                fallback_name = compute_source_name(
-                    result, "source_name", self._config.task_tokens)
-                if fallback_name and fallback_name not in existing_names:
-                    source_name = fallback_name
-                    renamed_count += 1
-                else:
-                    # Still colliding (or empty) — append a numeric suffix.
-                    base = fallback_name or source_name
-                    n = 2
-                    while f"{base}_{n}" in existing_names:
-                        n += 1
-                    source_name = f"{base}_{n}"
-                    renamed_count += 1
-            existing_names.add(source_name)
-
-            suggested_date_fmt = getattr(result, "suggested_date_format", "")
-            from datetime import datetime as _dt
-            # Discovery never sets an override flag. The values it found
-            # (suggested_pattern, suggested_extensions, suggested_date_format)
-            # are seeded into the source as initial values, but
-            # apply_project_defaults below normalises everything against the
-            # project defaults. Per-source overrides are reserved for fields
-            # the user *explicitly* changes via the per-source settings
-            # dialog — that's the only place the flag gets set today.
-            source = WatchedSource(
-                name=source_name,
-                source_dir=result.path,
-                version_pattern=result.suggested_pattern or self._config.default_version_pattern,
-                file_extensions=result.suggested_extensions or list(self._config.default_file_extensions),
-                sample_filename=result.sample_filename or "",
-                date_format=suggested_date_fmt or self._config.default_date_format,
-                added_at=_dt.now().isoformat(timespec="seconds"),
-            )
-
-            # Compute latest_target from project template if available
-            if self._config.latest_path_template:
-                tokens = derive_source_tokens(
-                    result.sample_filename or source_name,
-                    self._config.task_tokens,
-                    source_title=source_name,
-                )
-                tpl = self._config.latest_path_template
-                tpl = tpl.replace("{project_root}", self._config.effective_project_root)
-                tpl = tpl.replace("{group_root}", _resolve_group_root(self._config, source.group))
-                tpl = tpl.replace("{source_title}", tokens["source_title"])
-                tpl = tpl.replace("{source_name}", tokens["source_name"])
-                tpl = tpl.replace("{source_basename}", tokens["source_basename"])
-                tpl = tpl.replace("{source_fullname}", tokens["source_fullname"])
-                tpl = tpl.replace("{source_filename}", tokens["source_filename"])
-                tpl = tpl.replace("{source_dir}", source.source_dir)
-                tpl = _expand_group_token(tpl, source.group)
-                # Relative paths resolve from the source directory
-                resolved = Path(tpl)
-                if not resolved.is_absolute() and source.source_dir:
-                    resolved = Path(source.source_dir) / resolved
-                elif not resolved.is_absolute() and self._config.project_dir:
-                    resolved = Path(self._config.project_dir) / resolved
-                source.latest_target = str(resolved.resolve())
-                # Don't mark as override — it came from the project default template
-
-            # Disambiguate history filename when this source's target dir is
-            # already claimed by another source (existing or earlier in this
-            # batch). The first source in a fresh dir keeps the default
-            # ".latest_history.json"; subsequent sources get a name-derived
-            # filename so their promotion records don't overwrite each other.
-            if source.latest_target:
-                resolved_dir = _resolved(source.latest_target)
-                taken = target_history_map.setdefault(resolved_dir, set())
-                if taken:
-                    safe = re.sub(r"[^A-Za-z0-9_-]", "_", source.name) or "source"
-                    desired = f".latest_history_{safe}.json"
-                    n = 2
-                    while desired in taken:
-                        desired = f".latest_history_{safe}_{n}.json"
-                        n += 1
-                    source.history_filename = desired
-                    history_disambiguated += 1
-                taken.add(source.history_filename or ".latest_history.json")
-
-            self._config.watched_sources.append(source)
-            added += 1
-
+        added, renamed_count, history_disambiguated = add_discovery_results_to_config(
+            self._config, selected_results
+        )
         if added:
-            # Populate every inheritable field on the new sources from the
-            # current project defaults — file_rename_template, link_mode,
-            # block_incomplete_sequences, pre/post-promote hooks, etc. The
-            # WatchedSource constructor only sets dataclass defaults, so
-            # without this call a freshly added source would promote with
-            # an empty file_rename_template and the no-template fallback in
-            # _remap_filename would strip "_latest" (or whatever suffix the
-            # user configured) until the project is reloaded.
-            apply_project_defaults(self._config)
             self.sources_added.emit(added)
             msg = f"Added {added} source(s) to the project."
             if renamed_count:
@@ -819,6 +694,119 @@ class DiscoveryDialog(QDialog):
             QMessageBox.information(self, "Sources Added", msg)
             # Rebuild tree so newly-added sources get marked/hidden
             self._rebuild_tree()
+
+
+def add_discovery_results_to_config(config, results) -> tuple[int, int, int]:
+    """Append DiscoveryResult entries to ``config.watched_sources``.
+
+    Mirrors the post-naming-dialog logic of ``DiscoveryDialog._add_selected``:
+    handles name collisions, computes latest_target from the project's
+    template, disambiguates history filenames against existing sources, and
+    re-applies project defaults so the new sources inherit everything from
+    file_rename_template down to pre/post-promote hooks.
+
+    Returns ``(added, renamed_count, history_disambiguated)``.
+    """
+    if not results:
+        return (0, 0, 0)
+
+    existing_names = {s.name for s in config.watched_sources}
+
+    def _resolved(p: str) -> str:
+        try:
+            return str(Path(p).resolve())
+        except (OSError, ValueError):
+            return p
+
+    target_history_map: dict[str, set[str]] = {}
+    for s in config.watched_sources:
+        if s.latest_target:
+            target_history_map.setdefault(_resolved(s.latest_target), set()).add(
+                s.history_filename or ".latest_history.json"
+            )
+
+    renamed_count = 0
+    history_disambiguated = 0
+    added = 0
+    for result in results:
+        source_name = compute_source_name(
+            result,
+            config.default_naming_rule,
+            config.task_tokens,
+        )
+        if source_name in existing_names:
+            # Fall back to the per-cluster source_name rule, which is
+            # naturally unique because discovery clustered by basename.
+            fallback_name = compute_source_name(
+                result, "source_name", config.task_tokens)
+            if fallback_name and fallback_name not in existing_names:
+                source_name = fallback_name
+                renamed_count += 1
+            else:
+                # Still colliding (or empty) — append a numeric suffix.
+                base = fallback_name or source_name
+                n = 2
+                while f"{base}_{n}" in existing_names:
+                    n += 1
+                source_name = f"{base}_{n}"
+                renamed_count += 1
+        existing_names.add(source_name)
+
+        suggested_date_fmt = getattr(result, "suggested_date_format", "")
+        from datetime import datetime as _dt
+        source = WatchedSource(
+            name=source_name,
+            source_dir=result.path,
+            version_pattern=result.suggested_pattern or config.default_version_pattern,
+            file_extensions=result.suggested_extensions or list(config.default_file_extensions),
+            sample_filename=result.sample_filename or "",
+            date_format=suggested_date_fmt or config.default_date_format,
+            added_at=_dt.now().isoformat(timespec="seconds"),
+        )
+
+        if config.latest_path_template:
+            tokens = derive_source_tokens(
+                result.sample_filename or source_name,
+                config.task_tokens,
+                source_title=source_name,
+            )
+            tpl = config.latest_path_template
+            tpl = tpl.replace("{project_root}", config.effective_project_root)
+            tpl = tpl.replace("{group_root}", _resolve_group_root(config, source.group))
+            tpl = tpl.replace("{source_title}", tokens["source_title"])
+            tpl = tpl.replace("{source_name}", tokens["source_name"])
+            tpl = tpl.replace("{source_basename}", tokens["source_basename"])
+            tpl = tpl.replace("{source_fullname}", tokens["source_fullname"])
+            tpl = tpl.replace("{source_filename}", tokens["source_filename"])
+            tpl = tpl.replace("{source_dir}", source.source_dir)
+            tpl = _expand_group_token(tpl, source.group)
+            resolved = Path(tpl)
+            if not resolved.is_absolute() and source.source_dir:
+                resolved = Path(source.source_dir) / resolved
+            elif not resolved.is_absolute() and config.project_dir:
+                resolved = Path(config.project_dir) / resolved
+            source.latest_target = str(resolved.resolve())
+
+        if source.latest_target:
+            resolved_dir = _resolved(source.latest_target)
+            taken = target_history_map.setdefault(resolved_dir, set())
+            if taken:
+                safe = re.sub(r"[^A-Za-z0-9_-]", "_", source.name) or "source"
+                desired = f".latest_history_{safe}.json"
+                n = 2
+                while desired in taken:
+                    desired = f".latest_history_{safe}_{n}.json"
+                    n += 1
+                source.history_filename = desired
+                history_disambiguated += 1
+            taken.add(source.history_filename or ".latest_history.json")
+
+        config.watched_sources.append(source)
+        added += 1
+
+    if added:
+        apply_project_defaults(config)
+    return (added, renamed_count, history_disambiguated)
 
 
 # ---------------------------------------------------------------------------
