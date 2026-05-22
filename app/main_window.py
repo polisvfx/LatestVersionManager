@@ -433,6 +433,11 @@ class MainWindow(QMainWindow):
 
         # Revert + Export buttons
         revert_row = QHBoxLayout()
+        self.btn_timeline = QPushButton("Timeline View...")
+        self.btn_timeline.setToolTip("Open the Gantt-style promotion history timeline")
+        self.btn_timeline.clicked.connect(self._open_history_timeline)
+        self.btn_timeline.setEnabled(False)
+        revert_row.addWidget(self.btn_timeline)
         self.btn_export_report = QPushButton("Export Report...")
         self.btn_export_report.clicked.connect(self._export_report)
         revert_row.addWidget(self.btn_export_report)
@@ -1534,6 +1539,7 @@ class MainWindow(QMainWindow):
         self.btn_project_settings.setEnabled(enabled)
         self.btn_manage_groups.setEnabled(enabled)
         self._history_timeline_action.setEnabled(enabled)
+        self.btn_timeline.setEnabled(enabled)
         self.btn_refresh.setEnabled(False)
         self.btn_import_version.setEnabled(False)
         self.btn_refresh_versions.setEnabled(False)
