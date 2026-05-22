@@ -26,8 +26,8 @@ from app.workers import (
 )
 from app.widgets import VersionTreeWidget, SourceItemDelegate
 from app.dialogs.about import AboutDialog
-from app.dialogs.batch_promote import BatchPromoteReviewDialog, UndoPromoteDialog
-from app.dialogs.discovery import DiscoveryDialog
+from app.dialogs.batch_promote import BatchPromoteReviewDialog, UndoPromoteDialog, DiscoverPromotePreviewDialog
+from app.dialogs.discovery import DiscoveryDialog, DiscoveryWorker, add_discovery_results_to_config
 from app.dialogs.dry_run import DryRunDialog
 from app.dialogs.history_timeline import HistoryTimelineDialog
 from app.dialogs.latest_path import LatestPathDialog
@@ -292,6 +292,30 @@ class MainWindow(QMainWindow):
         promote_layout.addWidget(self.btn_promote_split_all, stretch=0)
 
         left_layout.addWidget(self.promote_container)
+
+        # Discover & Promote — one-click roundtrip: rediscover the last
+        # discovery root, auto-add any new sources, then batch-promote
+        # everything that isn't on its latest version. Hidden unless opted in
+        # from Project Settings.
+        discover_promote_style = (
+            "QPushButton { background-color: #2f6a4a; color: white; padding: 8px 16px; "
+            "border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #3d8a60; }"
+            "QPushButton:disabled { background-color: #2a2a2a; color: #8c8c8c; }"
+        )
+        self.btn_discover_promote = QPushButton("Discover && Promote")
+        self.btn_discover_promote.setStyleSheet(discover_promote_style)
+        self.btn_discover_promote.setEnabled(False)
+        self.btn_discover_promote.setVisible(False)
+        self.btn_discover_promote.setToolTip(
+            "Rediscover the last-scanned directory, auto-add any new\n"
+            "versioned sources, and promote everything that isn't on its\n"
+            "latest version — all in one click.\n"
+            "Hold Shift to also rescan every existing source for new\n"
+            "versions before promoting."
+        )
+        self.btn_discover_promote.clicked.connect(self._discover_and_promote)
+        left_layout.addWidget(self.btn_discover_promote)
 
         splitter.addWidget(left_panel)
 
@@ -1301,6 +1325,32 @@ class MainWindow(QMainWindow):
             self.btn_promote_all.setText("Promote All to Latest")
             self.btn_promote_all.setEnabled(has_sources and self._worker is None)
             self.btn_promote_split_all.setVisible(False)
+        self._update_discover_promote_button()
+
+    def _update_discover_promote_button(self):
+        """Sync visibility/enabled state of the Discover & Promote button."""
+        cfg = self.config
+        if not cfg or not getattr(cfg, "discover_and_promote_enabled", False):
+            self.btn_discover_promote.setVisible(False)
+            return
+        self.btn_discover_promote.setVisible(True)
+        has_discovery = bool(cfg.discovery_search_history)
+        idle = (self._worker is None and self._scan_worker is None
+                and self._status_worker is None
+                and not getattr(self, "_discover_promote_worker", None))
+        if not has_discovery:
+            self.btn_discover_promote.setEnabled(False)
+            self.btn_discover_promote.setToolTip(
+                "Run a Discovery scan first — the one-click roundtrip "
+                "rediscovers whichever directory you last scanned."
+            )
+        else:
+            self.btn_discover_promote.setEnabled(idle)
+            last_dir = cfg.discovery_search_history[0]
+            self.btn_discover_promote.setToolTip(
+                f"Rediscover {last_dir}, auto-add new sources, and promote "
+                "everything that isn't on its latest version."
+            )
 
     def _promote_all_or_selected(self):
         """Promote highest version of all or selected sources.
@@ -1468,6 +1518,219 @@ class MainWindow(QMainWindow):
         self.source_list.clearSelection()
         self._promote_all_or_selected()
 
+    # ----- Discover & Promote (one-click roundtrip) -----
+
+    _discover_promote_worker = None
+
+    def _discover_and_promote(self):
+        """Run discovery + auto-add new sources + batch-promote in one click.
+
+        Phase 1 (this method): kick off a background DiscoveryWorker against
+        whichever directory the user last scanned. Phase 2
+        (_on_discover_promote_complete): filter to brand-new paths, append
+        them as WatchedSources, then refresh and trigger the existing batch
+        promotion path (which already covers obsolete-layer prompts).
+        """
+        if not self.config:
+            return
+        if not self.config.discovery_search_history:
+            QMessageBox.information(
+                self, "Discover & Promote",
+                "Run a Discovery scan first — Discover & Promote rediscovers "
+                "whichever directory you last scanned.",
+            )
+            return
+        if self._discover_promote_worker is not None:
+            return
+
+        root_dir = self.config.discovery_search_history[0]
+        if not os.path.isdir(root_dir):
+            QMessageBox.warning(
+                self, "Discover & Promote",
+                f"Last-used discovery directory no longer exists:\n{root_dir}\n\n"
+                "Open Discover Versions and pick a new directory.",
+            )
+            return
+
+        # Shift+click also rescans existing sources for new versions before
+        # determining what to promote — so a source that picked up a new
+        # version since the last scan is included even when there's nothing
+        # new to discover.
+        force_refresh = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        self._discover_promote_root_dir = root_dir
+
+        if force_refresh and self.config.watched_sources:
+            self._scan_indicator.setText("Refreshing...")
+            self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
+            self.statusBar().showMessage(
+                "Discover & Promote: rescanning existing sources…"
+            )
+            self._discover_promote_pending_refresh = True
+            self._refresh_all()
+            QTimer.singleShot(100, self._discover_promote_after_pre_refresh)
+            self._update_discover_promote_button()
+        else:
+            self._start_discover_promote_scan(root_dir)
+
+    def _discover_promote_after_pre_refresh(self):
+        """Wait for the Shift+click pre-refresh to finish, then start discovery."""
+        if self._scan_worker is not None or self._status_worker is not None:
+            QTimer.singleShot(100, self._discover_promote_after_pre_refresh)
+            return
+        if not getattr(self, "_discover_promote_pending_refresh", False):
+            return
+        self._discover_promote_pending_refresh = False
+        root_dir = getattr(self, "_discover_promote_root_dir", "")
+        if not root_dir:
+            self._update_discover_promote_button()
+            return
+        self._start_discover_promote_scan(root_dir)
+
+    def _start_discover_promote_scan(self, root_dir: str):
+        """Kick off the DiscoveryWorker phase of the roundtrip."""
+        self._scan_indicator.setText("Discovering...")
+        self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
+        self.statusBar().showMessage(f"Discover & Promote: scanning {root_dir}…")
+
+        worker = DiscoveryWorker(
+            root_dir=root_dir,
+            max_depth=4,
+            extensions=self.config.default_file_extensions,
+            whitelist=self.config.name_whitelist,
+            blacklist=self.config.name_blacklist,
+            skip_resolve=self.config.skip_resolve,
+            parent=self,
+        )
+        worker.finished.connect(self._on_discover_promote_complete)
+        worker.error.connect(self._on_discover_promote_error)
+        self._discover_promote_worker = worker
+        self._update_discover_promote_button()
+        worker.start()
+
+    def _on_discover_promote_error(self, msg: str):
+        self._discover_promote_worker = None
+        self._scan_indicator.setText("")
+        self.statusBar().showMessage(f"Discover & Promote failed: {msg}")
+        logger.error("Discover & Promote: %s", msg)
+        self._update_discover_promote_button()
+
+    def _on_discover_promote_complete(self, results: list):
+        self._discover_promote_worker = None
+        self._scan_indicator.setText("")
+
+        existing_paths = {
+            str(Path(s.source_dir).resolve()) if s.source_dir else ""
+            for s in self.config.watched_sources
+        }
+        new_results = []
+        for r in results:
+            try:
+                p = str(Path(r.path).resolve())
+            except (OSError, ValueError):
+                p = r.path
+            if p not in existing_paths:
+                new_results.append(r)
+
+        # Build the batch promote list from currently watched sources that
+        # aren't on their highest version. New sources (added below) join
+        # the list by definition — they have no current promotion yet.
+        non_latest_existing = []
+        for source in self.config.watched_sources:
+            if not source.latest_target:
+                continue
+            status = self._source_status.get(source.name, {}).get("status", "")
+            if status in ("newer", "stale", "no_version"):
+                non_latest_existing.append(source.name)
+
+        new_count = len(new_results)
+        promote_existing_count = len(non_latest_existing)
+
+        if new_count == 0 and promote_existing_count == 0:
+            QMessageBox.information(
+                self, "Discover & Promote",
+                "Nothing to do — no new sources discovered and every existing "
+                "source is already on its latest version.",
+            )
+            self._update_discover_promote_button()
+            return
+
+        # First-run preview, unless the user previously opted out.
+        if not self.config.discover_and_promote_skip_preview:
+            dlg = DiscoverPromotePreviewDialog(
+                root_dir=self.config.discovery_search_history[0],
+                new_results=new_results,
+                non_latest_names=non_latest_existing,
+                source_status=self._source_status,
+                parent=self,
+            )
+            if dlg.exec() != QDialog.Accepted:
+                self._update_discover_promote_button()
+                return
+            if dlg.skip_future_previews():
+                self.config.discover_and_promote_skip_preview = True
+                self._mark_dirty()
+                if self.config_path:
+                    self._save_project()
+
+        # Append the new sources, then run the existing batch promote flow.
+        added = 0
+        if new_results:
+            added, renamed, history_disambig = add_discovery_results_to_config(
+                self.config, new_results
+            )
+            if added:
+                self._mark_dirty()
+                if self.config_path:
+                    self._save_project()
+                logger.info(
+                    "Discover & Promote: added %d source(s) "
+                    "(%d renamed, %d history-disambiguated).",
+                    added, renamed, history_disambig,
+                )
+
+        # Select all sources we want to promote so _promote_all_or_selected
+        # uses the selected-path. New sources land in the source list after
+        # the next reload, so kick that off first and chain the promotion
+        # onto its completion.
+        self._pending_discover_promote_names = (
+            set(non_latest_existing) | {s.name for s in self.config.watched_sources[-added:]}
+            if added else set(non_latest_existing)
+        )
+        # Reload (rescans new + existing sources, recomputes statuses) and
+        # then fire the batch promote.
+        self._reload_ui()
+        # _on_reload_status_complete runs after the rescan; chain via a
+        # single-shot timer so it fires on the next event loop turn once
+        # _reload_ui has wired its workers.
+        QTimer.singleShot(0, self._maybe_run_pending_discover_promote)
+
+    def _maybe_run_pending_discover_promote(self):
+        """Wait for the post-reload scan to finish, then trigger batch promote."""
+        if self._scan_worker is not None or self._status_worker is not None:
+            QTimer.singleShot(100, self._maybe_run_pending_discover_promote)
+            return
+        names = getattr(self, "_pending_discover_promote_names", None)
+        if not names:
+            self._update_discover_promote_button()
+            return
+        self._pending_discover_promote_names = None
+
+        # Select the target sources, then call the existing promote path.
+        self.source_list.blockSignals(True)
+        self.source_list.clearSelection()
+        for i in range(self.source_list.topLevelItemCount()):
+            item = self.source_list.topLevelItem(i)
+            if item.data(0, Qt.UserRole) in names:
+                item.setSelected(True)
+        self.source_list.blockSignals(False)
+        self._on_source_selection_changed()
+
+        if self.source_list.selectedItems():
+            self._promote_all_or_selected()
+        else:
+            self.statusBar().showMessage("Discover & Promote: nothing to promote.")
+            self._update_discover_promote_button()
+
     def _batch_promote_next(self):
         """Promote the next source in the batch list."""
         if self._batch_promote_index >= len(self._batch_promote_list):
@@ -1628,6 +1891,7 @@ class MainWindow(QMainWindow):
 
         self._save_scan_cache()
         self._scan_indicator.setText("")
+        self._update_discover_promote_button()
 
         # If this was a cache-first load, kick off a background rescan now
         if getattr(self, '_rescan_after_cache', False):
@@ -2059,6 +2323,7 @@ class MainWindow(QMainWindow):
         self._populate_source_list()
 
         self._scan_indicator.setText("")
+        self._update_discover_promote_button()
         count = getattr(self, '_partial_scan_count', 0)
         self.statusBar().showMessage(f"Refreshed {count} source{'s' if count != 1 else ''}", 3000)
 
@@ -2187,6 +2452,7 @@ class MainWindow(QMainWindow):
         # Save scan results to cache and clear indicator
         self._save_scan_cache()
         self._scan_indicator.setText("")
+        self._update_discover_promote_button()
         self.statusBar().showMessage("Refreshed all sources")
 
         self._check_reload_pending()

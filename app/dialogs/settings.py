@@ -166,6 +166,18 @@ class ProjectSettingsDialog(QDialog):
         root_row.addWidget(self.root_browse_btn)
         general.addRow("Project Root:", root_row)
 
+        self.discover_promote_cb = QCheckBox(
+            "Show \"Discover && Promote\" one-click button"
+        )
+        self.discover_promote_cb.setChecked(config.discover_and_promote_enabled)
+        self.discover_promote_cb.setToolTip(
+            "Adds a button below the Promote row that runs a full roundtrip:\n"
+            "rediscovers the last-scanned directory, auto-adds any new\n"
+            "versioned sources, and promotes everything that isn't on its\n"
+            "latest version. Requires an initial Discovery scan first."
+        )
+        general.addRow("", self.discover_promote_cb)
+
         top_layout.addWidget(general_section)
 
         # ==================================================================
@@ -1119,6 +1131,14 @@ class ProjectSettingsDialog(QDialog):
         config.nle_rename_custom_template = (
             self.nle_rename_custom_edit.text().strip() or "{source_name}"
         )
+
+        # Discover & Promote one-click button
+        was_enabled = config.discover_and_promote_enabled
+        config.discover_and_promote_enabled = self.discover_promote_cb.isChecked()
+        # When the feature is re-enabled, reset the skip-preview opt-out so
+        # the user sees the preview at least once after toggling it back on.
+        if config.discover_and_promote_enabled and not was_enabled:
+            config.discover_and_promote_skip_preview = False
 
         # Re-apply defaults to non-overridden sources
         apply_project_defaults(config)
