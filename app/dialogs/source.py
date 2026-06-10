@@ -1,5 +1,7 @@
 """source dialog module."""
 
+import copy
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -29,6 +31,7 @@ class SourceDialog(QDialog):
         self.setWindowTitle("Edit Source" if source else "Add Source")
         self.setMinimumWidth(550)
         self._project_config = project_config
+        self._source = source
 
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
@@ -191,20 +194,26 @@ class SourceDialog(QDialog):
         date_fmt = ",".join(
             fmt for fmt, cb in self.date_format_checks.items() if cb.isChecked()
         )
-        return WatchedSource(
-            name=self.name_edit.text().strip() or "Untitled",
-            source_dir=self.source_dir_edit.text().strip(),
-            version_pattern=self.pattern_edit.text().strip() or (pc.default_version_pattern if pc else "_v{version}"),
-            file_extensions=exts,
-            latest_target=self.target_dir_edit.text().strip(),
-            link_mode=self.link_mode_combo.currentText(),
-            date_format=date_fmt,
-            override_version_pattern=self.override_pattern_check.isChecked(),
-            override_date_format=self.override_date_format_check.isChecked(),
-            override_file_extensions=self.override_ext_check.isChecked(),
-            override_latest_target=self.override_latest_check.isChecked(),
-            override_link_mode=self.override_link_mode_check.isChecked(),
-        )
+        if self._source is not None:
+            # Editing: start from a copy of the original so fields this dialog
+            # doesn't manage (group, sample_filename, manual_versions, hooks,
+            # rename template, block_incomplete flags, ...) survive the edit.
+            src = copy.deepcopy(self._source)
+        else:
+            src = WatchedSource(name="", source_dir="")
+        src.name = self.name_edit.text().strip() or "Untitled"
+        src.source_dir = self.source_dir_edit.text().strip()
+        src.version_pattern = self.pattern_edit.text().strip() or (pc.default_version_pattern if pc else "_v{version}")
+        src.file_extensions = exts
+        src.latest_target = self.target_dir_edit.text().strip()
+        src.link_mode = self.link_mode_combo.currentText()
+        src.date_format = date_fmt
+        src.override_version_pattern = self.override_pattern_check.isChecked()
+        src.override_date_format = self.override_date_format_check.isChecked()
+        src.override_file_extensions = self.override_ext_check.isChecked()
+        src.override_latest_target = self.override_latest_check.isChecked()
+        src.override_link_mode = self.override_link_mode_check.isChecked()
+        return src
 
 
 # ---------------------------------------------------------------------------
