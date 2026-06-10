@@ -23,5 +23,6 @@ from app.dialogs.manage_groups import ManageGroupsDialog  # noqa: F401
 from app.dialogs.update import UpdateDialog  # noqa: F401
 from app.dialogs.about import AboutDialog  # noqa: F401
 from app.dialogs.batch_promote import BatchPromoteReviewDialog  # noqa: F401
+from app.dialogs.bulk_edit import BulkEditSourcesDialog  # noqa: F401
 from app.dialogs.obsolete_layer import ObsoleteLayerDialog  # noqa: F401
 from app.main_window import MainWindow  # noqa: F401

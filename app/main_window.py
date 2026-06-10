@@ -29,6 +29,7 @@ from app.workers import (
 from app.widgets import VersionTreeWidget, SourceItemDelegate
 from app.dialogs.about import AboutDialog
 from app.dialogs.batch_promote import BatchPromoteReviewDialog, UndoPromoteDialog, DiscoverPromotePreviewDialog
+from app.dialogs.bulk_edit import BulkEditSourcesDialog
 from app.dialogs.discovery import DiscoveryDialog, DiscoveryWorker, add_discovery_results_to_config
 from app.dialogs.dry_run import DryRunDialog
 from app.dialogs.history_timeline import HistoryTimelineDialog
@@ -1027,6 +1028,48 @@ class MainWindow(QMainWindow):
             self._save_project()
         self._reload_ui()
 
+    def _bulk_edit_sources(self, indices: list):
+        """Apply selected field changes to several sources at once."""
+        if not self.config:
+            return
+        sources = [
+            self.config.watched_sources[i] for i in indices
+            if 0 <= i < len(self.config.watched_sources)
+        ]
+        if not sources:
+            return
+        dlg = BulkEditSourcesDialog(sources, project_config=self.config, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        edits = dlg.get_edits()
+        if not edits:
+            return
+
+        # A typed-in group that doesn't exist yet is created with the next
+        # free palette color (same behaviour as "Assign to New Group...").
+        group_edit = edits.get("group")
+        new_group = group_edit.get("value") if group_edit else ""
+        if new_group and new_group not in self.config.groups:
+            used = {v.get("color", "") for v in self.config.groups.values()}
+            color = "#8c8c8c"
+            for c in _GROUP_COLOR_PALETTE:
+                if c not in used:
+                    color = c
+                    break
+            self.config.groups[new_group] = {"color": color}
+
+        from src.lvm.config import apply_bulk_edits
+        n = apply_bulk_edits(self.config, [s.name for s in sources], edits)
+        if not n:
+            return
+        # Refill inherited fields from project defaults
+        apply_project_defaults(self.config)
+        self._mark_dirty()
+        if self.config_path:
+            self._save_project()
+        self.statusBar().showMessage(f"Updated {n} source{'s' if n != 1 else ''}")
+        self._reload_ui()
+
     def _remove_source(self, index: int):
         self._remove_sources([index])
 
@@ -1102,6 +1145,7 @@ class MainWindow(QMainWindow):
             menu.addAction("Edit Source...", lambda: self._edit_source(index))
             menu.addAction("Remove Source", lambda: self._remove_sources(selected_indices))
         else:
+            menu.addAction(f"Edit {len(selected_indices)} Sources...", lambda: self._bulk_edit_sources(selected_indices))
             menu.addAction(f"Remove {len(selected_indices)} Sources", lambda: self._remove_sources(selected_indices))
 
         # Refresh selected
