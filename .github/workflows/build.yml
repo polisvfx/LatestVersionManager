@@ -102,6 +102,7 @@ jobs:
           python -m unittest tests.test_untested_modules -v
           python -m unittest tests.test_blacklist_filter -v
           python -m unittest tests.test_transactional_promote -v
+          python -m unittest tests.test_bulk_edit -v
 
       # ── Inject release version into package ─────────────────────────────
       # When triggered by a published release (tag e.g. v1.2.3), patch

@@ -103,6 +103,67 @@ def apply_project_defaults(config: ProjectConfig):
             source.post_promote_cmd = config.post_promote_cmd
 
 
+# Fields editable via bulk edit, mapped to their override flags.
+# ``group`` has no override flag — it is a plain per-source assignment.
+BULK_EDITABLE_FIELDS = {
+    "group": None,
+    "link_mode": "override_link_mode",
+    "file_extensions": "override_file_extensions",
+    "date_format": "override_date_format",
+    "version_pattern": "override_version_pattern",
+    "file_rename_template": "override_file_rename",
+    "block_incomplete_sequences": "override_block_incomplete",
+}
+
+
+def apply_bulk_edits(config: ProjectConfig, source_names: list,
+                     edits: dict) -> int:
+    """Apply field edits in place to the named sources.
+
+    *edits* maps field name -> ``{"action": ..., "value": ...}`` where
+    action is one of:
+
+    - ``"set"``      — assign the value directly (fields without override
+      flags, e.g. ``group``)
+    - ``"override"`` — set the field's override flag and assign the value
+    - ``"inherit"``  — clear the override flag only; run
+      :func:`apply_project_defaults` afterwards to refill the field from
+      the project default
+
+    Sources are mutated in place — never reconstructed — so fields outside
+    the edit set are untouched. Unknown source names and unknown fields
+    are ignored. Returns the number of sources touched.
+    """
+    wanted = set(source_names)
+    touched = 0
+    for source in config.watched_sources:
+        if source.name not in wanted:
+            continue
+        changed = False
+        for field_name, edit in edits.items():
+            if field_name not in BULK_EDITABLE_FIELDS:
+                logger.warning("apply_bulk_edits: unknown field %r ignored", field_name)
+                continue
+            flag = BULK_EDITABLE_FIELDS[field_name]
+            action = edit.get("action")
+            value = edit.get("value")
+            if isinstance(value, list):
+                value = list(value)  # never share one list across sources
+            if action == "set":
+                setattr(source, field_name, value)
+                changed = True
+            elif action == "override" and flag:
+                setattr(source, flag, True)
+                setattr(source, field_name, value)
+                changed = True
+            elif action == "inherit" and flag:
+                setattr(source, flag, False)
+                changed = True
+        if changed:
+            touched += 1
+    return touched
+
+
 def load_config(config_path: str) -> ProjectConfig:
     """Load a project config from a JSON file.
 

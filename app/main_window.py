@@ -1,5 +1,7 @@
 """Main application window."""
 
+import time
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -21,12 +23,13 @@ from app._common import (
 )
 from app.widgets import _GROUP_COLOR_PALETTE
 from app.workers import (
-    PromoteWorker, ThumbnailWorker, ScanWorker, StatusWorker,
-    SyncNamesWorker, ProjectLoadWorker,
+    PromoteWorker, ThumbnailWorker, ThumbnailQueueWorker, ScanWorker,
+    StatusWorker, SyncNamesWorker, ProjectLoadWorker,
 )
 from app.widgets import VersionTreeWidget, SourceItemDelegate
 from app.dialogs.about import AboutDialog
 from app.dialogs.batch_promote import BatchPromoteReviewDialog, UndoPromoteDialog, DiscoverPromotePreviewDialog
+from app.dialogs.bulk_edit import BulkEditSourcesDialog
 from app.dialogs.discovery import DiscoveryDialog, DiscoveryWorker, add_discovery_results_to_config
 from app.dialogs.dry_run import DryRunDialog
 from app.dialogs.history_timeline import HistoryTimelineDialog
@@ -72,6 +75,7 @@ class MainWindow(QMainWindow):
         self._thumb_worker: ThumbnailWorker = None
         self._io_executor = ThreadPoolExecutor(max_workers=1)
         self._dirty = False  # True when config has unsaved changes
+        self._log_autoshow_cooldown_until = 0.0  # error-burst cooldown
 
         # File watcher
         self.watcher = SourceWatcher(self)
@@ -79,6 +83,10 @@ class MainWindow(QMainWindow):
         self.watcher.watch_status_changed.connect(self._on_watch_status)
 
         self._settings = QSettings("LatestVersionManager", "LVM")
+        self._thumb_queue_worker: ThumbnailQueueWorker = None
+        self._version_thumbs_enabled = self._settings.value(
+            "version_thumbs_enabled", False, type=bool
+        )
 
         self._build_ui()
         self._build_menu()
@@ -90,6 +98,9 @@ class MainWindow(QMainWindow):
         self._log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
         logging.getLogger().addHandler(self._log_handler)
         self._log_handler.log_record.connect(self._append_log_entry)
+        # Live records only — buffer replays via _filter_log must not pop
+        # the dock for historical errors.
+        self._log_handler.log_record.connect(self._maybe_autoshow_log_dock)
 
         # Allow DEBUG records to reach the Qt log handler; keep console at INFO
         logging.getLogger().setLevel(logging.DEBUG)
@@ -187,7 +198,11 @@ class MainWindow(QMainWindow):
         # source-list rebuild per keystroke. 150ms feels instant but coalesces
         # bursts.
         self.source_search = QLineEdit()
-        self.source_search.setPlaceholderText("Search sources...")
+        self.source_search.setPlaceholderText("Search name, group, or path...")
+        self.source_search.setToolTip(
+            "Filter sources by name, sample filename, group, or any part "
+            "of the source directory path"
+        )
         self.source_search.setClearButtonEnabled(True)
         self._search_debounce_timer = QTimer(self)
         self._search_debounce_timer.setSingleShot(True)
@@ -364,6 +379,24 @@ class MainWindow(QMainWindow):
         header.resizeSection(3, 80)
         header.resizeSection(4, 160)
         header.resizeSection(5, 110)
+        if self._version_thumbs_enabled:
+            self.version_tree.setIconSize(QSize(48, 27))
+
+        # Thumbnails toggle — opt-in per-row icons, generated lazily in the
+        # background (one ffmpeg/oiiotool at a time via ThumbnailQueueWorker)
+        thumbs_row = QHBoxLayout()
+        thumbs_row.addStretch(1)
+        self._version_thumbs_toggle = QToolButton()
+        self._version_thumbs_toggle.setText("Thumbnails")
+        self._version_thumbs_toggle.setCheckable(True)
+        self._version_thumbs_toggle.setChecked(self._version_thumbs_enabled)
+        self._version_thumbs_toggle.setToolTip(
+            "Show a first-frame thumbnail next to each version "
+            "(generated in the background, cached on disk)"
+        )
+        self._version_thumbs_toggle.toggled.connect(self._toggle_version_thumbnails)
+        thumbs_row.addWidget(self._version_thumbs_toggle)
+        ver_layout.addLayout(thumbs_row)
 
         # Thumbnail/Preview panel (Feature #7) — collapsible, collapsed by default
         self._ver_content_splitter = QSplitter(Qt.Horizontal)
@@ -839,6 +872,9 @@ class MainWindow(QMainWindow):
 
     def _on_project_load_error(self, message: str, path: str):
         """Called on the main thread when ProjectLoadWorker raises."""
+        logging.getLogger(__name__).error(
+            "Failed to load project %s: %s", path, message
+        )
         try:
             self.statusBar().clearMessage()
             QMessageBox.critical(self, "Error", f"Failed to load config:\n{message}")
@@ -1014,6 +1050,48 @@ class MainWindow(QMainWindow):
             self._save_project()
         self._reload_ui()
 
+    def _bulk_edit_sources(self, indices: list):
+        """Apply selected field changes to several sources at once."""
+        if not self.config:
+            return
+        sources = [
+            self.config.watched_sources[i] for i in indices
+            if 0 <= i < len(self.config.watched_sources)
+        ]
+        if not sources:
+            return
+        dlg = BulkEditSourcesDialog(sources, project_config=self.config, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        edits = dlg.get_edits()
+        if not edits:
+            return
+
+        # A typed-in group that doesn't exist yet is created with the next
+        # free palette color (same behaviour as "Assign to New Group...").
+        group_edit = edits.get("group")
+        new_group = group_edit.get("value") if group_edit else ""
+        if new_group and new_group not in self.config.groups:
+            used = {v.get("color", "") for v in self.config.groups.values()}
+            color = "#8c8c8c"
+            for c in _GROUP_COLOR_PALETTE:
+                if c not in used:
+                    color = c
+                    break
+            self.config.groups[new_group] = {"color": color}
+
+        from src.lvm.config import apply_bulk_edits
+        n = apply_bulk_edits(self.config, [s.name for s in sources], edits)
+        if not n:
+            return
+        # Refill inherited fields from project defaults
+        apply_project_defaults(self.config)
+        self._mark_dirty()
+        if self.config_path:
+            self._save_project()
+        self.statusBar().showMessage(f"Updated {n} source{'s' if n != 1 else ''}")
+        self._reload_ui()
+
     def _remove_source(self, index: int):
         self._remove_sources([index])
 
@@ -1089,6 +1167,7 @@ class MainWindow(QMainWindow):
             menu.addAction("Edit Source...", lambda: self._edit_source(index))
             menu.addAction("Remove Source", lambda: self._remove_sources(selected_indices))
         else:
+            menu.addAction(f"Edit {len(selected_indices)} Sources...", lambda: self._bulk_edit_sources(selected_indices))
             menu.addAction(f"Remove {len(selected_indices)} Sources", lambda: self._remove_sources(selected_indices))
 
         # Refresh selected
@@ -1947,14 +2026,16 @@ class MainWindow(QMainWindow):
         self._io_executor.submit(_write)
 
     def _source_matches_search(self, source: WatchedSource, query: str) -> bool:
-        """Check if a source matches the search query (name, filename, task).
+        """Check if a source matches the search query (name, filename, path, group).
 
         Uses ``WatchedSource.search_text`` which pre-lowercases and combines
-        name, sample_filename, and source_dir basename into one cached string.
+        name, sample_filename, full source_dir path, and group into one
+        cached string. The query's backslashes are normalized so a pasted
+        Windows path matches the normalized haystack.
         """
         if not query:
             return True
-        return query.lower() in source.search_text
+        return query.lower().replace("\\", "/") in source.search_text
 
     def _make_source_item(self, source: WatchedSource) -> QTreeWidgetItem:
         """Create a QTreeWidgetItem for a source with status coloring and multi-column data."""
@@ -3037,6 +3118,7 @@ class MainWindow(QMainWindow):
             self.version_tree.addTopLevelItem(item)
 
         self.version_tree.itemSelectionChanged.connect(self._on_version_selected)
+        self._queue_version_thumbnails()
 
         # Populate history
         if promoter:
@@ -3519,6 +3601,9 @@ class MainWindow(QMainWindow):
         self._maybe_auto_sync_nle()
 
     def _on_promote_error(self, error_msg):
+        # Message boxes are dismissable — make sure the failure also lands
+        # in the log dock (which auto-opens on ERROR).
+        logging.getLogger(__name__).error("Promotion failed: %s", error_msg)
         self._worker = None
         error_source_name = self._promoting_source_name
         self._promoting_source_name = None
@@ -3738,6 +3823,23 @@ class MainWindow(QMainWindow):
         "CRITICAL": "#ff0000",
     }
 
+    def _maybe_autoshow_log_dock(self, level: str, _message: str = ""):
+        """Pop the log dock when an error is logged, so failures aren't
+        only visible in dismissable message boxes.
+
+        The 30s cooldown keeps it from fighting the user: closing the dock
+        during an error burst keeps it closed for the rest of the burst.
+        """
+        if level not in ("ERROR", "CRITICAL"):
+            return
+        if self.log_dock.isVisible():
+            return
+        now = time.monotonic()
+        if now < self._log_autoshow_cooldown_until:
+            return
+        self._log_autoshow_cooldown_until = now + 30.0
+        self.log_dock.setVisible(True)
+
     def _append_log_entry(self, level: str, message: str):
         import html as _html
         color = self._LOG_COLORS.get(level, "#cccccc")
@@ -3779,7 +3881,20 @@ class MainWindow(QMainWindow):
             self._ver_content_splitter.setSizes([600, 24])
 
     def _on_version_selected_thumbnail(self, current, previous):
-        # Only load thumbnails when preview panel is visible
+        # Bump the selected version to the front of the row-thumbnail queue
+        # (LIFO), regardless of the preview panel's visibility.
+        if (self._version_thumbs_enabled and current is not None
+                and self._current_source and self._thumb_queue_worker
+                and self.config_path):
+            v = current.data(0, Qt.UserRole)
+            if v is not None:
+                self._thumb_queue_worker.request(
+                    v.source_path, v.version_string,
+                    self._current_source.file_extensions,
+                    str(Path(self.config_path).parent / ".lvm_cache"),
+                )
+
+        # Only load the large preview when the panel is visible
         if not self.thumbnail_label.isVisible():
             return
 
@@ -3818,6 +3933,58 @@ class MainWindow(QMainWindow):
         self.thumbnail_label.setPixmap(QPixmap())
         self.thumbnail_label.setText("No Preview")
 
+    # --- Version-tree thumbnails (opt-in row icons) ---
+
+    def _toggle_version_thumbnails(self, checked: bool):
+        """Enable/disable per-version thumbnails in the version tree."""
+        self._version_thumbs_enabled = checked
+        self._settings.setValue("version_thumbs_enabled", checked)
+        if checked:
+            self.version_tree.setIconSize(QSize(48, 27))
+            self._queue_version_thumbnails()
+        else:
+            self.version_tree.setIconSize(QSize())
+            if self._thumb_queue_worker:
+                self._thumb_queue_worker.clear_pending()
+            for i in range(self.version_tree.topLevelItemCount()):
+                self.version_tree.topLevelItem(i).setIcon(0, QIcon())
+
+    def _ensure_thumb_queue_worker(self) -> ThumbnailQueueWorker:
+        if self._thumb_queue_worker is None:
+            self._thumb_queue_worker = ThumbnailQueueWorker(self)
+            self._thumb_queue_worker.ready.connect(self._on_version_thumb_ready)
+            self._thumb_queue_worker.start()
+        return self._thumb_queue_worker
+
+    def _queue_version_thumbnails(self):
+        """Queue background thumbnail generation for all version rows."""
+        if not (self._version_thumbs_enabled and self.config_path
+                and self._current_source):
+            return
+        cache_dir = str(Path(self.config_path).parent / ".lvm_cache")
+        worker = self._ensure_thumb_queue_worker()
+        worker.clear_pending()
+        exts = self._current_source.file_extensions
+        # Bottom-up so the topmost (newest) rows land at the front of the
+        # LIFO queue and get their thumbnails first.
+        for i in range(self.version_tree.topLevelItemCount() - 1, -1, -1):
+            item = self.version_tree.topLevelItem(i)
+            v = item.data(0, Qt.UserRole)
+            if v is not None:
+                worker.request(v.source_path, v.version_string, exts, cache_dir)
+
+    def _on_version_thumb_ready(self, key: str, thumb_path: str):
+        """Set the row icon when its thumbnail lands (rows looked up by
+        source_path — item pointers may have been invalidated by a repopulate)."""
+        if not thumb_path or not self._version_thumbs_enabled:
+            return
+        for i in range(self.version_tree.topLevelItemCount()):
+            item = self.version_tree.topLevelItem(i)
+            v = item.data(0, Qt.UserRole)
+            if v is not None and v.source_path == key:
+                item.setIcon(0, QIcon(thumb_path))
+                return
+
     # --- State persistence ---
 
     def _restore_state(self):
@@ -3843,10 +4010,16 @@ class MainWindow(QMainWindow):
         if self.config_path:
             self._settings.setValue("last_project", self.config_path)
 
+        # The queue worker blocks on a condition variable — wake it so its
+        # run() can return before the generic quit/wait below.
+        if self._thumb_queue_worker is not None:
+            self._thumb_queue_worker.stop()
+
         # Disconnect signals and stop all background workers to avoid
         # callbacks firing into a half-destroyed window.
         for worker in (self._scan_worker, self._status_worker,
                         self._worker, self._thumb_worker,
+                        self._thumb_queue_worker,
                         self._project_load_worker):
             if worker is not None:
                 try:

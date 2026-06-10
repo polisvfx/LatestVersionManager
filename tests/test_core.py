@@ -233,6 +233,29 @@ class TestWatchedSource(unittest.TestCase):
         self.assertFalse(restored.block_incomplete_sequences)
         self.assertEqual(len(restored.manual_versions), 1)
 
+    def test_search_text_covers_name_group_and_full_path(self):
+        ws = WatchedSource(
+            name="Hero Comp",
+            source_dir="X:\\projects\\show\\shots\\sh010\\renders",
+            sample_filename="hero_comp_v001.1001.exr",
+            group="Interiors",
+        )
+        haystack = ws.search_text
+        self.assertIn("hero comp", haystack)
+        self.assertIn("hero_comp_v001", haystack)
+        self.assertIn("interiors", haystack)
+        # Full path is searchable with normalized slashes — a mid-path
+        # segment matches, not just the directory basename.
+        self.assertIn("shots/sh010", haystack)
+        self.assertIn("x:/projects", haystack)
+
+    def test_search_text_cache_invalidates_on_group_change(self):
+        ws = WatchedSource(name="A", source_dir="/renders/a", group="One")
+        self.assertIn("one", ws.search_text)
+        ws.group = "Two"
+        self.assertIn("two", ws.search_text)
+        self.assertNotIn("one", ws.search_text)
+
     def test_backward_compat_use_symlinks(self):
         """Old configs with use_symlinks bool should map to link_mode."""
         d = {"name": "test", "source_dir": "/tmp", "use_symlinks": True}
