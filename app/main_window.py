@@ -1,5 +1,7 @@
 """Main application window."""
 
+import time
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -72,6 +74,7 @@ class MainWindow(QMainWindow):
         self._thumb_worker: ThumbnailWorker = None
         self._io_executor = ThreadPoolExecutor(max_workers=1)
         self._dirty = False  # True when config has unsaved changes
+        self._log_autoshow_cooldown_until = 0.0  # error-burst cooldown
 
         # File watcher
         self.watcher = SourceWatcher(self)
@@ -90,6 +93,9 @@ class MainWindow(QMainWindow):
         self._log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
         logging.getLogger().addHandler(self._log_handler)
         self._log_handler.log_record.connect(self._append_log_entry)
+        # Live records only — buffer replays via _filter_log must not pop
+        # the dock for historical errors.
+        self._log_handler.log_record.connect(self._maybe_autoshow_log_dock)
 
         # Allow DEBUG records to reach the Qt log handler; keep console at INFO
         logging.getLogger().setLevel(logging.DEBUG)
@@ -843,6 +849,9 @@ class MainWindow(QMainWindow):
 
     def _on_project_load_error(self, message: str, path: str):
         """Called on the main thread when ProjectLoadWorker raises."""
+        logging.getLogger(__name__).error(
+            "Failed to load project %s: %s", path, message
+        )
         try:
             self.statusBar().clearMessage()
             QMessageBox.critical(self, "Error", f"Failed to load config:\n{message}")
@@ -3525,6 +3534,9 @@ class MainWindow(QMainWindow):
         self._maybe_auto_sync_nle()
 
     def _on_promote_error(self, error_msg):
+        # Message boxes are dismissable — make sure the failure also lands
+        # in the log dock (which auto-opens on ERROR).
+        logging.getLogger(__name__).error("Promotion failed: %s", error_msg)
         self._worker = None
         error_source_name = self._promoting_source_name
         self._promoting_source_name = None
@@ -3743,6 +3755,23 @@ class MainWindow(QMainWindow):
         "ERROR": "#ff4444",
         "CRITICAL": "#ff0000",
     }
+
+    def _maybe_autoshow_log_dock(self, level: str, _message: str = ""):
+        """Pop the log dock when an error is logged, so failures aren't
+        only visible in dismissable message boxes.
+
+        The 30s cooldown keeps it from fighting the user: closing the dock
+        during an error burst keeps it closed for the rest of the burst.
+        """
+        if level not in ("ERROR", "CRITICAL"):
+            return
+        if self.log_dock.isVisible():
+            return
+        now = time.monotonic()
+        if now < self._log_autoshow_cooldown_until:
+            return
+        self._log_autoshow_cooldown_until = now + 30.0
+        self.log_dock.setVisible(True)
 
     def _append_log_entry(self, level: str, message: str):
         import html as _html
