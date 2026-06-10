@@ -23,8 +23,8 @@ from app._common import (
 )
 from app.widgets import _GROUP_COLOR_PALETTE
 from app.workers import (
-    PromoteWorker, ThumbnailWorker, ScanWorker, StatusWorker,
-    SyncNamesWorker, ProjectLoadWorker,
+    PromoteWorker, ThumbnailWorker, ThumbnailQueueWorker, ScanWorker,
+    StatusWorker, SyncNamesWorker, ProjectLoadWorker,
 )
 from app.widgets import VersionTreeWidget, SourceItemDelegate
 from app.dialogs.about import AboutDialog
@@ -83,6 +83,10 @@ class MainWindow(QMainWindow):
         self.watcher.watch_status_changed.connect(self._on_watch_status)
 
         self._settings = QSettings("LatestVersionManager", "LVM")
+        self._thumb_queue_worker: ThumbnailQueueWorker = None
+        self._version_thumbs_enabled = self._settings.value(
+            "version_thumbs_enabled", False, type=bool
+        )
 
         self._build_ui()
         self._build_menu()
@@ -375,6 +379,24 @@ class MainWindow(QMainWindow):
         header.resizeSection(3, 80)
         header.resizeSection(4, 160)
         header.resizeSection(5, 110)
+        if self._version_thumbs_enabled:
+            self.version_tree.setIconSize(QSize(48, 27))
+
+        # Thumbnails toggle — opt-in per-row icons, generated lazily in the
+        # background (one ffmpeg/oiiotool at a time via ThumbnailQueueWorker)
+        thumbs_row = QHBoxLayout()
+        thumbs_row.addStretch(1)
+        self._version_thumbs_toggle = QToolButton()
+        self._version_thumbs_toggle.setText("Thumbnails")
+        self._version_thumbs_toggle.setCheckable(True)
+        self._version_thumbs_toggle.setChecked(self._version_thumbs_enabled)
+        self._version_thumbs_toggle.setToolTip(
+            "Show a first-frame thumbnail next to each version "
+            "(generated in the background, cached on disk)"
+        )
+        self._version_thumbs_toggle.toggled.connect(self._toggle_version_thumbnails)
+        thumbs_row.addWidget(self._version_thumbs_toggle)
+        ver_layout.addLayout(thumbs_row)
 
         # Thumbnail/Preview panel (Feature #7) — collapsible, collapsed by default
         self._ver_content_splitter = QSplitter(Qt.Horizontal)
@@ -3096,6 +3118,7 @@ class MainWindow(QMainWindow):
             self.version_tree.addTopLevelItem(item)
 
         self.version_tree.itemSelectionChanged.connect(self._on_version_selected)
+        self._queue_version_thumbnails()
 
         # Populate history
         if promoter:
@@ -3858,7 +3881,20 @@ class MainWindow(QMainWindow):
             self._ver_content_splitter.setSizes([600, 24])
 
     def _on_version_selected_thumbnail(self, current, previous):
-        # Only load thumbnails when preview panel is visible
+        # Bump the selected version to the front of the row-thumbnail queue
+        # (LIFO), regardless of the preview panel's visibility.
+        if (self._version_thumbs_enabled and current is not None
+                and self._current_source and self._thumb_queue_worker
+                and self.config_path):
+            v = current.data(0, Qt.UserRole)
+            if v is not None:
+                self._thumb_queue_worker.request(
+                    v.source_path, v.version_string,
+                    self._current_source.file_extensions,
+                    str(Path(self.config_path).parent / ".lvm_cache"),
+                )
+
+        # Only load the large preview when the panel is visible
         if not self.thumbnail_label.isVisible():
             return
 
@@ -3897,6 +3933,58 @@ class MainWindow(QMainWindow):
         self.thumbnail_label.setPixmap(QPixmap())
         self.thumbnail_label.setText("No Preview")
 
+    # --- Version-tree thumbnails (opt-in row icons) ---
+
+    def _toggle_version_thumbnails(self, checked: bool):
+        """Enable/disable per-version thumbnails in the version tree."""
+        self._version_thumbs_enabled = checked
+        self._settings.setValue("version_thumbs_enabled", checked)
+        if checked:
+            self.version_tree.setIconSize(QSize(48, 27))
+            self._queue_version_thumbnails()
+        else:
+            self.version_tree.setIconSize(QSize())
+            if self._thumb_queue_worker:
+                self._thumb_queue_worker.clear_pending()
+            for i in range(self.version_tree.topLevelItemCount()):
+                self.version_tree.topLevelItem(i).setIcon(0, QIcon())
+
+    def _ensure_thumb_queue_worker(self) -> ThumbnailQueueWorker:
+        if self._thumb_queue_worker is None:
+            self._thumb_queue_worker = ThumbnailQueueWorker(self)
+            self._thumb_queue_worker.ready.connect(self._on_version_thumb_ready)
+            self._thumb_queue_worker.start()
+        return self._thumb_queue_worker
+
+    def _queue_version_thumbnails(self):
+        """Queue background thumbnail generation for all version rows."""
+        if not (self._version_thumbs_enabled and self.config_path
+                and self._current_source):
+            return
+        cache_dir = str(Path(self.config_path).parent / ".lvm_cache")
+        worker = self._ensure_thumb_queue_worker()
+        worker.clear_pending()
+        exts = self._current_source.file_extensions
+        # Bottom-up so the topmost (newest) rows land at the front of the
+        # LIFO queue and get their thumbnails first.
+        for i in range(self.version_tree.topLevelItemCount() - 1, -1, -1):
+            item = self.version_tree.topLevelItem(i)
+            v = item.data(0, Qt.UserRole)
+            if v is not None:
+                worker.request(v.source_path, v.version_string, exts, cache_dir)
+
+    def _on_version_thumb_ready(self, key: str, thumb_path: str):
+        """Set the row icon when its thumbnail lands (rows looked up by
+        source_path — item pointers may have been invalidated by a repopulate)."""
+        if not thumb_path or not self._version_thumbs_enabled:
+            return
+        for i in range(self.version_tree.topLevelItemCount()):
+            item = self.version_tree.topLevelItem(i)
+            v = item.data(0, Qt.UserRole)
+            if v is not None and v.source_path == key:
+                item.setIcon(0, QIcon(thumb_path))
+                return
+
     # --- State persistence ---
 
     def _restore_state(self):
@@ -3922,10 +4010,16 @@ class MainWindow(QMainWindow):
         if self.config_path:
             self._settings.setValue("last_project", self.config_path)
 
+        # The queue worker blocks on a condition variable — wake it so its
+        # run() can return before the generic quit/wait below.
+        if self._thumb_queue_worker is not None:
+            self._thumb_queue_worker.stop()
+
         # Disconnect signals and stop all background workers to avoid
         # callbacks firing into a half-destroyed window.
         for worker in (self._scan_worker, self._status_worker,
                         self._worker, self._thumb_worker,
+                        self._thumb_queue_worker,
                         self._project_load_worker):
             if worker is not None:
                 try:

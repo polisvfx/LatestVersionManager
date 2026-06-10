@@ -1,5 +1,7 @@
 """Background QThread workers used by the GUI."""
 
+import threading
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -78,6 +80,61 @@ class ThumbnailWorker(QThread):
         from src.lvm.thumbnail import get_thumbnail
         result = get_thumbnail(self.source_path, self.version_string, self.extensions, self.cache_dir)
         self.finished.emit(result or "")
+
+
+class ThumbnailQueueWorker(QThread):
+    """Drains a queue of thumbnail requests for the version-tree icons.
+
+    One long-lived thread, so at most one ffmpeg/oiiotool subprocess runs
+    at a time. Requests are LIFO (newest first) and deduped by key, so
+    re-requesting the selected version bumps it to the front of the queue.
+    Disk-cache hits in get_thumbnail return instantly, which makes
+    re-queues cheap.
+    """
+
+    ready = Signal(str, str)  # key (= version source_path), thumb path or ""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pending: list[tuple] = []  # stack of (key, version, exts, cache_dir)
+        self._cond = threading.Condition()
+        self._stopped = False
+
+    def request(self, source_path: str, version_string: str,
+                extensions: list, cache_dir: str) -> None:
+        """Queue a thumbnail (front of the stack). Dedupes by source_path."""
+        with self._cond:
+            self._pending = [p for p in self._pending if p[0] != source_path]
+            self._pending.append(
+                (source_path, version_string, list(extensions), cache_dir)
+            )
+            self._cond.notify()
+
+    def clear_pending(self) -> None:
+        """Drop queued requests (e.g. when another source is selected)."""
+        with self._cond:
+            self._pending.clear()
+
+    def stop(self) -> None:
+        """Stop the drain loop and wake it if it's waiting."""
+        with self._cond:
+            self._stopped = True
+            self._cond.notify_all()
+
+    def run(self):
+        from src.lvm.thumbnail import get_thumbnail
+        while True:
+            with self._cond:
+                while not self._pending and not self._stopped:
+                    self._cond.wait()
+                if self._stopped:
+                    return
+                key, version_string, extensions, cache_dir = self._pending.pop()
+            try:
+                result = get_thumbnail(key, version_string, extensions, cache_dir)
+            except Exception:
+                result = ""
+            self.ready.emit(key, result or "")
 
 
 # ---------------------------------------------------------------------------
