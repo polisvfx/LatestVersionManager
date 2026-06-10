@@ -332,15 +332,18 @@ class WatchedSource:
     def search_text(self) -> str:
         """Lowercased haystack used by the source list search box.
 
-        Combines name, sample_filename, and source_dir basename so a single
-        ``in`` check covers all three. Cached per-instance and auto-invalidated
-        when any of those fields changes — no manual bust required.
+        Combines name, sample_filename, the full source_dir path (slashes
+        normalized to ``/`` so pasted Windows paths match), and group so a
+        single ``in`` check covers them all. Cached per-instance and
+        auto-invalidated when any of those fields changes — no manual bust
+        required.
         """
-        key = (self.name, self.source_dir, self.sample_filename)
+        key = (self.name, self.source_dir, self.sample_filename, self.group)
         if getattr(self, "_search_text_key", None) != key:
-            dirname = Path(self.source_dir).name if self.source_dir else ""
+            norm_dir = (self.source_dir or "").replace("\\", "/")
             self._search_text_cache = (
-                f"{self.name}\n{self.sample_filename or ''}\n{dirname}".lower()
+                f"{self.name}\n{self.sample_filename or ''}\n"
+                f"{norm_dir}\n{self.group or ''}".lower()
             )
             self._search_text_key = key
         return self._search_text_cache

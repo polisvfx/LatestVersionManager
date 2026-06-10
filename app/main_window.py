@@ -187,7 +187,11 @@ class MainWindow(QMainWindow):
         # source-list rebuild per keystroke. 150ms feels instant but coalesces
         # bursts.
         self.source_search = QLineEdit()
-        self.source_search.setPlaceholderText("Search sources...")
+        self.source_search.setPlaceholderText("Search name, group, or path...")
+        self.source_search.setToolTip(
+            "Filter sources by name, sample filename, group, or any part "
+            "of the source directory path"
+        )
         self.source_search.setClearButtonEnabled(True)
         self._search_debounce_timer = QTimer(self)
         self._search_debounce_timer.setSingleShot(True)
@@ -1947,14 +1951,16 @@ class MainWindow(QMainWindow):
         self._io_executor.submit(_write)
 
     def _source_matches_search(self, source: WatchedSource, query: str) -> bool:
-        """Check if a source matches the search query (name, filename, task).
+        """Check if a source matches the search query (name, filename, path, group).
 
         Uses ``WatchedSource.search_text`` which pre-lowercases and combines
-        name, sample_filename, and source_dir basename into one cached string.
+        name, sample_filename, full source_dir path, and group into one
+        cached string. The query's backslashes are normalized so a pasted
+        Windows path matches the normalized haystack.
         """
         if not query:
             return True
-        return query.lower() in source.search_text
+        return query.lower().replace("\\", "/") in source.search_text
 
     def _make_source_item(self, source: WatchedSource) -> QTreeWidgetItem:
         """Create a QTreeWidgetItem for a source with status coloring and multi-column data."""
