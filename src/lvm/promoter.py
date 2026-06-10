@@ -25,7 +25,8 @@ from .history import HistoryManager
 from .hooks import run_pre_promote_hook, run_post_promote_hook, HookError
 from .task_tokens import derive_source_tokens, compose_nle_display_stem
 from .config import _expand_group_token
-from .fast_copy import smart_copy
+from .fast_copy import smart_copy, CopyCancelled
+from .lockfile import PromoteLock, LockHeldError, LOCK_FILENAME
 from .scanner import _group_files_by_sequence
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,23 @@ _FRAME_EXT_RE = re.compile(r"([._])(\d+)\.(\w+)$")
 
 # Number of threads for parallel file copy operations — adapts to CPU count
 _COPY_WORKERS = min(os.cpu_count() or 4, 8)
+
+# Hidden working directories used by staged (transactional) promotion.
+# New files are fully written into the staging dir, then swapped into the
+# target with same-volume renames; old files are parked in the backup dir
+# until the swap succeeds. Both live inside the target directory so the
+# renames never cross a volume boundary.
+STAGING_DIRNAME = ".lvm_staging"
+BACKUP_DIRNAME = ".lvm_backup"
+
+
+def _human_size(n: float) -> str:
+    """Format a byte count for error messages (e.g. '1.5 GB')."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{int(n)} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
 
 # Valid tokens for file_rename_template
 _VALID_RENAME_TOKENS = {
@@ -260,67 +278,92 @@ class Promoter:
         # Create target directory if needed
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        # Scan target directory once — reuse for locked-file and clear checks.
-        # Only inspect this source's own files: when several sources share a
-        # latest_target dir (e.g. per-shot .mov outputs), another source's
-        # file being locked must not block this source's promotion.
-        target_entries = self._scan_target_media(target_dir)
-        own_target_entries = self._filter_to_own_target_files(target_entries)
-
-        if own_target_entries:
-            locked = self._check_locked_files(target_dir, cached_entries=own_target_entries)
-            if locked:
-                raise PromotionError(
-                    f"Cannot overwrite - these files appear to be locked/in use:\n"
-                    + "\n".join(f"  {f}" for f in locked[:10])
-                )
+        # Serialize writers: another LVM process (GUI + CLI, or a second
+        # artist over SMB) promoting into the same target would otherwise
+        # race the staged swap and the history sidecar.
+        lock = PromoteLock(target_dir)
+        try:
+            lock.acquire()
+        except LockHeldError as e:
+            info = e.info or {}
+            raise PromotionError(
+                f"Another promotion is already writing to {target_dir} "
+                f"(started by {info.get('user', '?')}@{info.get('host', '?')} "
+                f"at {info.get('started_at', 'unknown time')}). "
+                f"If that promotion crashed, its lock expires automatically "
+                f"after a few minutes; to force it, delete {LOCK_FILENAME} "
+                f"in the target folder."
+            ) from e
 
         try:
-            if source_path.is_dir():
-                self._promote_sequence(source_path, target_dir, version, progress_callback, keep_layers=keep_layers)
-            else:
-                self._promote_single_file(source_path, target_dir, progress_callback)
-        except PromotionError as e:
-            # Clean up partial files on cancellation
-            if self._cancelled.is_set():
-                self._cleanup_partial_promotion(target_dir)
-            raise
-        except Exception as e:
-            if self._cancelled.is_set():
-                self._cleanup_partial_promotion(target_dir)
-            raise PromotionError(f"File operation failed: {e}") from e
+            # Recover from any previous crashed promotion before touching
+            # the target (restores a torn swap, discards dead staging).
+            self._cleanup_orphaned_promotion_dirs(target_dir)
 
-        # Record in history with mtime snapshots
-        entry = HistoryEntry.from_version_info(version, user)
-        version_files = self._get_version_source_files(source_path, version)
-        entry.source_mtime = self._get_max_mtime(source_path, files=version_files)
-        # Restrict the target mtime snapshot to this source's own files —
-        # otherwise sibling sources sharing the same latest_target would
-        # bleed their mtimes into our record and cause spurious "modified
-        # since promotion" warnings on the next verify().
-        own_target_files = [
-            Path(e.path)
-            for e in self._filter_to_own_target_files(self._scan_target_media(target_dir))
-        ]
-        entry.target_mtime = self._get_max_mtime(target_dir, files=own_target_files or None)
-        entry.pinned = pinned
-        # Capture the on-disk stem so NLE companion scripts can match this
-        # sidecar to its clip even when several sources share a target dir.
-        entry.latest_basename = self._compute_latest_basename(version, own_target_files)
-        # Precompute the NLE clip-rename stem + frame/extension flags so the
-        # companion scripts don't have to know about project settings.
-        self._populate_nle_display_fields(entry, version)
-        # Extract clip frame count for container files
-        if source_path.is_file() and source_path.suffix.lower() in (".mov", ".mxf", ".mp4", ".avi"):
+            self._preflight_disk_space(version, target_dir)
+
+            # Scan target directory once — reuse for locked-file and clear checks.
+            # Only inspect this source's own files: when several sources share a
+            # latest_target dir (e.g. per-shot .mov outputs), another source's
+            # file being locked must not block this source's promotion.
+            target_entries = self._scan_target_media(target_dir)
+            own_target_entries = self._filter_to_own_target_files(target_entries)
+
+            if own_target_entries:
+                locked = self._check_locked_files(target_dir, cached_entries=own_target_entries)
+                if locked:
+                    raise PromotionError(
+                        f"Cannot overwrite - these files appear to be locked/in use:\n"
+                        + "\n".join(f"  {f}" for f in locked[:10])
+                    )
+
             try:
-                from .timecode import extract_clip_frame_count
-                entry.clip_frame_count = extract_clip_frame_count(source_path)
-            except Exception:
-                pass
-        self.history.record_promotion(entry)
+                if source_path.is_dir():
+                    self._promote_sequence(source_path, target_dir, version, progress_callback, keep_layers=keep_layers)
+                else:
+                    self._promote_single_file(source_path, target_dir, progress_callback)
+            except PromotionError:
+                raise
+            except CopyCancelled:
+                raise PromotionError(
+                    "Promotion cancelled by user — target left unchanged."
+                )
+            except Exception as e:
+                raise PromotionError(f"File operation failed: {e}") from e
 
-        # Run post-promote hook
-        run_post_promote_hook(self.source, version, user, self.project_name)
+            # Record in history with mtime snapshots
+            entry = HistoryEntry.from_version_info(version, user)
+            version_files = self._get_version_source_files(source_path, version)
+            entry.source_mtime = self._get_max_mtime(source_path, files=version_files)
+            # Restrict the target mtime snapshot to this source's own files —
+            # otherwise sibling sources sharing the same latest_target would
+            # bleed their mtimes into our record and cause spurious "modified
+            # since promotion" warnings on the next verify().
+            own_target_files = [
+                Path(e.path)
+                for e in self._filter_to_own_target_files(self._scan_target_media(target_dir))
+            ]
+            entry.target_mtime = self._get_max_mtime(target_dir, files=own_target_files or None)
+            entry.pinned = pinned
+            # Capture the on-disk stem so NLE companion scripts can match this
+            # sidecar to its clip even when several sources share a target dir.
+            entry.latest_basename = self._compute_latest_basename(version, own_target_files)
+            # Precompute the NLE clip-rename stem + frame/extension flags so the
+            # companion scripts don't have to know about project settings.
+            self._populate_nle_display_fields(entry, version)
+            # Extract clip frame count for container files
+            if source_path.is_file() and source_path.suffix.lower() in (".mov", ".mxf", ".mp4", ".avi"):
+                try:
+                    from .timecode import extract_clip_frame_count
+                    entry.clip_frame_count = extract_clip_frame_count(source_path)
+                except Exception:
+                    pass
+            self.history.record_promotion(entry)
+
+            # Run post-promote hook
+            run_post_promote_hook(self.source, version, user, self.project_name)
+        finally:
+            lock.release()
 
         logger.info(f"Promotion complete: {version.version_string}")
         return entry
@@ -418,7 +461,14 @@ class Promoter:
         progress_callback: Optional[Callable],
         keep_layers: Optional[set[str]] = None,
     ):
-        """Copy/symlink a folder of frames to the target."""
+        """Copy/symlink a folder of frames to the target via a staging dir.
+
+        All files are fully written into a hidden staging directory inside
+        the target first, then swapped into place with same-volume renames
+        (:meth:`_swap_staged_into_target`). A failure or cancellation
+        mid-copy therefore never leaves the target partially populated —
+        the old version stays live until the new one is complete.
+        """
         valid_extensions = self._valid_extensions
         source_files = sorted(
             f for f in source_dir.iterdir()
@@ -433,26 +483,39 @@ class Promoter:
         if not source_files:
             raise PromotionError(f"No matching files found in {source_dir}")
 
-        # Clear existing files in target (only matching extensions),
-        # but preserve files belonging to layers the user chose to keep.
-        self._clear_target(target_dir, valid_extensions, keep_layers=keep_layers)
-
         total = len(source_files)
         mode = self.source.link_mode
 
-        # Use parallel copy for large sequences in copy mode
-        if mode == "copy" and total > 10:
-            self._parallel_copy(source_files, target_dir, total, progress_callback)
-        else:
-            # Sequential for symlink/hardlink (fast already) or small sets
-            for i, src_file in enumerate(source_files):
-                if self._cancelled.is_set():
-                    raise PromotionError("Promotion cancelled by user.")
-                target_name = self._remap_filename(src_file.name)
-                target_file = target_dir / target_name
-                self._link_or_copy(src_file, target_file)
-                if progress_callback:
-                    progress_callback(i + 1, total, src_file.name)
+        staging_dir = self._prepare_staging_dir(target_dir)
+        try:
+            # Use parallel copy for large sequences in copy mode
+            if mode == "copy" and total > 10:
+                self._parallel_copy(source_files, staging_dir, total, progress_callback)
+            else:
+                # Sequential for symlink/hardlink (fast already) or small sets
+                for i, src_file in enumerate(source_files):
+                    if self._cancelled.is_set():
+                        raise PromotionError(
+                            "Promotion cancelled by user — target left unchanged."
+                        )
+                    target_name = self._remap_filename(src_file.name)
+                    self._link_or_copy(src_file, staging_dir / target_name)
+                    if progress_callback:
+                        progress_callback(i + 1, total, src_file.name)
+            if self._cancelled.is_set():
+                raise PromotionError(
+                    "Promotion cancelled by user — target left unchanged."
+                )
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+
+        # Staging is complete — retire the old files (only matching
+        # extensions, minus layers the user chose to keep) and activate.
+        files_to_remove = self._collect_removal_set(
+            target_dir, valid_extensions, keep_layers=keep_layers
+        )
+        self._swap_staged_into_target(staging_dir, target_dir, files_to_remove)
 
     def _parallel_copy(
         self,
@@ -483,7 +546,7 @@ class Promoter:
                 future.result()
 
         if self._cancelled.is_set():
-            raise PromotionError("Promotion cancelled by user.")
+            raise PromotionError("Promotion cancelled by user — target left unchanged.")
 
     def _promote_single_file(
         self,
@@ -491,14 +554,30 @@ class Promoter:
         target_dir: Path,
         progress_callback: Optional[Callable],
     ):
-        """Copy/symlink a single file to the target."""
+        """Copy/symlink a single file to the target via the staging dir.
+
+        Only this source's own remapped filename is replaced — other
+        sources sharing the same target directory are never touched.
+        """
         target_name = self._remap_filename(source_file.name)
-        target_file = target_dir / target_name
 
         if progress_callback:
             progress_callback(0, 1, source_file.name)
 
-        self._link_or_copy(source_file, target_file)
+        staging_dir = self._prepare_staging_dir(target_dir)
+        try:
+            self._link_or_copy(source_file, staging_dir / target_name)
+            if self._cancelled.is_set():
+                raise PromotionError(
+                    "Promotion cancelled by user — target left unchanged."
+                )
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+
+        existing = target_dir / target_name
+        files_to_remove = [existing] if (existing.exists() or existing.is_symlink()) else []
+        self._swap_staged_into_target(staging_dir, target_dir, files_to_remove)
 
         if progress_callback:
             progress_callback(1, 1, source_file.name)
@@ -689,20 +768,48 @@ class Promoter:
         else:
             return f"{base}.{ext}"
 
-    def _clear_target(self, target_dir: Path, valid_extensions: set,
-                       keep_layers: Optional[set[str]] = None):
-        """Remove existing media files from the target directory (not the history file).
+    @staticmethod
+    def _set_hidden_attribute(path: Path) -> None:
+        """Best-effort: mark a dot-directory hidden on Windows so artists
+        browsing the latest folder don't see promotion internals."""
+        if platform.system() != "Windows":
+            return
+        try:
+            import ctypes
+            FILE_ATTRIBUTE_HIDDEN = 0x2
+            ctypes.windll.kernel32.SetFileAttributesW(str(path), FILE_ATTRIBUTE_HIDDEN)
+        except Exception:
+            pass
 
-        When *keep_layers* is provided, files whose sequence prefix (as
-        determined by :func:`_group_files_by_sequence`) is in the set are
-        left untouched.
+    def _prepare_staging_dir(self, target_dir: Path) -> Path:
+        """Create an empty staging directory inside the target."""
+        staging_dir = target_dir / STAGING_DIRNAME
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        try:
+            staging_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise PromotionError(
+                f"Cannot create staging directory {staging_dir}: {e}"
+            ) from e
+        self._set_hidden_attribute(staging_dir)
+        return staging_dir
+
+    def _collect_removal_set(self, target_dir: Path, valid_extensions: frozenset,
+                             keep_layers: Optional[set[str]] = None) -> list[Path]:
+        """Files the swap phase should retire from the target directory.
+
+        Same selection the old in-place clear used: media files matching
+        the source's extensions (minus files belonging to layers in
+        *keep_layers*) plus any symlinks. The history sidecar, the lock
+        file, and the hidden staging/backup dirs are never included.
         """
         try:
             entries = list(target_dir.iterdir())
         except OSError as e:
             raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
 
-        # Build a set of prefixes to preserve
+        # Build a set of filenames to preserve
         if keep_layers:
             media_files = [f for f in entries if f.is_file() and f.suffix.lower() in valid_extensions]
             groups = _group_files_by_sequence(media_files) if media_files else {}
@@ -713,36 +820,144 @@ class Promoter:
         else:
             keep_files = set()
 
+        removal: list[Path] = []
         for f in entries:
             if f.is_file() and f.suffix.lower() in valid_extensions:
-                if f.name in keep_files:
-                    continue
-                try:
-                    f.unlink()
-                except PermissionError:
-                    raise PromotionError(f"Cannot delete {f} - file may be in use")
+                if f.name not in keep_files:
+                    removal.append(f)
             elif f.is_symlink():
-                try:
-                    f.unlink()
-                except OSError as e:
-                    logger.warning(f"Could not remove symlink {f}: {e}")
+                removal.append(f)
+        return removal
 
-    def _cleanup_partial_promotion(self, target_dir: Path):
-        """Remove media files from the target after a cancelled/failed promotion.
+    def _swap_staged_into_target(self, staging_dir: Path, target_dir: Path,
+                                 files_to_remove: list[Path]) -> None:
+        """Activate a fully-staged version: retire the old files into a
+        backup dir, rename the staged files into place, drop the backup.
 
-        Best-effort cleanup — logs but does not raise on individual failures.
+        Every step is a same-volume rename, so the window where the target
+        is inconsistent shrinks from the whole copy duration to
+        milliseconds. On failure the backup is restored; even on a double
+        fault (swap fails AND restore fails) the old files survive in the
+        backup dir, which the next promotion restores via
+        :meth:`_cleanup_orphaned_promotion_dirs`.
         """
-        valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
+        backup_dir = target_dir / BACKUP_DIRNAME
+        moved: list[tuple[Path, Path]] = []   # (original, backup) pairs
+        placed: list[Path] = []
         try:
-            for f in target_dir.iterdir():
-                if f.is_file() and f.suffix.lower() in valid_extensions:
-                    try:
-                        f.unlink()
-                    except OSError as e:
-                        logger.debug(f"Could not clean up partial file {f}: {e}")
-        except OSError:
-            pass
-        logger.info("Cleaned up partial promotion in %s", target_dir)
+            if files_to_remove:
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                self._set_hidden_attribute(backup_dir)
+                for f in files_to_remove:
+                    dest = backup_dir / f.name
+                    os.replace(f, dest)
+                    moved.append((f, dest))
+            for entry in sorted(staging_dir.iterdir()):
+                dest = target_dir / entry.name
+                os.replace(entry, dest)
+                placed.append(dest)
+        except OSError as e:
+            # Roll back: drop whatever was already placed, then return the
+            # old files from the backup dir.
+            for p in placed:
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            restore_failed = False
+            for orig, bak in moved:
+                try:
+                    os.replace(bak, orig)
+                except OSError as r:
+                    restore_failed = True
+                    logger.critical("Could not restore %s from backup: %s", orig, r)
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            if restore_failed:
+                raise PromotionError(
+                    f"Failed to activate new version: {e}. Some previous files "
+                    f"could not be restored and remain in {BACKUP_DIRNAME}; "
+                    f"they will be recovered automatically on the next promotion."
+                ) from e
+            shutil.rmtree(backup_dir, ignore_errors=True)
+            raise PromotionError(
+                f"Failed to activate new version; previous version restored: {e}"
+            ) from e
+
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        if files_to_remove:
+            try:
+                shutil.rmtree(backup_dir)
+            except OSError as e:
+                logger.warning(
+                    "Could not remove backup dir %s (cleaned on next promote): %s",
+                    backup_dir, e,
+                )
+
+    def _cleanup_orphaned_promotion_dirs(self, target_dir: Path) -> None:
+        """Recover from a previous crashed promotion. Only runs under the lock.
+
+        A crash mid-swap leaves old files in the backup dir — move them
+        back unless the target already has a file with that name. Leftover
+        staging is always discarded (it was never activated).
+        """
+        backup_dir = target_dir / BACKUP_DIRNAME
+        if backup_dir.is_dir():
+            restored = 0
+            try:
+                for f in list(backup_dir.iterdir()):
+                    dest = target_dir / f.name
+                    if not (dest.exists() or dest.is_symlink()):
+                        try:
+                            os.replace(f, dest)
+                            restored += 1
+                        except OSError as e:
+                            logger.warning("Could not restore %s from backup: %s", f.name, e)
+            except OSError as e:
+                logger.warning("Could not read backup dir %s: %s", backup_dir, e)
+            if restored:
+                logger.warning(
+                    "Recovered %d file(s) from an interrupted promotion in %s",
+                    restored, target_dir,
+                )
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+        staging_dir = target_dir / STAGING_DIRNAME
+        if staging_dir.exists():
+            logger.info(
+                "Discarding leftover staging dir from interrupted promotion: %s",
+                staging_dir,
+            )
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def _preflight_disk_space(self, version: VersionInfo, target_dir: Path) -> None:
+        """Refuse to start a copy-mode promotion that cannot fit on the
+        target volume.
+
+        Peak usage during a staged promotion is exactly the new version's
+        size — old files are renamed into the backup dir, never copied.
+        Skipped for link modes and when the version's size is unknown
+        (e.g. manually imported versions).
+        """
+        if self.source.link_mode != "copy":
+            return
+        need = getattr(version, "total_size_bytes", 0) or 0
+        if need <= 0:
+            logger.debug("Version size unknown — skipping disk space preflight")
+            return
+        try:
+            free = shutil.disk_usage(target_dir).free
+        except OSError as e:
+            logger.debug("disk_usage failed for %s (%s) — skipping preflight", target_dir, e)
+            return
+        margin = max(64 * 1024 * 1024, need // 50)
+        if free < need + margin:
+            raise PromotionError(
+                f"Not enough free space on the target volume: this version "
+                f"needs ~{_human_size(need)} (+{_human_size(margin)} headroom) "
+                f"but only {_human_size(free)} is free at {target_dir}"
+            )
 
     def _link_or_copy(self, source: Path, target: Path):
         """Route to the correct file operation based on link_mode."""
