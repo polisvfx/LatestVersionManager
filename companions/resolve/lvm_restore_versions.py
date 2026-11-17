@@ -7,6 +7,19 @@ name to the source version recorded in the LVM sidecar
 The on-disk file is not touched — only the clip's display name in
 Resolve's media pool. Re-running is idempotent.
 
+Every clip LVM manages also gets a status flag (one per clip):
+
+* Green — watched by LVM, nothing to review.
+* Red   — a new version was promoted since the last sync. The red flag
+  stays until you clear it in Resolve (your "reviewed" acknowledgement);
+  the next sync then turns the clip green.
+* Sand  — stale: the promoted source was re-rendered, or the latest file
+  was overwritten, after promotion. Resolve has no orange flag; Sand is
+  its closest colour. Stale wins over red.
+
+The other flag colours are left alone. Change the ``FLAG_*`` constants
+below to use different colours, or set ``FLAG_CLIPS = False`` to disable.
+
 Install (Windows):
     %APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support\\Fusion\\Scripts\\Edit\\
 
@@ -64,6 +77,33 @@ except ImportError:
 
 _VERSION_RE = re.compile(r"[._\-]v\d+", re.IGNORECASE)
 _FRAME_EXT_RE = re.compile(r"([._])(\d+)\.(\w+)$")
+
+
+# ---- status flags ---------------------------------------------------------
+# Resolve's flag palette: Blue, Cyan, Green, Yellow, Red, Pink, Purple,
+# Fuchsia, Rose, Lavender, Sky, Mint, Lemon, Sand, Cocoa, Cream.
+FLAG_CLIPS = True
+FLAG_WATCHED = "Green"
+FLAG_PROMOTED = "Red"
+FLAG_STALE = "Sand"   # closest to orange — Resolve has no "Orange" flag
+
+STATUS_WATCHED = "watched"
+STATUS_PROMOTED = "promoted"
+STATUS_STALE = "stale"
+_STATUS_FLAGS = {
+    STATUS_WATCHED: FLAG_WATCHED,
+    STATUS_PROMOTED: FLAG_PROMOTED,
+    STATUS_STALE: FLAG_STALE,
+}
+
+# Third-party metadata key holding the promotion this clip was last synced
+# to (``"<version>|<set_at>"``). Comparing it with the sidecar is how a new
+# promotion is detected across syncs.
+PROMOTION_METADATA_KEY = "LVM Promotion"
+
+# Mtime slack, in seconds — matches Promoter.verify() in LVM.
+_MTIME_TOLERANCE = 1.0
+_IGNORED_FILES = {"thumbs.db", "desktop.ini"}
 
 
 def _read_sidecar(path):
@@ -186,6 +226,198 @@ def _match_sidecar_to_clip(clip_path):
     return None, None
 
 
+# ---- status flags ---------------------------------------------------------
+
+def _clip_stem(cur):
+    """On-disk stem of the latest file this sidecar describes."""
+    return cur.get("latest_basename") or _derive_stem_from_source(cur.get("source", ""))
+
+
+def _promotion_marker(cur):
+    """Identity of a promotion — changes on every promote, even of the same version."""
+    return f"{cur.get('version', '')}|{cur.get('set_at', '')}"
+
+
+def _visible_files(directory):
+    """Return DirEntry objects for the regular, non-hidden files in *directory*."""
+    entries = []
+    try:
+        with os.scandir(directory) as it:
+            for entry in it:
+                name = entry.name
+                if name.startswith(".") or name.lower() in _IGNORED_FILES:
+                    continue
+                try:
+                    if entry.is_file():
+                        entries.append(entry)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return entries
+
+
+def _max_mtime(entries):
+    best = None
+    for entry in entries:
+        try:
+            mt = entry.stat().st_mtime
+        except OSError:
+            continue
+        if best is None or mt > best:
+            best = mt
+    return best
+
+
+def _source_max_mtime(source, version):
+    """Newest mtime of the promoted version's source files, or None.
+
+    When the source is a folder shared by several versions (flat layout),
+    only files carrying the version token count, so a newer version
+    rendered next to it doesn't read as a re-render.
+    """
+    if not source:
+        return None
+    if os.path.isdir(source):
+        entries = _visible_files(source)
+        token = (version or "").lower()
+        if token:
+            own = [e for e in entries if token in e.name.lower()]
+            if own:
+                entries = own
+        return _max_mtime(entries)
+    try:
+        return os.stat(source).st_mtime
+    except OSError:
+        return None
+
+
+def _stale_reason(cur, clip_dir):
+    """Return why the promoted clip is stale, or ``""`` when it isn't.
+
+    Mirrors LVM's ``Promoter.verify()`` staleness checks using only what
+    the sidecar records: source re-rendered after promotion, or the latest
+    file overwritten outside LVM.
+    """
+    source_mtime = cur.get("source_mtime")
+    if source_mtime is not None:
+        now = _source_max_mtime(cur.get("source", ""), cur.get("version", ""))
+        if now is not None and now > source_mtime + _MTIME_TOLERANCE:
+            return "source re-rendered since promotion"
+
+    target_mtime = cur.get("target_mtime")
+    stem = _clip_stem(cur)
+    if target_mtime is not None and stem:
+        own = [e for e in _visible_files(clip_dir) if _stem_matches_clip(stem, e.name)]
+        now = _max_mtime(own)
+        if now is not None and abs(now - target_mtime) > _MTIME_TOLERANCE:
+            return "latest file overwritten since promotion"
+    return ""
+
+
+def _read_promotion_metadata(item):
+    """Promotion marker stored on the clip by a previous sync, or ``""``."""
+    try:
+        value = item.GetThirdPartyMetadata(PROMOTION_METADATA_KEY)
+    except Exception:
+        return ""
+    if isinstance(value, dict):
+        value = value.get(PROMOTION_METADATA_KEY, "")
+    return value if isinstance(value, str) else ""
+
+
+def _write_promotion_metadata(item, marker):
+    # Resolve's documented form takes one dict; very old builds took (key, value).
+    try:
+        item.SetThirdPartyMetadata({PROMOTION_METADATA_KEY: marker})
+    except TypeError:
+        try:
+            item.SetThirdPartyMetadata(PROMOTION_METADATA_KEY, marker)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _clip_flags(item):
+    try:
+        return list(item.GetFlagList() or [])
+    except Exception:
+        return []
+
+
+def _classify_clip(cur, clip_dir, clip_name, new_name, stored_marker, flags,
+                   stale_reason=None):
+    """Return ``(status, reason)`` for a clip LVM manages.
+
+    Priority: stale > promoted > watched. A clip already carrying the
+    promoted flag keeps it until the user clears it in Resolve.
+
+    A new promotion is detected by comparing the marker stored on the clip
+    with the sidecar. Clips synced before markers existed (or on Resolve
+    builds without third-party metadata) fall back to the rename: a clip
+    whose name is neither the on-disk name nor the new display name was
+    named after an older version by a previous sync.
+    """
+    if stale_reason is None:
+        stale_reason = _stale_reason(cur, clip_dir)
+    if stale_reason:
+        return STATUS_STALE, stale_reason
+
+    if stored_marker:
+        promoted = stored_marker != _promotion_marker(cur)
+    else:
+        promoted = (bool(new_name) and clip_name != new_name
+                    and not _stem_matches_clip(_clip_stem(cur), clip_name))
+    if promoted:
+        return STATUS_PROMOTED, f"promoted to {cur.get('version', '?')}"
+    if FLAG_PROMOTED in flags:
+        return STATUS_PROMOTED, ""
+    return STATUS_WATCHED, ""
+
+
+def _apply_status_flag(item, status, flags):
+    """Leave exactly one LVM status flag on *item*. Returns True if anything changed.
+
+    Flags in colours LVM doesn't use are not touched.
+    """
+    wanted = _STATUS_FLAGS[status]
+    changed = False
+    for color in set(_STATUS_FLAGS.values()):
+        if color != wanted and color in flags:
+            item.ClearFlags(color)
+            changed = True
+    if wanted not in flags:
+        item.AddFlag(wanted)
+        changed = True
+    return changed
+
+
+def _flag_clip(item, cur, clip_path, clip_name, new_name, stale_cache, cache_key):
+    """Classify and flag one clip. Returns ``(status, reason, changed)``."""
+    if cache_key not in stale_cache:
+        stale_cache[cache_key] = _stale_reason(cur, os.path.dirname(clip_path))
+    stored = _read_promotion_metadata(item)
+    flags = _clip_flags(item)
+    status, reason = _classify_clip(
+        cur, os.path.dirname(clip_path), clip_name, new_name, stored, flags,
+        stale_reason=stale_cache[cache_key],
+    )
+    changed = _apply_status_flag(item, status, flags)
+    marker = _promotion_marker(cur)
+    if stored != marker:
+        _write_promotion_metadata(item, marker)
+    return status, reason, changed
+
+
+def _empty_stats(ok, errors=0):
+    return {
+        "renamed": 0, "idempotent": 0, "no_match": 0, "errors": errors,
+        STATUS_WATCHED: 0, STATUS_PROMOTED: 0, STATUS_STALE: 0,
+        "flag_errors": 0, "ok": ok,
+    }
+
+
 def _iter_clips(folder, log):
     """Recursively yield every MediaPoolItem under *folder*."""
     try:
@@ -215,21 +447,26 @@ def rename_clips(resolve, log=None):
             stdout/stderr so the standalone Workspace → Scripts entry still
             works unchanged.
 
+    Also sets each matched clip's status flag (see the module docstring)
+    unless ``FLAG_CLIPS`` is False.
+
     Returns a stats dict: ``{"renamed", "idempotent", "no_match", "errors",
-    "ok"}``. ``ok`` is True when the rename completed (even with zero matches);
-    False only when we couldn't talk to a project at all.
+    "watched", "promoted", "stale", "flag_errors", "ok"}``. ``ok`` is True
+    when the rename completed (even with zero matches); False only when we
+    couldn't talk to a project at all. Flag failures are counted in
+    ``flag_errors`` only, so they don't fail the sync.
     """
     if log is None:
         log = _default_log
 
     if not resolve:
         log("error", "Could not connect to DaVinci Resolve.")
-        return {"renamed": 0, "idempotent": 0, "no_match": 0, "errors": 1, "ok": False}
+        return _empty_stats(ok=False, errors=1)
 
     project = resolve.GetProjectManager().GetCurrentProject()
     if not project:
         log("error", "No project is open.")
-        return {"renamed": 0, "idempotent": 0, "no_match": 0, "errors": 1, "ok": False}
+        return _empty_stats(ok=False, errors=1)
 
     media_pool = project.GetMediaPool()
     root = media_pool.GetRootFolder()
@@ -239,6 +476,9 @@ def rename_clips(resolve, log=None):
     skipped_idempotent = 0
     errors = 0
     processed = 0
+    status_counts = {STATUS_WATCHED: 0, STATUS_PROMOTED: 0, STATUS_STALE: 0}
+    flag_errors = 0
+    stale_cache = {}
     HEARTBEAT_EVERY = 250
 
     for item in _iter_clips(root, log):
@@ -259,13 +499,29 @@ def rename_clips(resolve, log=None):
             skipped_match += 1
             continue
 
-        sidecar, _ = _match_sidecar_to_clip(clip_path)
+        sidecar, sc_path = _match_sidecar_to_clip(clip_path)
         if not sidecar:
             skipped_match += 1
             continue
 
         cur = sidecar["current"]
         new_name = _new_display_name(cur.get("source", ""), os.path.basename(clip_path), cur)
+
+        # Flag before renaming: detecting a promotion falls back to
+        # comparing the clip's current (pre-rename) name.
+        if FLAG_CLIPS:
+            try:
+                status, reason, changed = _flag_clip(
+                    item, cur, clip_path, clip_name, new_name, stale_cache, sc_path)
+            except Exception as e:
+                flag_errors += 1
+                log("warning", f"  could not flag {clip_name!r}: {e}")
+            else:
+                status_counts[status] += 1
+                if changed and status != STATUS_WATCHED:
+                    detail = f" ({reason})" if reason else ""
+                    log("info", f"  [{_STATUS_FLAGS[status]} flag] {clip_name}{detail}")
+
         if not new_name:
             skipped_match += 1
             continue
@@ -302,13 +558,21 @@ def rename_clips(resolve, log=None):
     log("info", f"Already up to date: {skipped_idempotent}")
     log("info", f"No sidecar match:   {skipped_match}")
     log("info", f"Errors:             {errors}")
-    return {
+    if FLAG_CLIPS:
+        log("info", f"Flagged watched ({FLAG_WATCHED}):   {status_counts[STATUS_WATCHED]}")
+        log("info", f"Flagged promoted ({FLAG_PROMOTED}):   {status_counts[STATUS_PROMOTED]}")
+        log("info", f"Flagged stale ({FLAG_STALE}):      {status_counts[STATUS_STALE]}")
+        if flag_errors:
+            log("warning", f"Flag errors:        {flag_errors}")
+    stats = _empty_stats(ok=True, errors=errors)
+    stats.update(status_counts)
+    stats.update({
         "renamed": renamed,
         "idempotent": skipped_idempotent,
         "no_match": skipped_match,
-        "errors": errors,
-        "ok": True,
-    }
+        "flag_errors": flag_errors,
+    })
+    return stats
 
 
 def main():
