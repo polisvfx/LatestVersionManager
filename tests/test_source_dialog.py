@@ -128,6 +128,31 @@ class TestSourceDialogNewSource(unittest.TestCase):
         self.assertTrue(result.block_incomplete_sequences)
         self.assertFalse(result.override_block_incomplete)
 
+    def test_titles(self):
+        cfg = ProjectConfig(project_name="Show")
+        self.assertEqual(SourceDialog(project_config=cfg).windowTitle(), "Add Source")
+        self.assertEqual(
+            SourceDialog(source=_make_full_source(), project_config=cfg).windowTitle(),
+            "Edit Source")
+
+    def test_prefilled_draft_is_add_and_keeps_fields(self):
+        """A drag-and-drop draft opens as Add Source and keeps its sample."""
+        draft = WatchedSource(
+            name="sh020_comp",
+            source_dir="/projects/show/shots/sh020/renders",
+            sample_filename="sh020_comp_v001.1001.exr",
+            version_pattern=".v{version}",
+            override_version_pattern=True,
+        )
+        dlg = SourceDialog(source=draft, project_config=ProjectConfig(project_name="Show"),
+                           is_new=True)
+        self.assertEqual(dlg.windowTitle(), "Add Source")
+        self.assertEqual(dlg.name_edit.text(), "sh020_comp")
+        result = dlg.get_source()
+        self.assertEqual(result.sample_filename, "sh020_comp_v001.1001.exr")
+        self.assertEqual(result.version_pattern, ".v{version}")
+        self.assertTrue(result.override_version_pattern)
+
 
 if __name__ == "__main__":
     unittest.main()

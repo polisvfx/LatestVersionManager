@@ -26,7 +26,7 @@ from app.workers import (
     PromoteWorker, ThumbnailWorker, ThumbnailQueueWorker, ScanWorker,
     StatusWorker, SyncNamesWorker, ProjectLoadWorker,
 )
-from app.widgets import VersionTreeWidget, SourceItemDelegate
+from app.widgets import VersionTreeWidget, SourceListWidget, SourceItemDelegate
 from app.dialogs.about import AboutDialog
 from app.dialogs.batch_promote import BatchPromoteReviewDialog, UndoPromoteDialog, DiscoverPromotePreviewDialog
 from app.dialogs.bulk_edit import BulkEditSourcesDialog
@@ -226,7 +226,8 @@ class MainWindow(QMainWindow):
             "added_on": "Added On", "last_promoted": "Last Promoted", "status": "Status",
         }
 
-        self.source_list = QTreeWidget()
+        self.source_list = SourceListWidget()
+        self.source_list.paths_dropped.connect(self._handle_source_drop)
         self.source_list.setHeaderLabels([self._source_col_labels[k] for k in self._source_col_keys])
         self.source_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.source_list.setRootIsDecorated(False)
@@ -995,11 +996,23 @@ class MainWindow(QMainWindow):
     def _add_source(self):
         if not self.config:
             return
-        draft = None
+        source = self._prompt_new_source(None)
+        if source is None:
+            return
+        self._finish_adding_sources()
+        self.statusBar().showMessage(f"Added source: {source.name}")
+
+    def _prompt_new_source(self, draft):
+        """Run the Add Source dialog (optionally prefilled with ``draft``).
+
+        On OK the source is appended to the project and returned; on Cancel
+        returns None. Callers finish with :meth:`_finish_adding_sources`.
+        """
         while True:
-            dlg = SourceDialog(source=draft, project_config=self.config, parent=self)
+            dlg = SourceDialog(source=draft, project_config=self.config,
+                               parent=self, is_new=True)
             if dlg.exec() != QDialog.Accepted:
-                return
+                return None
             draft = dlg.get_source()
             existing_names = [s.name for s in self.config.watched_sources]
             if draft.name in existing_names:
@@ -1014,11 +1027,64 @@ class MainWindow(QMainWindow):
             from datetime import datetime
             draft.added_at = datetime.now().isoformat(timespec="seconds")
         self.config.watched_sources.append(draft)
+        return draft
+
+    def _finish_adding_sources(self):
+        """Refill inherited fields (e.g. latest target), save and refresh."""
+        apply_project_defaults(self.config)
         self._mark_dirty()
         if self.config_path:
             self._save_project()
         self._reload_ui()
-        self.statusBar().showMessage(f"Added source: {draft.name}")
+
+    def _handle_source_drop(self, paths: list):
+        """Turn folders dropped onto the sources list into new sources.
+
+        Each dropped path gets a quick depth-0 discovery scan and opens a
+        prefilled Add Source dialog; Cancel skips just that one.
+        """
+        if not self.config:
+            self.statusBar().showMessage("Open or create a project before adding sources")
+            return
+
+        from src.lvm.discovery import resolve_drop_dir, source_drafts_for_path
+
+        def _key(p) -> str:
+            try:
+                return os.path.normcase(str(Path(p).resolve()))
+            except (OSError, ValueError):
+                return os.path.normcase(str(p))
+
+        existing = {_key(s.source_dir) for s in self.config.watched_sources if s.source_dir}
+        seen = set()
+        drafts = []
+        skipped = []
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for p in paths:
+                root = resolve_drop_dir(p)
+                k = _key(root)
+                if k in seen:
+                    continue
+                seen.add(k)
+                if k in existing:
+                    skipped.append(root.name)
+                    continue
+                try:
+                    drafts.extend(source_drafts_for_path(root, self.config))
+                except Exception as e:  # scan failure shouldn't block the add
+                    logger.warning(f"Drop scan failed for {root}: {e}")
+                    drafts.append(WatchedSource(name=root.name, source_dir=str(root)))
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        added = [s for s in (self._prompt_new_source(d) for d in drafts) if s]
+        if added:
+            self._finish_adding_sources()
+        msg = f"Added {len(added)} source(s) from drop"
+        if skipped:
+            msg += f" — skipped (already a source): {', '.join(skipped)}"
+        self.statusBar().showMessage(msg)
 
     def _edit_source(self, index: int):
         if not self.config or index < 0 or index >= len(self.config.watched_sources):
