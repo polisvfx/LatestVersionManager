@@ -137,5 +137,45 @@ class TestSourceDraftsForPath(unittest.TestCase):
         self.assertEqual(drafts[0].name, "sh050")
 
 
+class TestAddedSourceGetsOwnHistory(unittest.TestCase):
+    """Regression: a source added via Add Source / drag-and-drop into a
+    shared latest folder must not reuse the first source's
+    .latest_history.json (they'd overwrite each other's promotion records
+    and be flagged as a target conflict)."""
+
+    def test_new_source_is_namespaced_existing_keeps_file(self):
+        from src.lvm.config import _migrate_shared_history_filenames
+        from src.lvm.conflicts import detect_target_conflicts
+        from src.lvm.models import WatchedSource
+
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = str(Path(tmp) / "COMP_LATEST")
+            cfg = ProjectConfig(project_name="Show")
+            cfg.watched_sources = [
+                WatchedSource(name="SH0030_faceswap", source_dir=tmp,
+                              latest_target=latest,
+                              sample_filename="SH0030_faceswap_v003.mov"),
+                WatchedSource(name="SH0040_faceswap", source_dir=tmp,
+                              latest_target=latest,
+                              history_filename=".latest_history_SH0040_faceswap.json",
+                              sample_filename="SH0040_faceswap_v003.mov"),
+                # Newly added, appended last, default history filename
+                WatchedSource(name="DC2070_faceswap", source_dir=tmp,
+                              latest_target=latest,
+                              sample_filename="DC2070_C_0006C001_261029_p1EES_faceswap_v002.mov"),
+            ]
+            self.assertTrue(detect_target_conflicts(cfg))
+
+            _migrate_shared_history_filenames(cfg)
+
+            by_name = {s.name: s for s in cfg.watched_sources}
+            self.assertEqual(by_name["SH0030_faceswap"].history_filename, ".latest_history.json")
+            self.assertEqual(by_name["SH0040_faceswap"].history_filename,
+                             ".latest_history_SH0040_faceswap.json")
+            self.assertEqual(by_name["DC2070_faceswap"].history_filename,
+                             ".latest_history_DC2070_faceswap.json")
+            self.assertEqual(detect_target_conflicts(cfg), [])
+
+
 if __name__ == "__main__":
     unittest.main()
