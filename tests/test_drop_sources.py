@@ -79,7 +79,9 @@ class TestSourceDraftsForPath(unittest.TestCase):
         d = drafts[0]
         self.assertEqual(Path(d.source_dir), parent)
         self.assertEqual(d.name, "sh010_comp")
-        self.assertTrue(d.sample_filename.startswith("sh010_comp_v001"))
+        # Discovery scans version dirs in parallel, so the sample may come
+        # from any version — only its shape is deterministic.
+        self.assertRegex(d.sample_filename, r"^sh010_comp_v00[12]\.\d{4}\.exr$")
         # Matches project defaults -> nothing overridden
         self.assertFalse(d.override_version_pattern)
         self.assertFalse(d.override_file_extensions)
