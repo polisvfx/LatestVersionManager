@@ -6,6 +6,7 @@ hermetically.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -723,6 +724,194 @@ class TestIsPremierePanelInstalled(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class _FakeClip:
+    """Minimal stand-in for a Resolve MediaPoolItem."""
+
+    def __init__(self, path, name, flags=None, metadata=None):
+        self.props = {"File Path": path, "Clip Name": name}
+        self.flags = list(flags or [])
+        self.metadata = dict(metadata or {})
+
+    def GetClipProperty(self, key):
+        return self.props.get(key, "")
+
+    def SetClipProperty(self, key, value):
+        self.props[key] = value
+        return True
+
+    def GetFlagList(self):
+        return list(self.flags)
+
+    def AddFlag(self, color):
+        if color not in self.flags:
+            self.flags.append(color)
+        return True
+
+    def ClearFlags(self, color):
+        self.flags = [] if color == "All" else [c for c in self.flags if c != color]
+        return True
+
+    def GetThirdPartyMetadata(self, key=None):
+        return self.metadata.get(key, "") if key else dict(self.metadata)
+
+    def SetThirdPartyMetadata(self, metadata):
+        # Resolve 21's signature: a single dict.
+        self.metadata.update(metadata)
+        return True
+
+
+class TestCompanionStatusFlags(unittest.TestCase):
+    """Green = watched, Red = newly promoted (until cleared), Sand = stale."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = nle_bridge.resolve_script_path()
+        spec = importlib.util.spec_from_file_location("lvm_companion_flags", str(path))
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def setUp(self):
+        import json
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.src_dir = self.tmp / "renders" / "hero_comp_v003"
+        self.src_dir.mkdir(parents=True)
+        self.src_file = self.src_dir / "hero_comp_v003.mov"
+        self.src_file.write_bytes(b"src")
+        self.target_dir = self.tmp / "online"
+        self.target_dir.mkdir()
+        self.clip_file = self.target_dir / "hero_comp_latest.mov"
+        self.clip_file.write_bytes(b"latest")
+        os.utime(self.src_file, (1000.0, 1000.0))
+        os.utime(self.clip_file, (2000.0, 2000.0))
+        self.current = {
+            "version": "v003",
+            "source": str(self.src_dir),
+            "set_by": "test",
+            "set_at": "2026-11-17T10:00:00",
+            "source_mtime": 1000.0,
+            "target_mtime": 2000.0,
+            "latest_basename": "hero_comp_latest",
+            "nle_display_stem": "hero_comp_v003",
+        }
+        self._json = json
+        self._write_sidecar()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_sidecar(self):
+        with open(self.target_dir / ".latest_history.json", "w", encoding="utf-8") as f:
+            self._json.dump({"current": self.current, "history": []}, f)
+
+    def _run(self, clips):
+        folder = mock.MagicMock()
+        folder.GetClipList.return_value = clips
+        folder.GetSubFolderList.return_value = []
+        resolve = mock.MagicMock()
+        (resolve.GetProjectManager.return_value.GetCurrentProject.return_value
+         .GetMediaPool.return_value.GetRootFolder.return_value) = folder
+        return self.m.rename_clips(resolve, log=lambda *_: None)
+
+    def _clip(self, **kw):
+        return _FakeClip(str(self.clip_file), kw.pop("name", "hero_comp_latest.mov"), **kw)
+
+    def test_fresh_clip_gets_green_and_marker(self):
+        clip = self._clip()
+        stats = self._run([clip])
+        self.assertEqual(clip.flags, ["Green"])
+        self.assertEqual(stats["watched"], 1)
+        self.assertEqual(clip.metadata[self.m.PROMOTION_METADATA_KEY],
+                         "v003|2026-11-17T10:00:00")
+        self.assertEqual(clip.props["Clip Name"], "hero_comp_v003")
+
+    def test_unmanaged_clip_is_left_alone(self):
+        other = _FakeClip(str(self.tmp / "elsewhere.mov"), "elsewhere.mov", flags=["Blue"])
+        self._run([other])
+        self.assertEqual(other.flags, ["Blue"])
+        self.assertEqual(other.metadata, {})
+
+    def test_new_promotion_turns_red_and_stays_until_cleared(self):
+        clip = self._clip()
+        self._run([clip])
+        self.current.update(version="v004", set_at="2026-11-17T11:00:00",
+                            nle_display_stem="hero_comp_v004")
+        self._write_sidecar()
+
+        stats = self._run([clip])
+        self.assertEqual(clip.flags, ["Red"])
+        self.assertEqual(stats["promoted"], 1)
+
+        self._run([clip])  # nothing new — red is kept for review
+        self.assertEqual(clip.flags, ["Red"])
+
+        clip.ClearFlags("Red")  # user acknowledges in Resolve
+        self._run([clip])
+        self.assertEqual(clip.flags, ["Green"])
+
+    def test_repromote_same_version_counts_as_promotion(self):
+        clip = self._clip()
+        self._run([clip])
+        self.current["set_at"] = "2026-11-17T12:00:00"
+        self._write_sidecar()
+        self._run([clip])
+        self.assertEqual(clip.flags, ["Red"])
+
+    def test_rename_fallback_detects_promotion_without_marker(self):
+        # Synced by an older helper: named after v002, no stored marker.
+        clip = self._clip(name="hero_comp_v002")
+        self._run([clip])
+        self.assertEqual(clip.flags, ["Red"])
+
+    def test_source_rerender_is_stale(self):
+        clip = self._clip()
+        os.utime(self.src_file, (5000.0, 5000.0))
+        stats = self._run([clip])
+        self.assertEqual(clip.flags, ["Sand"])
+        self.assertEqual(stats["stale"], 1)
+
+    def test_overwritten_target_is_stale_and_beats_red(self):
+        clip = self._clip(flags=["Red"])
+        os.utime(self.clip_file, (9000.0, 9000.0))
+        self._run([clip])
+        self.assertEqual(clip.flags, ["Sand"])
+
+    def test_flat_layout_ignores_other_versions(self):
+        flat = self.tmp / "flat"
+        flat.mkdir()
+        own = flat / "hero_comp_v003.mov"
+        own.write_bytes(b"x")
+        newer = flat / "hero_comp_v004.mov"
+        newer.write_bytes(b"y")
+        os.utime(own, (1000.0, 1000.0))
+        os.utime(newer, (8000.0, 8000.0))
+        self.current["source"] = str(flat)
+        self._write_sidecar()
+        clip = self._clip()
+        self._run([clip])
+        self.assertEqual(clip.flags, ["Green"])
+
+    def test_other_flag_colours_are_kept(self):
+        clip = self._clip(flags=["Blue", "Sand"])
+        self._run([clip])
+        self.assertEqual(sorted(clip.flags), ["Blue", "Green"])
+
+    def test_flag_failure_does_not_fail_sync(self):
+        clip = self._clip()
+        clip.AddFlag = mock.MagicMock(side_effect=RuntimeError("nope"))
+        stats = self._run([clip])
+        self.assertEqual(stats["flag_errors"], 1)
+        self.assertEqual(stats["errors"], 0)
+        self.assertEqual(stats["renamed"], 1)
+
+    def test_flags_can_be_disabled(self):
+        clip = self._clip()
+        with mock.patch.object(self.m, "FLAG_CLIPS", False):
+            self._run([clip])
+        self.assertEqual(clip.flags, [])
 
 
 if __name__ == "__main__":

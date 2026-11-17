@@ -84,6 +84,28 @@ In Resolve: **Workspace → Scripts → Edit → lvm_restore_versions**.
 
 A summary prints to the Resolve console (Workspace → Console).
 
+### Status flags
+
+Each sync also flags every clip LVM manages in the media pool, one flag
+per clip:
+
+| Flag | Meaning |
+| --- | --- |
+| Green | Watched by LVM — nothing to review. |
+| Red | A new version was promoted since the last sync (re-promoting the same version counts too). The flag stays until you clear it in Resolve; the next sync then turns the clip green. |
+| Sand | Stale — the promoted source was re-rendered, or the latest file was overwritten outside LVM, after promotion. Stale wins over red. |
+
+Resolve's flag palette has no orange, so stale uses **Sand**, the closest
+colour. To change colours, or to turn flagging off (`FLAG_CLIPS = False`),
+edit the `FLAG_*` constants at the top of `lvm_restore_versions.py`.
+Flags in other colours are never touched.
+
+The helper stores the promotion each clip was last synced to in the
+clip's third-party metadata (`LVM Promotion`) — that's how it spots a new
+promotion on the next sync. Clips synced by an older helper have no stored
+promotion yet; for those a promotion is detected from the clip being named
+after an older version.
+
 ### Troubleshooting: "DaVinciResolveScript module not found"
 
 Resolve gates the scripting module behind a preference. If the script
