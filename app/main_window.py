@@ -1032,6 +1032,12 @@ class MainWindow(QMainWindow):
     def _finish_adding_sources(self):
         """Refill inherited fields (e.g. latest target), save and refresh."""
         apply_project_defaults(self.config)
+        # Sources sharing a latest_target must not share a history sidecar,
+        # or their promotions overwrite each other's records. New sources
+        # are appended last, so they're the ones that get namespaced and
+        # existing sources keep their on-disk history files.
+        from src.lvm.config import _migrate_shared_history_filenames
+        _migrate_shared_history_filenames(self.config)
         self._mark_dirty()
         if self.config_path:
             self._save_project()
