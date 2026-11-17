@@ -26,9 +26,13 @@ from app._common import (
 class SourceDialog(QDialog):
     """Dialog for adding or editing a watched source."""
 
-    def __init__(self, source: WatchedSource = None, project_config: ProjectConfig = None, parent=None):
+    def __init__(self, source: WatchedSource = None, project_config: ProjectConfig = None,
+                 parent=None, is_new: bool = False):
+        """``is_new`` marks ``source`` as a prefilled draft (e.g. from a
+        drag-and-drop or a duplicate-name retry) rather than an existing
+        source being edited."""
         super().__init__(parent)
-        self.setWindowTitle("Edit Source" if source else "Add Source")
+        self.setWindowTitle("Add Source" if (is_new or source is None) else "Edit Source")
         self.setMinimumWidth(550)
         self._project_config = project_config
         self._source = source

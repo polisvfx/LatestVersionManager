@@ -5,7 +5,10 @@ Finds directories or files that contain version patterns (v01, v002, v0051, etc.
 and reports what it found. Does NOT modify any project files — report only.
 """
 
-__all__ = ["discover", "format_discovery_report", "MEDIA_EXTENSIONS"]
+__all__ = [
+    "discover", "format_discovery_report", "MEDIA_EXTENSIONS",
+    "resolve_drop_dir", "source_drafts_for_path",
+]
 
 import os
 import re
@@ -851,6 +854,80 @@ def _suggest_pattern(name: str, ver_match: re.Match = None,
         return prefix_before_v + "{version}"
 
     return "_v{version}"
+
+
+def resolve_drop_dir(path) -> Path:
+    """Map a path dragged in from the file manager to a source directory.
+
+    A dropped file, version folder (``hero_comp_v003``) or date folder
+    (``plate_240115``) stands for its parent — the folder that holds the
+    versions. Any other folder is taken as the source directory itself.
+    """
+    p = Path(path)
+    if p.is_file():
+        return p.parent
+    if VERSION_RE.search(p.name):
+        return p.parent
+    date_match = DATE_RE.search(p.name)
+    if date_match and _is_plausible_date(date_match.group(1)):
+        return p.parent
+    return p
+
+
+def source_drafts_for_path(path, config) -> list:
+    """Build prefilled WatchedSource drafts for a path dropped onto the GUI.
+
+    Runs a depth-0 discovery scan on the resolved source directory and
+    returns one draft per shot found there. Suggestions that differ from the
+    project defaults (version pattern, date format, extensions) are filled
+    in with their override flag on, so folders whose naming doesn't fit the
+    project defaults still work. When nothing versioned is detected, a
+    single bare draft for the folder is returned so the user can finish it
+    by hand.
+    """
+    from .models import WatchedSource
+    from .task_tokens import compute_source_name
+
+    root = resolve_drop_dir(path)
+    default_exts = [e.lower() for e in (config.default_file_extensions or [])]
+    scan_exts = sorted(MEDIA_EXTENSIONS | set(default_exts))
+    results = discover(str(root), max_depth=0, extensions=scan_exts)
+
+    if not results:
+        return [WatchedSource(
+            name=_strip_version(root.name) or root.name,
+            source_dir=str(root),
+        )]
+
+    drafts = []
+    for result in results:
+        name = ""
+        if config.naming_configured and config.default_naming_rule:
+            name = compute_source_name(
+                result, config.default_naming_rule, config.task_tokens)
+        source = WatchedSource(
+            name=name or result.name,
+            source_dir=result.path,
+            sample_filename=result.sample_filename or "",
+        )
+
+        pattern = result.suggested_pattern
+        if pattern and pattern != config.default_version_pattern:
+            source.version_pattern = pattern
+            source.override_version_pattern = True
+
+        date_fmt = result.suggested_date_format
+        if date_fmt and date_fmt != config.default_date_format:
+            source.date_format = date_fmt
+            source.override_date_format = True
+
+        found_exts = {e.lower() for e in (result.suggested_extensions or [])}
+        if found_exts and not found_exts.issubset(default_exts):
+            source.file_extensions = sorted(set(default_exts) | found_exts)
+            source.override_file_extensions = True
+
+        drafts.append(source)
+    return drafts
 
 
 def format_discovery_report(results: list[DiscoveryResult], root_dir: str = "") -> str:

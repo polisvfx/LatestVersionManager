@@ -59,6 +59,50 @@ class VersionTreeWidget(QTreeWidget):
             super().dropEvent(event)
 
 
+class SourceListWidget(QTreeWidget):
+    """Sources list that accepts folders dragged in from the file manager.
+
+    Dropped local paths are emitted via ``paths_dropped``; the main window
+    turns each one into a prefilled Add Source dialog.
+    """
+
+    paths_dropped = Signal(list)  # list of Path objects
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(False)
+        self.setToolTip("Drop folders here from your file manager to add them as sources")
+
+    @staticmethod
+    def _local_paths(event) -> list:
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return []
+        return [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()]
+
+    def dragEnterEvent(self, event):
+        if self._local_paths(event):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self._local_paths(event):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._local_paths(event)
+        if paths:
+            event.acceptProposedAction()
+            self.paths_dropped.emit(paths)
+        else:
+            super().dropEvent(event)
+
+
 # ---------------------------------------------------------------------------
 # Dry-run preview dialog
 # ---------------------------------------------------------------------------
