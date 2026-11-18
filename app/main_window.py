@@ -41,6 +41,11 @@ from app.dialogs.settings import ProjectSettingsDialog
 from app.dialogs.source import SourceDialog
 from app.dialogs.update import UpdateDialog
 
+# Auto-promote: how often to re-check a container file that is still being
+# rendered, and how long a file of an unrecognised container format must sit
+# unmodified before it counts as finished.
+RENDER_WAIT_RETRY_MS = 10_000
+RENDER_SETTLE_SECONDS = 10.0
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -63,6 +68,8 @@ class MainWindow(QMainWindow):
         self._batch_promote_index: int = 0
         self._batch_keep_layers: dict = {}
         self._force_promote: bool = False
+        # Sources whose auto-promote is waiting for a container render to finish
+        self._render_wait_sources: set[str] = set()
         self._target_conflicts: dict = {}
         self._deferred_refresh_results: dict = None  # scan results deferred due to promotion in progress
         self._scan_worker: ScanWorker = None
@@ -3437,6 +3444,20 @@ class MainWindow(QMainWindow):
                 return
             self._force_promote = True
 
+        # Container files (MOV/MXF/...) that are still being rendered
+        unfinished = promoter.find_unfinished_renders(version)
+        if unfinished:
+            details = "\n".join(f"  {p.name}: {why}" for p, why in unfinished[:10])
+            reply = QMessageBox.warning(
+                self, "Still Rendering",
+                f"{version.version_string} doesn't look finished yet:\n\n{details}\n\n"
+                f"Promoting now may publish a truncated clip. Promote anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            self._force_promote = True
+
         # Detect "keep" vs normal promote
         current = promoter.get_current_version()
         is_keep = current and version_strings_match(version.version_string, current.version, version.version_number)
@@ -3803,11 +3824,20 @@ class MainWindow(QMainWindow):
         - The source has a previous promotion (history entry)
         - A newer highest version exists
         - The new version's frame range matches the last promoted version
+        - Its container files (MOV/MXF/...) have finished rendering; if not,
+          it re-checks every RENDER_WAIT_RETRY_MS until they have
         """
-        if not self.auto_promote_cb.isChecked():
+        waiting_on_render = source_name in self._render_wait_sources
+        self._render_wait_sources.discard(source_name)
+
+        if not self.auto_promote_cb.isChecked() or not self.watcher.is_running:
             return
 
         if self._worker is not None:
+            if waiting_on_render:
+                # Keep waiting rather than dropping the pending auto-promote.
+                self._schedule_render_wait_retry(source_name)
+                return
             logger.info(f"Auto-promote skipped for {source_name}: promotion already in progress")
             self.statusBar().showMessage(
                 f"Auto-promote skipped for {source_name}: promotion already in progress"
@@ -3868,6 +3898,25 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(msg)
             return
 
+        # Don't publish a QuickTime/MXF the renderer is still writing. The
+        # watcher only fires when the file is created, so poll until done.
+        unfinished = promoter.find_unfinished_renders(
+            highest, settle_seconds=RENDER_SETTLE_SECONDS
+        )
+        if unfinished:
+            path, why = unfinished[0]
+            if not waiting_on_render:
+                logger.info(
+                    f"Auto-promote of {source_name} {highest.version_string} "
+                    f"waiting for render to finish: {path.name} ({why})"
+                )
+            self.statusBar().showMessage(
+                f"Auto-promote waiting for {source_name} {highest.version_string} "
+                f"to finish rendering ({path.name})"
+            )
+            self._schedule_render_wait_retry(source_name)
+            return
+
         # Pre-check link mode (avoid modal dialogs in auto-promote path)
         mode = promoter.source.link_mode
         available, reason = check_link_mode_available(mode)
@@ -3884,6 +3933,25 @@ class MainWindow(QMainWindow):
             f"Auto-promoting {source_name} to {highest.version_string}..."
         )
         self._start_promotion(promoter, highest)
+
+    def _schedule_render_wait_retry(self, source_name: str):
+        """Re-run auto-promote for *source_name* after RENDER_WAIT_RETRY_MS.
+
+        At most one retry is pending per source; a watcher event in the
+        meantime simply runs the check sooner.
+        """
+        if source_name in self._render_wait_sources:
+            return
+        self._render_wait_sources.add(source_name)
+        QTimer.singleShot(
+            RENDER_WAIT_RETRY_MS,
+            lambda: self._on_render_wait_timeout(source_name),
+        )
+
+    def _on_render_wait_timeout(self, source_name: str):
+        # A watcher-triggered attempt may already have consumed this wait.
+        if source_name in self._render_wait_sources:
+            self._try_auto_promote(source_name)
 
     # --- Log viewer helpers (Feature #19) ---
 
