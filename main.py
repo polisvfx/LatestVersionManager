@@ -292,7 +292,11 @@ def cmd_promote(args):
         pct = int(current / total * 100)
         print(f"\r  Copying: {current}/{total} ({pct}%) - {filename}", end="", flush=True)
 
-    entry = promoter.promote(target_version, progress_callback=progress, force=getattr(args, 'force', False))
+    try:
+        entry = promoter.promote(target_version, progress_callback=progress, force=getattr(args, 'force', False))
+    except PromotionError as e:
+        print(f"\nPromotion failed: {e}")
+        sys.exit(1)
     print(f"\n\nDone. {source.name} is now at {entry.version}")
 
     # Write report if requested
@@ -697,7 +701,7 @@ def main():
     p_promote.add_argument("source_name", help="Name of the watched source")
     p_promote.add_argument("version", help="Version to promote (e.g. v003 or 3)")
     p_promote.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
-    p_promote.add_argument("--force", action="store_true", help="Override gap/incompleteness block")
+    p_promote.add_argument("--force", action="store_true", help="Override gap/incompleteness and still-rendering blocks")
     p_promote.add_argument("--dry-run", action="store_true", help="Preview file operations without copying")
     p_promote.add_argument("--report", help="Write promotion report to file (JSON)")
 

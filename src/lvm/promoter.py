@@ -28,6 +28,7 @@ from .config import _expand_group_token
 from .fast_copy import smart_copy, CopyCancelled
 from .lockfile import PromoteLock, LockHeldError, LOCK_FILENAME
 from .scanner import _group_files_by_sequence
+from .render_check import find_unfinished_renders, is_container_file
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,17 @@ class Promoter:
                 f"Use force to override, or disable block_incomplete_sequences."
             )
 
+        # Container files (MOV/MXF/...) are a single file the renderer keeps
+        # writing to and finalises last — never publish one mid-render.
+        if not force:
+            unfinished = self.find_unfinished_renders(version)
+            if unfinished:
+                raise PromotionError(
+                    "Still rendering — these files are not finished yet:\n"
+                    + "\n".join(f"  {p.name}: {why}" for p, why in unfinished[:10])
+                    + "\nWait for the render to finish, or use force to override."
+                )
+
         # Run pre-promote hook
         try:
             run_pre_promote_hook(self.source, version, user, self.project_name)
@@ -367,6 +379,36 @@ class Promoter:
 
         logger.info(f"Promotion complete: {version.version_string}")
         return entry
+
+    def find_unfinished_renders(self, version: VersionInfo,
+                                settle_seconds: float = 0.0) -> list[tuple[Path, str]]:
+        """Return ``(path, reason)`` for container files of *version* that
+        still look like they are being rendered (see :mod:`render_check`).
+
+        Frame-sequence files are ignored — gaps cover those. *settle_seconds*
+        additionally treats recently modified files of unrecognised formats
+        as unfinished; auto-promote uses it, manual promotion does not.
+        """
+        source_path = Path(version.source_path)
+        if source_path.is_file():
+            candidates = [source_path]
+        elif source_path.is_dir():
+            try:
+                with os.scandir(source_path) as it:
+                    candidates = [
+                        Path(e.path) for e in it
+                        if is_container_file(e.name)
+                        and has_media_extension(e.name, self._valid_extensions)
+                        and e.is_file()
+                    ]
+            except OSError:
+                return []
+            if candidates and source_path == Path(self.source.source_dir):
+                # Flat layout: only this version's files.
+                candidates = self._filter_version_files(sorted(candidates), version)
+        else:
+            return []
+        return find_unfinished_renders(candidates, settle_seconds=settle_seconds)
 
     def _scan_target_media(self, target_dir: Path) -> list:
         """Single os.scandir pass to collect media DirEntry objects from target.
