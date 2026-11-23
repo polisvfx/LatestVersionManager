@@ -7,8 +7,8 @@ other modules can resolve relative paths to absolute ones.
 """
 
 __all__ = [
-    "load_config", "save_config", "create_project",
-    "create_example_config", "apply_project_defaults",
+    "load_config", "save_config", "write_config_snapshot",
+    "create_project", "create_example_config", "apply_project_defaults",
 ]
 
 import json
@@ -16,6 +16,7 @@ import logging
 import re
 from pathlib import Path
 
+from .fileutil import atomic_write_json
 from .models import ProjectConfig, make_relative
 from .task_tokens import derive_source_tokens
 
@@ -285,14 +286,24 @@ def save_config(config: ProjectConfig, config_path: str):
     """Save a project config to a JSON file.
 
     Converts absolute source/target paths to relative (relative to the
-    config file location) before writing.
+    config file location) before writing. The write is atomic.
+    """
+    project_dir = write_config_snapshot(config.to_dict(), config_path)
+    # Keep project_dir in sync
+    config.project_dir = project_dir
+
+
+def write_config_snapshot(data: dict, config_path: str) -> str:
+    """Relativise paths in a ``ProjectConfig.to_dict()`` snapshot and write it
+    atomically to *config_path*. Returns the project directory.
+
+    Split out of :func:`save_config` so the GUI can take the snapshot on the
+    main thread and do the (possibly slow, SMB) write on a worker thread.
+    *data* is modified in place.
     """
     path = Path(config_path).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
     project_dir = str(path.parent)
 
-    # Build serializable dict with relative paths
-    data = config.to_dict()
     for source_data in data.get("watched_sources", []):
         sd = source_data.get("source_dir", "")
         if sd and Path(sd).is_absolute():
@@ -317,12 +328,9 @@ def save_config(config: ProjectConfig, config_path: str):
         if rd and Path(rd).is_absolute():
             grp_props["root_dir"] = make_relative(rd, project_dir)
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-    # Keep project_dir in sync
-    config.project_dir = project_dir
+    atomic_write_json(path, data)
     logger.info(f"Saved project config to {path}")
+    return project_dir
 
 
 def _sanitize_filename(name: str) -> str:

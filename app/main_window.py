@@ -48,6 +48,10 @@ RENDER_WAIT_RETRY_MS = 10_000
 RENDER_SETTLE_SECONDS = 10.0
 
 class MainWindow(QMainWindow):
+    # Emitted from the _io_executor thread when a background project save
+    # finishes: ok, config_path, project_dir (ok) or error message (failed).
+    _save_finished = Signal(bool, str, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -64,6 +68,7 @@ class MainWindow(QMainWindow):
         self._promoting_source_name: str = None
         self._promoting_version: VersionInfo = None
         self._fallback_original_mode: str = None  # original link_mode before copy fallback
+        self._fallback_source: WatchedSource = None  # source whose link_mode was swapped
         self._batch_promote_list: list = []
         self._batch_promote_index: int = 0
         self._batch_keep_layers: dict = {}
@@ -71,6 +76,7 @@ class MainWindow(QMainWindow):
         # Sources whose auto-promote is waiting for a container render to finish
         self._render_wait_sources: set[str] = set()
         self._target_conflicts: dict = {}
+        self._source_status: dict = {}  # filled by StatusWorker
         self._deferred_refresh_results: dict = None  # scan results deferred due to promotion in progress
         self._scan_worker: ScanWorker = None
         self._status_worker: StatusWorker = None
@@ -83,6 +89,7 @@ class MainWindow(QMainWindow):
         self._io_executor = ThreadPoolExecutor(max_workers=1)
         self._dirty = False  # True when config has unsaved changes
         self._log_autoshow_cooldown_until = 0.0  # error-burst cooldown
+        self._save_finished.connect(self._on_save_finished)
 
         # File watcher
         self.watcher = SourceWatcher(self)
@@ -109,11 +116,14 @@ class MainWindow(QMainWindow):
         # the dock for historical errors.
         self._log_handler.log_record.connect(self._maybe_autoshow_log_dock)
 
-        # Allow DEBUG records to reach the Qt log handler; keep console at INFO
-        logging.getLogger().setLevel(logging.DEBUG)
+        # Console stays at INFO. DEBUG records are only produced while the
+        # log dock's filter asks for them: at DEBUG every per-file message of
+        # a large promotion is formatted and pushed through a Qt signal.
         for h in logging.getLogger().handlers:
             if isinstance(h, logging.StreamHandler) and h is not self._log_handler:
                 h.setLevel(logging.INFO)
+        self._apply_log_capture_level()
+        self.log_level_filter.currentTextChanged.connect(self._apply_log_capture_level)
 
         self._restore_state()
 
@@ -445,6 +455,9 @@ class MainWindow(QMainWindow):
 
         # Connect version selection for thumbnail (lazy — only loads when visible)
         self.version_tree.currentItemChanged.connect(self._on_version_selected_thumbnail)
+        # Connected once here — connecting per source selection stacked up
+        # duplicate slots, so each click ran the handler once per selection.
+        self.version_tree.itemSelectionChanged.connect(self._on_version_selected)
 
         # Promote controls
         promote_row = QHBoxLayout()
@@ -495,6 +508,7 @@ class MainWindow(QMainWindow):
         h_header.resizeSection(2, 80)
         h_header.resizeSection(3, 140)
         h_header.resizeSection(4, 110)
+        self.history_tree.itemSelectionChanged.connect(self._on_history_selected)
 
         # Revert + Export buttons
         revert_row = QHBoxLayout()
@@ -904,49 +918,71 @@ class MainWindow(QMainWindow):
             title = f"* {title}"
         self.setWindowTitle(title)
 
-    def _save_project(self):
+    def _save_project(self, blocking: bool = False) -> bool:
+        """Save the project config.
+
+        The snapshot is taken on the main thread; the write (atomic, see
+        ``config.write_config_snapshot``) runs on ``_io_executor`` so a slow
+        share doesn't freeze the UI. Writes stay ordered because the executor
+        has a single thread. The dirty flag is cleared optimistically and set
+        again if the write fails.
+
+        ``blocking=True`` waits for the write (used when the window closes)
+        and returns whether it succeeded.
+        """
         if not self.config:
-            return
+            return True
         if not self.config_path:
             self._save_project_as()
-            return
-        # Snapshot config data on the main thread, write in background
+            return not self._dirty
+        from src.lvm.config import write_config_snapshot
+
         config_snapshot = self.config.to_dict()
         config_path = self.config_path
-        project_dir = str(Path(config_path).resolve().parent)
+        self._dirty = False
+        self._update_title()
+
+        if blocking:
+            future = self._io_executor.submit(write_config_snapshot, config_snapshot, config_path)
+            try:
+                project_dir = future.result()
+            except Exception as e:
+                self._on_save_finished(False, config_path, str(e))
+                return False
+            self._on_save_finished(True, config_path, project_dir)
+            return True
 
         def _write():
             try:
-                # Relativise paths (same logic as save_config but on snapshot)
-                for source_data in config_snapshot.get("watched_sources", []):
-                    sd = source_data.get("source_dir", "")
-                    if sd and Path(sd).is_absolute():
-                        source_data["source_dir"] = make_relative(sd, project_dir)
-                    lt = source_data.get("latest_target", "")
-                    if lt and Path(lt).is_absolute():
-                        source_data["latest_target"] = make_relative(lt, project_dir)
-                pr = config_snapshot.get("project_root", "")
-                if pr and Path(pr).is_absolute():
-                    config_snapshot["project_root"] = make_relative(pr, project_dir)
-                for grp_props in config_snapshot.get("groups", {}).values():
-                    rd = grp_props.get("root_dir", "")
-                    if rd and Path(rd).is_absolute():
-                        grp_props["root_dir"] = make_relative(rd, project_dir)
-
-                p = Path(config_path).resolve()
-                p.parent.mkdir(parents=True, exist_ok=True)
-                import json as _json
-                with open(p, "w", encoding="utf-8") as f:
-                    _json.dump(config_snapshot, f, indent=2, ensure_ascii=False)
-                self.config.project_dir = project_dir
-                logger.info(f"Saved project config to {p}")
+                project_dir = write_config_snapshot(config_snapshot, config_path)
             except Exception as e:
-                logger.error(f"Failed to save project: {e}")
+                self._save_finished.emit(False, config_path, str(e))
+            else:
+                self._save_finished.emit(True, config_path, project_dir)
 
+        self.statusBar().showMessage(f"Saving: {config_path}…")
         self._io_executor.submit(_write)
-        self._dirty = False
-        self._update_title()
-        self.statusBar().showMessage(f"Saved: {self.config_path}")
+        return True
+
+    def _on_save_finished(self, ok: bool, config_path: str, detail: str):
+        """Main-thread completion of a project save (*detail* is the project
+        dir on success, the error message on failure)."""
+        if ok:
+            if self.config and config_path == self.config_path:
+                self.config.project_dir = detail
+            self.statusBar().showMessage(f"Saved: {config_path}", 5000)
+            return
+        logger.error("Failed to save project %s: %s", config_path, detail)
+        if config_path == self.config_path:
+            self._dirty = True
+            self._update_title()
+        self.statusBar().showMessage(f"Save FAILED: {config_path}")
+        QMessageBox.warning(
+            self, "Save Failed",
+            f"Could not save the project to:\n{config_path}\n\n{detail}\n\n"
+            f"The previous file on disk is unchanged. Your changes are still "
+            f"in memory — fix the problem and save again.",
+        )
 
     def _save_project_as(self):
         if not self.config:
@@ -2180,6 +2216,9 @@ class MainWindow(QMainWindow):
             tooltip = f"Integrity issue with {ver_tag}"
         elif status == "no_version":
             tooltip = "No version promoted yet"
+        elif status == "error":
+            integrity = info.get("integrity") or {}
+            tooltip = integrity.get("message") or "Status could not be determined"
         else:  # no_target
             tooltip = "No latest target path configured"
 
@@ -2386,8 +2425,7 @@ class MainWindow(QMainWindow):
         if not indices:
             return
 
-        self._refresh_select_source = select_source
-        self._refresh_selected_sources(indices)
+        self._refresh_selected_sources(indices, select_source=select_source)
 
     def _refresh_all_with_selection(self, select_source: str = None):
         """Re-scan all sources in background, restoring the given source selection on completion."""
@@ -2405,8 +2443,12 @@ class MainWindow(QMainWindow):
                 self._refresh_selected_sources([i])
                 return
 
-    def _refresh_selected_sources(self, indices: list[int]):
-        """Re-scan only the specified sources in background thread."""
+    def _refresh_selected_sources(self, indices: list[int], select_source: str = None):
+        """Re-scan only the specified sources in background thread.
+
+        *select_source* is re-selected afterwards; by default the currently
+        selected source is kept.
+        """
         if not self.config or self._scan_worker is not None or self._status_worker is not None:
             return
         sources = [self.config.watched_sources[i] for i in indices if i < len(self.config.watched_sources)]
@@ -2414,7 +2456,9 @@ class MainWindow(QMainWindow):
             return
 
         # Remember which source to re-select after refresh
-        self._refresh_select_source = self._current_source.name if self._current_source else None
+        if select_source is None and self._current_source:
+            select_source = self._current_source.name
+        self._refresh_select_source = select_source
 
         self.btn_refresh.setEnabled(False)
         self.btn_refresh_versions.setEnabled(False)
@@ -3109,6 +3153,16 @@ class MainWindow(QMainWindow):
                     "QFrame { background-color: #3a3a1a; border: 1px solid #5a5a2d; "
                     "border-radius: 4px; padding: 8px; }"
                 )
+        elif status_info.get("status") == "error":
+            message = (status_info.get("integrity") or {}).get("message", "")
+            self.current_label.setText(f"Status unavailable   ({source.name})")
+            self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #ff4444;")
+            self.integrity_label.setText(f"⚠ {message}  — press Refresh to retry")
+            self.integrity_label.setStyleSheet("font-size: 11pt; color: #ffaa00;")
+            self.current_banner.setStyleSheet(
+                "QFrame { background-color: #3a2020; border: 1px solid #5a3030; "
+                "border-radius: 4px; padding: 8px; }"
+            )
         else:
             self.current_label.setText(f"No version loaded   ({source.name})")
             self.current_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #8c8c8c;")
@@ -3196,7 +3250,6 @@ class MainWindow(QMainWindow):
 
             self.version_tree.addTopLevelItem(item)
 
-        self.version_tree.itemSelectionChanged.connect(self._on_version_selected)
         self._queue_version_thumbnails()
 
         # Populate history
@@ -3216,8 +3269,6 @@ class MainWindow(QMainWindow):
                     for col in range(6):
                         item.setForeground(col, QColor("#4ec9a0"))
                 self.history_tree.addTopLevelItem(item)
-
-        self.history_tree.itemSelectionChanged.connect(self._on_history_selected)
 
     _PROMOTE_STYLE = (
         "QPushButton { background-color: #336699; color: white; padding: 8px 16px; "
@@ -3354,7 +3405,9 @@ class MainWindow(QMainWindow):
             if source.name == source_name:
                 source.manual_versions = [v.to_dict() for v in manual]
                 break
-        save_config(self.config, self.config_path)
+        # Same ordered, atomic, off-thread path as every other save, so it
+        # can't race a pending background write of an older snapshot.
+        self._save_project()
 
     def _import_version(self):
         """Open a file browser to import an external version."""
@@ -3663,18 +3716,15 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.btn_cancel_promote.setVisible(False)
 
-        # Restore original link_mode if we fell back to copy
-        if self._fallback_original_mode and self._current_source:
-            self._current_source.link_mode = self._fallback_original_mode
-            self._fallback_original_mode = None
+        self._restore_fallback_link_mode()
 
         # Check if this is part of a batch promotion
         if hasattr(self, '_batch_promote_list') and self._batch_promote_list:
-            # Guard: _current_source may have been cleared by a concurrent
-            # background refresh — use _promoting_source_name as fallback.
+            # The promoted source, not whatever is selected now (the user may
+            # have clicked another source, or a refresh cleared it).
             source_name = (
-                self._current_source.name if self._current_source
-                else self._promoting_source_name or "unknown"
+                self._promoting_source_name
+                or (self._current_source.name if self._current_source else "unknown")
             )
             self._versions_cache.pop(source_name, None)
             self._batch_promote_index += 1
@@ -3693,6 +3743,22 @@ class MainWindow(QMainWindow):
         self._process_deferred_or_refresh([promoted_name], select_source=promoted_name)
         self._maybe_auto_sync_nle()
 
+    def _source_by_name(self, name: str):
+        if not name or not self.config:
+            return None
+        for s in self.config.watched_sources:
+            if s.name == name:
+                return s
+        return None
+
+    def _restore_fallback_link_mode(self):
+        """Undo a temporary copy/hardlink fallback on the source it was
+        applied to — not on whichever source happens to be selected now."""
+        if self._fallback_original_mode and self._fallback_source is not None:
+            self._fallback_source.link_mode = self._fallback_original_mode
+        self._fallback_original_mode = None
+        self._fallback_source = None
+
     def _on_promote_error(self, error_msg):
         # Message boxes are dismissable — make sure the failure also lands
         # in the log dock (which auto-opens on ERROR).
@@ -3704,16 +3770,13 @@ class MainWindow(QMainWindow):
         self.btn_cancel_promote.setVisible(False)
         self.btn_promote.setEnabled(True)
 
-        # Restore original link_mode if we fell back to copy
-        if self._fallback_original_mode and self._current_source:
-            self._current_source.link_mode = self._fallback_original_mode
-            self._fallback_original_mode = None
+        self._restore_fallback_link_mode()
 
         # Check for symlink/hardlink failure — offer fallback options
         symlink_failed = "Symlink creation failed" in error_msg
         hardlink_failed = "Hardlink creation failed" in error_msg
         if symlink_failed or hardlink_failed:
-            source = self._current_source
+            source = self._source_by_name(error_source_name) or self._current_source
             version = self._promoting_version
             if source and version:
                 promoter = self._promoters.get(source.name)
@@ -3742,15 +3805,15 @@ class MainWindow(QMainWindow):
                         fallback_mode = "hardlink"
                     if fallback_mode:
                         self._fallback_original_mode = source.link_mode
+                        self._fallback_source = source
                         source.link_mode = fallback_mode
                         self._start_promotion(promoter, version)
                         return
 
         # If batch promotion, ask whether to continue
         if hasattr(self, '_batch_promote_list') and self._batch_promote_list:
-            source_name = (
-                self._current_source.name if self._current_source
-                else error_source_name or "Unknown"
+            source_name = error_source_name or (
+                self._current_source.name if self._current_source else "Unknown"
             )
             reply = QMessageBox.warning(
                 self, "Promotion Failed",
@@ -3990,6 +4053,15 @@ class MainWindow(QMainWindow):
                 return
         self.log_text.appendHtml(f'<span style="color:{color}">{_html.escape(message)}</span>')
 
+    def _apply_log_capture_level(self, *_):
+        """Capture DEBUG only when the log filter is ALL or DEBUG. Records
+        dropped while it was higher are not in the buffer, so switching to
+        DEBUG shows debug output from that point on."""
+        wants_debug = self.log_level_filter.currentText() in ("ALL", "DEBUG")
+        level = logging.DEBUG if wants_debug else logging.INFO
+        self._log_handler.setLevel(level)
+        logging.getLogger().setLevel(level)
+
     def _filter_log(self):
         self.log_text.clear()
         for level, msg in self._log_handler.get_buffer():
@@ -4133,6 +4205,42 @@ class MainWindow(QMainWindow):
             self._load_project(last_project)
 
     def closeEvent(self, event):
+        # A promotion killed mid-copy or mid-swap leaves the target broken
+        # until the next promotion recovers it — cancel it cleanly first.
+        if self._worker is not None and self._worker.isRunning():
+            reply = QMessageBox.question(
+                self, "Promotion In Progress",
+                "A promotion is still running.\n\n"
+                "Cancel it and quit? LVM waits for it to stop safely, so the "
+                "target keeps a complete version (the previous one, or the new "
+                "one if the promotion was already in its final step).",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+            worker = self._worker
+            worker.cancel()
+            # No "Promotion cancelled" dialogs or batch prompts while closing.
+            try:
+                worker.disconnect()
+            except RuntimeError:
+                pass
+            self.statusBar().showMessage("Cancelling promotion before quitting…")
+            deadline = time.monotonic() + 60.0
+            while worker.isRunning():
+                if time.monotonic() > deadline:
+                    QMessageBox.warning(
+                        self, "Still Finishing",
+                        "The promotion is still finishing its last step. "
+                        "Try closing again in a moment.",
+                    )
+                    event.ignore()
+                    return
+                QApplication.processEvents()
+                worker.wait(100)
+
         # Prompt to save unsaved changes
         if self._dirty and self.config_path:
             reply = QMessageBox.question(
@@ -4145,7 +4253,9 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             if reply == QMessageBox.Save:
-                self._save_project()
+                if not self._save_project(blocking=True):
+                    event.ignore()
+                    return
 
         if self.config_path:
             self._settings.setValue("last_project", self.config_path)

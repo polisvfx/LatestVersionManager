@@ -9,10 +9,12 @@ __all__ = ["HistoryManager", "has_newer_versions_since", "MAX_HISTORY_ENTRIES"]
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from .fileutil import atomic_write_json
 from .models import HistoryEntry
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,11 @@ class HistoryManager:
 
         Results are cached by file mtime to avoid redundant disk reads when
         get_current() and get_history() are called in quick succession.
+
+        Raises OSError when the file exists but cannot be read (permission
+        denied, network share dropped). That is deliberately *not* reported
+        as "no history": a caller that then promoted would overwrite the
+        real history with a single entry.
         """
         if not self.path.exists():
             self._cache = None
@@ -59,6 +66,8 @@ class HistoryManager:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError(f"expected a JSON object, got {type(data).__name__}")
             result = {
                 "current": HistoryEntry.from_dict(data["current"]) if data.get("current") else None,
                 "history": [HistoryEntry.from_dict(h) for h in data.get("history", [])],
@@ -66,13 +75,19 @@ class HistoryManager:
             self._cache = result
             self._cache_mtime = current_mtime
             return result
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (ValueError, KeyError, TypeError) as e:  # incl. JSON/Unicode decode errors
             logger.error(f"Failed to parse history file {self.path}: {e}")
-            # Back up the corrupt file and start fresh
+            # Back up the corrupt file and start fresh. os.replace (not
+            # Path.rename) so an older .bak doesn't raise FileExistsError on
+            # Windows.
             backup = self.path.with_suffix(".json.bak")
-            if self.path.exists():
-                self.path.rename(backup)
+            try:
+                os.replace(self.path, backup)
                 logger.info(f"Backed up corrupt history to {backup}")
+            except FileNotFoundError:
+                pass
+            except OSError as be:
+                logger.error(f"Could not back up corrupt history {self.path}: {be}")
             self._cache = None
             self._cache_mtime = None
             return {"current": None, "history": []}
@@ -90,14 +105,9 @@ class HistoryManager:
             "history": [h.to_dict() for h in trimmed],
         }
 
-        # Write atomically: write to temp file, then rename
-        tmp_path = self.path.with_suffix(".json.tmp")
+        # Atomic: uniquely named temp file in the same dir, fsync, os.replace
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-
-            # Atomic rename (works on both platforms for same-directory moves)
-            tmp_path.replace(self.path)
+            atomic_write_json(self.path, data)
             logger.info(f"History saved: {current.version} -> {self.path}")
 
             # Update cache to avoid re-reading the file we just wrote
@@ -114,8 +124,6 @@ class HistoryManager:
             logger.error(f"Failed to save history file: {e}")
             self._cache = None
             self._cache_mtime = None
-            if tmp_path.exists():
-                tmp_path.unlink()
             raise
 
     def get_current(self) -> Optional[HistoryEntry]:

@@ -388,9 +388,12 @@ def smart_copy(
         shutil.Error / OSError: If all copy methods fail.
     """
     if sys.platform == "win32":
-        same_server = is_same_smb_server(src, dst)
-        if same_server:
-            logger.info("Server-side copy (same SMB server): %s", src.name)
+        # Per-file messages stay at DEBUG: a 2,000-frame promotion used to
+        # emit 2,000 INFO lines into the GUI log. The promoter logs one
+        # summary line per promotion instead. (CopyFileExW only *attempts*
+        # SMB server-side copy; it's the server that decides.)
+        if is_same_smb_server(src, dst):
+            logger.debug("CopyFileExW, same SMB server (server-side copy possible): %s", src.name)
         else:
             logger.debug("Native copy (CopyFileExW): %s", src.name)
 

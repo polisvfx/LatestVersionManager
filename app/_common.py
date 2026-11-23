@@ -62,6 +62,7 @@ _STATUS_MARKERS = {
     "stale": "↻ ",
     "deliberate": "* ",
     "integrity_fail": "⚠ ",
+    "error": "✖ ",
 }
 
 _STATUS_LABELS = {
@@ -72,6 +73,7 @@ _STATUS_LABELS = {
     "integrity_fail": "Integrity Fail",
     "no_version": "Not Promoted",
     "no_target": "No Target",
+    "error": "Error",
 }
 
 # QColor instances are immutable from our perspective — share one per status.
@@ -83,6 +85,7 @@ _STATUS_COLORS = {
     "integrity_fail": QColor("#ffaa00"),
     "no_version": QColor("#8c8c8c"),
     "no_target": QColor("#555555"),
+    "error": QColor("#ff4444"),
 }
 
 _OVERRIDE_COLOR = QColor("#88aaff")

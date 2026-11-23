@@ -10,12 +10,14 @@ __all__ = [
     "generate_report", "validate_rename_template",
 ]
 
+import json
 import os
 import re
 import shutil
 import logging
 import platform
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Callable
@@ -181,6 +183,10 @@ class Promoter:
             f for f in target_dir.iterdir()
             if f.is_file() and f.suffix.lower() in valid_extensions
         )
+        # Other sources sharing this target are not "layers" of this one.
+        target_files = self._drop_foreign_files(
+            target_files, target_dir, self._compute_latest_basename(version)
+        )
         if not target_files:
             return []
         target_groups = _group_files_by_sequence(target_files)
@@ -248,6 +254,7 @@ class Promoter:
             PromotionError: If the promotion fails or is cancelled.
         """
         self._cancelled.clear()
+        started = time.monotonic()
         if user is None:
             try:
                 user = os.getlogin()
@@ -308,6 +315,17 @@ class Promoter:
             ) from e
 
         try:
+            # Fail before touching the target if the history sidecar can't be
+            # read (permissions, share dropped): promoting anyway would leave
+            # files swapped with no history record, or overwrite the real
+            # history with a single entry.
+            try:
+                self.history.load()
+            except OSError as e:
+                raise PromotionError(
+                    f"Cannot read promotion history {self.history.path}: {e}"
+                ) from e
+
             # Recover from any previous crashed promotion before touching
             # the target (restores a torn swap, discards dead staging).
             self._cleanup_orphaned_promotion_dirs(target_dir)
@@ -377,7 +395,14 @@ class Promoter:
         finally:
             lock.release()
 
-        logger.info(f"Promotion complete: {version.version_string}")
+        elapsed = time.monotonic() - started
+        size = getattr(version, "total_size_bytes", 0) or 0
+        rate = f", {_human_size(size / elapsed)}/s" if size and elapsed > 0 else ""
+        logger.info(
+            "Promotion complete: %s %s — %d file(s), %s, %s mode, %.1fs%s",
+            self.source.name, version.version_string, version.file_count,
+            _human_size(size), self.source.link_mode, elapsed, rate,
+        )
         return entry
 
     def find_unfinished_renders(self, version: VersionInfo,
@@ -425,24 +450,6 @@ class Promoter:
         except (PermissionError, OSError):
             pass
         return entries
-
-    def _target_has_media_files(self, target_dir: Path, cached_entries: list = None) -> bool:
-        """Quick check if target directory contains any media files.
-
-        When *cached_entries* is provided, uses the pre-scanned list instead
-        of hitting the filesystem again.
-        """
-        if cached_entries is not None:
-            return len(cached_entries) > 0
-        # Fallback: quick scan with early exit
-        try:
-            with os.scandir(target_dir) as it:
-                for entry in it:
-                    if entry.is_file(follow_symlinks=False) and has_media_extension(entry.name, self._valid_extensions):
-                        return True
-        except (PermissionError, OSError):
-            pass
-        return False
 
     def _filter_version_files(
         self, files: list[Path], version: VersionInfo
@@ -555,7 +562,8 @@ class Promoter:
         # Staging is complete — retire the old files (only matching
         # extensions, minus layers the user chose to keep) and activate.
         files_to_remove = self._collect_removal_set(
-            target_dir, valid_extensions, keep_layers=keep_layers
+            target_dir, valid_extensions, keep_layers=keep_layers,
+            own_stem=self._compute_latest_basename(version),
         )
         self._swap_staged_into_target(staging_dir, target_dir, files_to_remove)
 
@@ -567,9 +575,11 @@ class Promoter:
         progress_callback: Optional[Callable],
     ):
         """Copy files in parallel using a thread pool."""
-        completed = [0]  # mutable counter for closure
+        completed = 0
+        counter_lock = threading.Lock()
 
         def _copy_one(src_file: Path):
+            nonlocal completed
             if self._cancelled.is_set():
                 return
             target_name = self._remap_filename(src_file.name)
@@ -577,9 +587,11 @@ class Promoter:
             if target_file.exists() or target_file.is_symlink():
                 target_file.unlink()
             smart_copy(src_file, target_file, cancel_event=self._cancelled)
-            completed[0] += 1
+            with counter_lock:
+                completed += 1
+                done = completed
             if progress_callback:
-                progress_callback(completed[0], total, src_file.name)
+                progress_callback(done, total, src_file.name)
 
         with ThreadPoolExecutor(max_workers=_COPY_WORKERS) as executor:
             futures = [executor.submit(_copy_one, f) for f in source_files]
@@ -837,14 +849,96 @@ class Promoter:
         self._set_hidden_attribute(staging_dir)
         return staging_dir
 
+    def _foreign_target_stems(self, target_dir: Path) -> Optional[list[str]]:
+        """Output stems of *other* sources promoting into *target_dir*.
+
+        Sources sharing a target each keep their own history sidecar there
+        (see ``config._migrate_shared_history_filenames``), and every sidecar
+        records the stem its source writes (``latest_basename``). Returns
+        ``None`` when no other sidecar exists (the target belongs to this
+        source alone), otherwise the list of known foreign stems — an
+        unreadable sidecar or one written before ``latest_basename``
+        existed contributes no stem but still marks the target as shared.
+        """
+        own_name = self.history.path.name
+        shared = False
+        stems: list[str] = []
+        try:
+            with os.scandir(target_dir) as it:
+                sidecars = [
+                    e.path for e in it
+                    if e.name != own_name
+                    and e.name.startswith(".latest_history")
+                    and e.name.endswith(".json")
+                    and e.is_file()
+                ]
+        except OSError:
+            return None
+        for path in sidecars:
+            shared = True
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                stem = ((data or {}).get("current") or {}).get("latest_basename") or ""
+            except (OSError, ValueError, AttributeError):
+                stem = ""
+            if stem:
+                stems.append(stem)
+        return stems if shared else None
+
+    def _drop_foreign_files(self, files: list[Path], target_dir: Path,
+                            own_stem: str) -> list[Path]:
+        """Remove files that belong to another source sharing *target_dir*.
+
+        Each file is attributed to the source whose output stem is the
+        longest prefix of its name — so this source's layer files
+        (``hero_comp_alpha.1001.exr`` for stem ``hero_comp``) stay its own,
+        while ``hero_comp_bg.1001.exr`` goes to a source writing
+        ``hero_comp_bg``. In a shared target, files matching no known stem
+        are left alone: when in doubt, never delete. A target with no other
+        sources' sidecars is returned unchanged.
+        """
+        foreign = self._foreign_target_stems(target_dir)
+        if foreign is None:
+            return list(files)
+        own = (own_stem or "").casefold()
+        candidates = [(s.casefold(), False) for s in foreign]
+        if own:
+            candidates.append((own, True))
+        kept = []
+        dropped = 0
+        for f in files:
+            name = f.name.casefold()
+            best_len, is_own = -1, False
+            for stem, mine in candidates:
+                if not name.startswith(stem):
+                    continue
+                # Ties go to this source: an equal foreign stem is usually
+                # this source's own pre-migration sidecar (and a genuine
+                # same-stem clash is flagged by conflicts.py anyway).
+                if len(stem) > best_len or (mine and len(stem) == best_len):
+                    best_len, is_own = len(stem), mine
+            if is_own:
+                kept.append(f)
+            else:
+                dropped += 1
+        if dropped:
+            logger.info(
+                "Shared target %s: leaving %d file(s) of other sources untouched",
+                target_dir, dropped,
+            )
+        return kept
+
     def _collect_removal_set(self, target_dir: Path, valid_extensions: frozenset,
-                             keep_layers: Optional[set[str]] = None) -> list[Path]:
+                             keep_layers: Optional[set[str]] = None,
+                             own_stem: str = "") -> list[Path]:
         """Files the swap phase should retire from the target directory.
 
-        Same selection the old in-place clear used: media files matching
-        the source's extensions (minus files belonging to layers in
-        *keep_layers*) plus any symlinks. The history sidecar, the lock
-        file, and the hidden staging/backup dirs are never included.
+        Media files matching the source's extensions (minus files belonging
+        to layers in *keep_layers*) plus any symlinks. When other sources
+        share the target, their files are excluded (see
+        :meth:`_drop_foreign_files`). The history sidecar, the lock file,
+        and the hidden staging/backup dirs are never included.
         """
         try:
             entries = list(target_dir.iterdir())
@@ -869,7 +963,7 @@ class Promoter:
                     removal.append(f)
             elif f.is_symlink():
                 removal.append(f)
-        return removal
+        return self._drop_foreign_files(removal, target_dir, own_stem)
 
     def _swap_staged_into_target(self, staging_dir: Path, target_dir: Path,
                                  files_to_remove: list[Path]) -> None:
