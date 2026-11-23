@@ -30,7 +30,7 @@ from .config import _expand_group_token
 from .fast_copy import smart_copy, CopyCancelled
 from .lockfile import PromoteLock, LockHeldError, LOCK_FILENAME
 from .scanner import _group_files_by_sequence
-from .render_check import find_unfinished_renders, is_container_file
+from .render_check import find_unfinished_renders, is_container_file, is_open_for_writing
 
 logger = logging.getLogger(__name__)
 
@@ -434,6 +434,36 @@ class Promoter:
         else:
             return []
         return find_unfinished_renders(candidates, settle_seconds=settle_seconds)
+
+    def newest_frames_open_for_writing(self, version: VersionInfo,
+                                       count: int = 2) -> Optional[str]:
+        """Name of one of the last *count* frames of *version* that another
+        process still has open for writing, or None.
+
+        Catches the frame a renderer is writing right now (Windows only —
+        see :func:`render_check.is_open_for_writing`; elsewhere always None).
+        Single-file versions return None; containers are covered by
+        :meth:`find_unfinished_renders`.
+        """
+        source_path = Path(version.source_path)
+        try:
+            with os.scandir(source_path) as it:
+                files = sorted(
+                    Path(e.path) for e in it
+                    if has_media_extension(e.name, self._valid_extensions)
+                    and e.is_file()
+                )
+        except OSError:
+            return None  # not a directory (single file) or unreadable
+        if files and source_path == Path(self.source.source_dir):
+            files = self._filter_version_files(files, version)
+        for f in files[-count:]:
+            try:
+                if is_open_for_writing(f):
+                    return f.name
+            except OSError:
+                continue
+        return None
 
     def _scan_target_media(self, target_dir: Path) -> list:
         """Single os.scandir pass to collect media DirEntry objects from target.

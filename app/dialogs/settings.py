@@ -419,6 +419,33 @@ class ProjectSettingsDialog(QDialog):
         )
         adv.addRow("", self.skip_resolve_cb)
 
+        self.watch_mode_combo = QComboBox()
+        for label, value in (("Auto", "auto"), ("Native events", "native"), ("Polling", "polling")):
+            self.watch_mode_combo.addItem(label, value)
+        idx = self.watch_mode_combo.findData(getattr(config, "watch_mode", "auto"))
+        self.watch_mode_combo.setCurrentIndex(max(idx, 0))
+        self.watch_mode_combo.setToolTip(
+            "How the file watcher notices new renders:\n"
+            "  Auto          — polling for network shares on macOS/Linux (their native\n"
+            "                  events miss files written by other machines), native\n"
+            "                  events everywhere else, including SMB on Windows\n"
+            "  Native events — OS change notifications only (instant)\n"
+            "  Polling       — list each source folder every few seconds\n"
+            "A source whose folder isn't reachable, or whose native watch stops,\n"
+            "is always switched to polling."
+        )
+        adv.addRow("File Watcher:", self.watch_mode_combo)
+
+        self.watch_interval_spin = QSpinBox()
+        self.watch_interval_spin.setRange(2, 600)
+        self.watch_interval_spin.setSuffix(" s")
+        self.watch_interval_spin.setValue(int(round(getattr(config, "watch_poll_interval", 10.0))))
+        self.watch_interval_spin.setToolTip(
+            "How often polled sources are listed. Each poll is one directory\n"
+            "listing per source; shorter intervals react faster but load the share more."
+        )
+        adv.addRow("Poll Interval:", self.watch_interval_spin)
+
         top_layout.addWidget(advanced_section)
 
         # ==================================================================
@@ -1120,6 +1147,8 @@ class ProjectSettingsDialog(QDialog):
 
         # Network performance
         config.skip_resolve = self.skip_resolve_cb.isChecked()
+        config.watch_mode = self.watch_mode_combo.currentData() or "auto"
+        config.watch_poll_interval = float(self.watch_interval_spin.value())
 
         # NLE companion scripts
         config.nle_auto_sync_resolve = self.nle_auto_sync_resolve_cb.isChecked()

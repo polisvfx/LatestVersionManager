@@ -452,6 +452,14 @@ class WatchedSource:
         )
 
 
+def _positive_float(value, default: float) -> float:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f if f > 0 else default
+
+
 @dataclass
 class ProjectConfig:
     """Top-level project configuration."""
@@ -490,6 +498,10 @@ class ProjectConfig:
     # Skip Path.resolve() during discovery — avoids per-directory SMB round-trips
     # for symlink resolution. Safe for network shares which rarely have symlinks.
     skip_resolve: bool = True
+    # File watcher backend: "auto" (poll network shares on macOS/Linux,
+    # native events elsewhere), "native" or "polling"; poll interval in seconds.
+    watch_mode: str = "auto"
+    watch_poll_interval: float = 10.0
     # Source list column visibility — list of enabled optional column keys
     # Default: ["version", "status"]. Optional: "layers", "frames", "filetype", "added_on", "last_promoted"
     source_list_columns: list = field(default_factory=lambda: ["version", "status"])
@@ -587,6 +599,10 @@ class ProjectConfig:
             d["project_root"] = self.project_root
         if not self.skip_resolve:
             d["skip_resolve"] = False
+        if self.watch_mode != "auto":
+            d["watch_mode"] = self.watch_mode
+        if self.watch_poll_interval != 10.0:
+            d["watch_poll_interval"] = self.watch_poll_interval
         if self.source_list_columns != ["version", "status"]:
             d["source_list_columns"] = self.source_list_columns
         if self.nle_auto_sync_resolve:
@@ -637,6 +653,9 @@ class ProjectConfig:
             post_promote_cmd=data.get("post_promote_cmd", ""),
             project_root=data.get("project_root", ""),
             skip_resolve=data.get("skip_resolve", True),
+            watch_mode=data.get("watch_mode", "auto")
+            if data.get("watch_mode") in ("auto", "native", "polling") else "auto",
+            watch_poll_interval=_positive_float(data.get("watch_poll_interval"), 10.0),
             source_list_columns=[
                 "layers" if c == "layer_count" else c
                 for c in data.get("source_list_columns", ["version", "status"])

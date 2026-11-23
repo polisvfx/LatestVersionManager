@@ -386,12 +386,14 @@ class AutoPromoteCheckWorker(QThread):
     decided = Signal(object)  # AutoPromoteDecision
 
     def __init__(self, config: ProjectConfig, source: WatchedSource,
-                 waiting_on_render: bool, settle_seconds: float, parent=None):
+                 waiting_on_render: bool, settle_seconds: float,
+                 previous_settle=None, parent=None):
         super().__init__(parent)
         self._config = config
         self._source = source
         self._waiting_on_render = waiting_on_render
         self._settle_seconds = settle_seconds
+        self._previous_settle = previous_settle  # SettleState from the last check
 
     def run(self):
         from src.lvm.auto_promote import AutoPromoteDecision, evaluate_auto_promote, ERROR
@@ -401,7 +403,8 @@ class AutoPromoteCheckWorker(QThread):
                 nle_rename_options=self._config.nle_rename_options(),
             )
             scanner = VersionScanner(self._source, self._config.task_tokens)
-            decision = evaluate_auto_promote(promoter, scanner, self._settle_seconds)
+            decision = evaluate_auto_promote(promoter, scanner, self._settle_seconds,
+                                             previous=self._previous_settle)
         except Exception as e:  # e.g. PromotionError: latest target removed meanwhile
             decision = AutoPromoteDecision(self._source.name, ERROR, reason=f"check failed: {e}",
                                            log_level=logging.WARNING)

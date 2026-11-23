@@ -210,19 +210,30 @@ class TestAutoPromoteOffGuiThread(_MainWindowTestBase):
             patch.object(type(self.win), "_start_promotion",
                          lambda win, promoter, version, keep_layers=None:
                          self.started.append(version.version_string)),
+            # The first check of a new version waits for a second look.
+            patch("app.main_window.RENDER_WAIT_RETRY_MS", 30),
         ]
         for p in extra:
             p.start()
         self._patches.extend(extra)
 
     def _drain(self, timeout=10.0):
+        """Run the event loop until no check is running or pending a retry."""
         import time as _time
         deadline = _time.monotonic() + timeout
-        while self.win._auto_check_workers and _time.monotonic() < deadline:
+        idle_since = None
+        while _time.monotonic() < deadline:
             QApplication.processEvents()
+            busy = self.win._auto_check_workers or self.win._render_wait_sources
+            if busy:
+                idle_since = None
+            elif idle_since is None:
+                idle_since = _time.monotonic()
+            elif _time.monotonic() - idle_since > 0.2:
+                break
             _time.sleep(0.01)
-        QApplication.processEvents()
         self.assertEqual(self.win._auto_check_workers, {}, "check worker did not finish")
+        self.assertEqual(self.win._render_wait_sources, set(), "retry still pending")
 
     def test_checks_run_on_worker_thread(self):
         import threading
@@ -240,14 +251,117 @@ class TestAutoPromoteOffGuiThread(_MainWindowTestBase):
         self.win._try_auto_promote("shot")
         self.win._try_auto_promote("shot")
         self._drain()
-        self._drain()  # the queued re-check
         self.assertEqual(self.started, ["v002"], "expected exactly one promotion")
+
+    def test_render_inside_version_folder_promoted_when_complete(self):
+        """Folder-per-version: one watcher event when v002/ appears, frames
+        keep landing inside it afterwards. The check keeps re-trying and
+        promotes once the range is complete."""
+        import time as _time
+        last = self.tmp / "renders" / "shot_v002" / "shot_v002.1003.exr"
+        last.unlink()  # v002 is mid-render: 1001-1002 of 1001-1003
+        self.win._try_auto_promote("shot")
+        deadline = _time.monotonic() + 0.5
+        while _time.monotonic() < deadline:
+            QApplication.processEvents()
+            _time.sleep(0.01)
+        self.assertEqual(self.started, [], "partial render was promoted")
+        self.assertTrue(self.win._render_wait_sources or self.win._auto_check_workers,
+                        "stopped re-checking a partial render")
+        last.write_bytes(b"x")  # render finishes, no watcher event
+        self._drain()
+        self.assertEqual(self.started, ["v002"])
 
     def test_switching_auto_promote_off_drops_pending_decision(self):
         self.win._try_auto_promote("shot")
         self.win.auto_promote_cb.setChecked(False)
         self._drain()
         self.assertEqual(self.started, [])
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestWatcherEvents(unittest.TestCase):
+
+    def test_created_and_moved_events_reach_callback(self):
+        from watchdog.events import (
+            DirCreatedEvent, DirMovedEvent, FileModifiedEvent, FileMovedEvent,
+        )
+        from src.lvm.models import WatchedSource
+        from src.lvm.watcher import _FolderEventHandler
+        seen = []
+        handler = _FolderEventHandler(seen.append, WatchedSource(name="S", source_dir="/r"))
+        handler.dispatch(DirCreatedEvent("/r/shot_v002"))
+        handler.dispatch(FileMovedEvent("/r/shot_v002.mov.tmp", "/r/shot_v002.mov"))
+        handler.dispatch(DirMovedEvent("/r/.tmp_v003", "/r/shot_v003"))
+        handler.dispatch(FileModifiedEvent("/r/shot_v002.mov"))  # ignored
+        self.assertEqual(seen, ["S", "S", "S"])
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestSourceWatcherBackends(unittest.TestCase):
+
+    def setUp(self):
+        _app()
+        from src.lvm.models import WatchedSource
+        from src.lvm.watcher import SourceWatcher
+        self.tmp = Path(tempfile.mkdtemp(prefix="lvm_watch_"))
+        (self.tmp / "renders").mkdir()
+        self.src = WatchedSource(name="shot", source_dir=str(self.tmp / "renders"))
+        self.watcher = SourceWatcher()
+        self.watcher._debounce_timer.setInterval(10)
+        self.changed = []
+        self.status = []
+        self.watcher.source_changed.connect(self.changed.append)
+        self.watcher.watch_status_changed.connect(self.status.append)
+
+    def tearDown(self):
+        self.watcher.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _spin_until(self, cond, timeout=5.0):
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while not cond() and _time.monotonic() < deadline:
+            QApplication.processEvents()
+            _time.sleep(0.01)
+        QApplication.processEvents()
+        return cond()
+
+    def test_polling_mode_reports_new_version_folder(self):
+        import time as _time
+        self.watcher.start([self.src], mode="polling", poll_interval=0.05)
+        self.assertEqual(self.watcher.backend_for("shot"), "polling")
+        self.assertTrue(self.watcher.is_running)
+        self.assertIn("by polling", self.status[-1])
+        _time.sleep(0.15)  # first poll records the current state
+        (self.tmp / "renders" / "shot_v002").mkdir()
+        self.assertTrue(self._spin_until(lambda: self.changed), "no source_changed")
+        self.assertEqual(self.changed, ["shot"])
+
+    def test_missing_folder_falls_back_to_polling(self):
+        from src.lvm.models import WatchedSource
+        missing = WatchedSource(name="later", source_dir=str(self.tmp / "not_mounted"))
+        self.watcher.start([self.src, missing], mode="native", poll_interval=0.05)
+        self.assertEqual(self.watcher.backend_for("shot"), "native")
+        self.assertEqual(self.watcher.backend_for("later"), "polling")
+        (self.tmp / "not_mounted").mkdir()  # share comes online
+        self.assertTrue(self._spin_until(lambda: "later" in self.changed))
+
+    def test_dead_native_watch_switches_to_polling_with_catch_up(self):
+        self.watcher.start([self.src], mode="native", poll_interval=0.05)
+        self.assertEqual(self.watcher.backend_for("shot"), "native")
+        # Simulate the emitter thread dying (share dropped): its watch is gone.
+        self.watcher._observer.unschedule(self.watcher._native_watches["shot"])
+        self.watcher._check_health()
+        self.assertEqual(self.watcher.backend_for("shot"), "polling")
+        self.assertTrue(self.watcher.is_running)
+        self.assertTrue(self._spin_until(lambda: self.changed), "no catch-up rescan")
+
+    def test_stop_ends_both_backends(self):
+        self.watcher.start([self.src], mode="polling", poll_interval=0.05)
+        self.watcher.stop()
+        self.assertFalse(self.watcher.is_running)
+        self.assertEqual(self.status[-1], "Watcher stopped")
 
 
 if __name__ == "__main__":
