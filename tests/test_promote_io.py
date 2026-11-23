@@ -102,5 +102,135 @@ class TestPerFileCalls(_Base):
                          ["shot.1001.exr", "shot.1002.exr", "shot.1003.exr"])
 
 
+class TestSwap(_Base):
+    """The swap phase (plan item #13)."""
+
+    def _expected_names(self, frames):
+        return {f"shot.{f}.exr" for f in frames}
+
+    def _observe_swap(self, promoter, version, frames):
+        """Promote *version*, recording after every rename into or out of
+        the target how many expected frame names were missing."""
+        import lvm.promoter as pm
+        expected = self._expected_names(frames)
+        real_replace = os.replace
+        missing_seen = []
+        threads = set()
+        lock = threading.Lock()
+
+        def watching_replace(src, dst, *a, **k):
+            result = real_replace(src, dst, *a, **k)
+            parent = Path(dst).parent
+            if parent in (self.target, self.target / BACKUP_DIRNAME):
+                present = {p.name for p in self.target.iterdir()}
+                with lock:
+                    missing_seen.append(len(expected - present))
+                    threads.add(threading.get_ident())
+            return result
+
+        with patch.object(pm.os, "replace", watching_replace):
+            promoter.promote(version, user="t")
+        return missing_seen, threads
+
+    def test_each_frame_missing_for_at_most_one_rename(self):
+        """The old swap moved *all* old frames out before placing any new
+        one, so the whole sequence was missing for the duration of N
+        renames. Now each name is swapped as a unit."""
+        import lvm.promoter as pm
+        frames = range(1001, 1021)
+        promoter = Promoter(self._source())
+        promoter.promote(self._render("v001", frames), user="t")
+        with patch.object(pm, "_SWAP_PARALLEL_MIN", 10**6):   # sequential, deterministic
+            missing, _ = self._observe_swap(promoter, self._render("v002", frames), frames)
+        self.assertTrue(missing)
+        self.assertLessEqual(max(missing), 1, f"up to {max(missing)} frames missing at once")
+        self.assertEqual(self._target_files(), sorted(self._expected_names(frames)))
+
+    def test_large_swaps_run_in_parallel(self):
+        frames = range(1001, 1041)
+        promoter = Promoter(self._source())
+        promoter.promote(self._render("v001", frames), user="t")
+        missing, threads = self._observe_swap(promoter, self._render("v002", frames), frames)
+        self.assertGreater(len(threads), 1, "swap renames ran on a single thread")
+        self.assertLessEqual(max(missing), 8, "more frames missing than rename workers")
+        for name in self._target_files():
+            self.assertIn(b"v002", (self.target / name).read_bytes())
+
+    def test_old_frames_outside_new_range_are_retired(self):
+        promoter = Promoter(self._source())
+        promoter.promote(self._render("v001", range(1001, 1011)), user="t")
+        promoter.promote(self._render("v002", range(1001, 1006)), user="t")
+        self.assertEqual(self._target_files(), sorted(self._expected_names(range(1001, 1006))))
+        self.assertFalse((self.target / BACKUP_DIRNAME).exists())
+        self.assertFalse((self.target / STAGING_DIRNAME).exists())
+
+    def test_parallel_failure_rolls_back_completely(self):
+        import lvm.promoter as pm
+        frames = range(1001, 1041)
+        promoter = Promoter(self._source())
+        promoter.promote(self._render("v001", frames), user="t")
+        before = self._target_files()
+        real_replace = os.replace
+        calls = {"n": 0}
+        lock = threading.Lock()
+
+        def flaky_replace(src, dst, *a, **k):
+            with lock:
+                calls["n"] += 1
+                n = calls["n"]
+            if n == 30:
+                raise OSError("simulated rename failure")
+            return real_replace(src, dst, *a, **k)
+
+        with patch.object(pm.os, "replace", flaky_replace):
+            with self.assertRaises(PromotionError) as cm:
+                promoter.promote(self._render("v002", frames), user="t")
+        self.assertIn("previous version restored", str(cm.exception))
+        self.assertEqual(self._target_files(), before)
+        for name in before:
+            self.assertIn(b"v001", (self.target / name).read_bytes())
+        self.assertFalse((self.target / BACKUP_DIRNAME).exists())
+        self.assertFalse((self.target / STAGING_DIRNAME).exists())
+
+    def test_overwritten_kept_layer_is_restored_on_rollback(self):
+        """A staged file can replace an existing file that isn't in the
+        removal set (here: a kept layer the new version also provides).
+        The old swap overwrote it without a backup, so a rollback lost it."""
+        import lvm.promoter as pm
+        frames = range(1001, 1004)
+        promoter = Promoter(self._source())
+        v1 = self._render("v001", frames)
+        for f in frames:
+            (Path(v1.source_path) / f"shot_alpha_v001.{f}.exr").write_bytes(b"alpha-v001")
+        promoter.promote(v1, user="t")
+        v2 = self._render("v002", frames)
+        for f in frames:
+            (Path(v2.source_path) / f"shot_alpha_v002.{f}.exr").write_bytes(b"alpha-v002")
+
+        real_replace = os.replace
+
+        def fail_last_placement(src, dst, *a, **k):
+            if Path(dst).name == "shot_alpha.1003.exr" and Path(src).parent.name == STAGING_DIRNAME:
+                raise OSError("simulated rename failure")
+            return real_replace(src, dst, *a, **k)
+
+        with patch.object(pm, "_SWAP_PARALLEL_MIN", 10**6), \
+                patch.object(pm.os, "replace", fail_last_placement):
+            with self.assertRaises(PromotionError):
+                promoter.promote(v2, user="t", keep_layers={"shot_alpha."})
+        for f in frames:
+            self.assertEqual((self.target / f"shot_alpha.{f}.exr").read_bytes(), b"alpha-v001")
+            self.assertIn(b"v001", (self.target / f"shot.{f}.exr").read_bytes())
+
+    def test_swap_time_is_logged(self):
+        promoter = Promoter(self._source())
+        with self.assertLogs("lvm.promoter", level="INFO") as logs:
+            promoter.promote(self._render("v001", range(1001, 1006)), user="t")
+        self.assertIsNotNone(promoter.last_swap_seconds)
+        text = "\n".join(logs.output)
+        self.assertIn("Swapped 5 file(s)", text)
+        self.assertIn(", swap ", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -43,6 +43,12 @@ _FRAME_EXT_RE = re.compile(r"([._])(\d+)\.(\w+)$")
 # Number of threads for parallel file copy operations — adapts to CPU count
 _COPY_WORKERS = min(os.cpu_count() or 4, 8)
 
+# Renames during the swap run in parallel: over SMB each rename is a network
+# round-trip, so a 2,000-frame swap done one rename at a time kept the
+# target incomplete for tens of seconds. Small swaps stay sequential.
+_SWAP_WORKERS = 8
+_SWAP_PARALLEL_MIN = 5
+
 # Hidden working directories used by staged (transactional) promotion.
 # New files are fully written into the staging dir, then swapped into the
 # target with same-volume renames; old files are parked in the backup dir
@@ -146,6 +152,8 @@ class Promoter:
         # Cache derived tokens for file renaming
         self._rename_tokens = None
         self._cancelled = threading.Event()
+        # Duration of the last swap phase, for the promotion summary log line.
+        self.last_swap_seconds: Optional[float] = None
 
         # Warn about unknown tokens in file rename template
         unknown = validate_rename_template(watched_source.file_rename_template)
@@ -282,6 +290,7 @@ class Promoter:
             PromotionError: If the promotion fails or is cancelled.
         """
         self._cancelled.clear()
+        self.last_swap_seconds = None
         started = time.monotonic()
         if user is None:
             try:
@@ -426,10 +435,12 @@ class Promoter:
         elapsed = time.monotonic() - started
         size = getattr(version, "total_size_bytes", 0) or 0
         rate = f", {_human_size(size / elapsed)}/s" if size and elapsed > 0 else ""
+        swap = (f", swap {self.last_swap_seconds:.2f}s"
+                if self.last_swap_seconds is not None else "")
         logger.info(
-            "Promotion complete: %s %s — %d file(s), %s, %s mode, %.1fs%s",
+            "Promotion complete: %s %s — %d file(s), %s, %s mode, %.1fs%s%s",
             self.source.name, version.version_string, version.file_count,
-            _human_size(size), self.source.link_mode, elapsed, rate,
+            _human_size(size), self.source.link_mode, elapsed, rate, swap,
         )
         return entry
 
@@ -1024,50 +1035,113 @@ class Promoter:
                 removal.append(Path(e.path))
         return self._drop_foreign_files(removal, target_dir, own_stem)
 
+    @staticmethod
+    def _run_renames(fn, names: list[str]) -> None:
+        """Call *fn(name)* for every name, in parallel for larger sets.
+
+        After the first failure no further names are started (renames
+        already in flight finish), then the first exception is re-raised so
+        the caller can roll back.
+        """
+        if len(names) < _SWAP_PARALLEL_MIN:
+            for name in names:
+                fn(name)
+            return
+        errors: list[BaseException] = []
+        stop = threading.Event()
+
+        def run(name):
+            if stop.is_set():
+                return
+            try:
+                fn(name)
+            except BaseException as e:  # noqa: BLE001 - re-raised below
+                stop.set()
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=min(_SWAP_WORKERS, len(names))) as executor:
+            list(executor.map(run, names))
+        if errors:
+            raise errors[0]
+
     def _swap_staged_into_target(self, staging_dir: Path, target_dir: Path,
                                  files_to_remove: list[Path]) -> None:
-        """Activate a fully-staged version: retire the old files into a
-        backup dir, rename the staged files into place, drop the backup.
+        """Activate a fully-staged version, renaming each staged file into
+        the target and parking whatever it replaces in a backup dir.
 
-        Every step is a same-volume rename, so the window where the target
-        is inconsistent shrinks from the whole copy duration to
-        milliseconds. On failure the backup is restored; even on a double
-        fault (swap fails AND restore fails) the old files survive in the
-        backup dir, which the next promotion restores via
+        Every step is a same-volume rename. Each name is swapped as one unit
+        — old file to the backup, new file into place — so a frame is
+        missing for the duration of one rename, not for the whole swap, and
+        the renames run in parallel (:data:`_SWAP_WORKERS`). Old files that
+        have no replacement (e.g. frames outside the new range) are retired
+        after all new files are in place. While the swap runs the target
+        holds a mix of old and new frames; how long that lasts is logged.
+
+        Any existing file a staged file would overwrite is backed up, not
+        only those in *files_to_remove*, so a rollback restores everything.
+        On failure the placed files are removed and the backup is restored;
+        even on a double fault (swap fails AND restore fails) the old files
+        survive in the backup dir, which the next promotion restores via
         :meth:`_cleanup_orphaned_promotion_dirs`.
         """
+        started = time.monotonic()
         backup_dir = target_dir / BACKUP_DIRNAME
-        moved: list[tuple[Path, Path]] = []   # (original, backup) pairs
-        placed: list[Path] = []
         try:
-            if files_to_remove:
+            with os.scandir(staging_dir) as it:
+                staged = sorted(e.name for e in it)
+            with os.scandir(target_dir) as it:
+                existing = {e.name for e in it} - {STAGING_DIRNAME, BACKUP_DIRNAME}
+        except OSError as e:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
+
+        staged_set = set(staged)
+        retire = {f.name for f in files_to_remove}
+        backup_names = retire | (existing & staged_set)
+        leftovers = sorted(retire - staged_set)  # old files with no replacement
+
+        lock = threading.Lock()
+        moved: list[str] = []    # names parked in backup_dir
+        placed: list[str] = []   # staged names renamed into target_dir
+
+        def swap_one(name: str) -> None:
+            if name in backup_names:
+                os.replace(target_dir / name, backup_dir / name)
+                with lock:
+                    moved.append(name)
+            os.replace(staging_dir / name, target_dir / name)
+            with lock:
+                placed.append(name)
+
+        def retire_one(name: str) -> None:
+            os.replace(target_dir / name, backup_dir / name)
+            with lock:
+                moved.append(name)
+
+        try:
+            if backup_names:
                 if backup_dir.exists():
                     shutil.rmtree(backup_dir, ignore_errors=True)
                 backup_dir.mkdir(parents=True, exist_ok=True)
                 self._set_hidden_attribute(backup_dir)
-                for f in files_to_remove:
-                    dest = backup_dir / f.name
-                    os.replace(f, dest)
-                    moved.append((f, dest))
-            for entry in sorted(staging_dir.iterdir()):
-                dest = target_dir / entry.name
-                os.replace(entry, dest)
-                placed.append(dest)
-        except OSError as e:
+            self._run_renames(swap_one, staged)
+            self._run_renames(retire_one, leftovers)
+        except Exception as e:
             # Roll back: drop whatever was already placed, then return the
             # old files from the backup dir.
-            for p in placed:
+            for name in placed:
                 try:
-                    p.unlink(missing_ok=True)
+                    (target_dir / name).unlink(missing_ok=True)
                 except OSError:
                     pass
             restore_failed = False
-            for orig, bak in moved:
+            for name in moved:
                 try:
-                    os.replace(bak, orig)
+                    os.replace(backup_dir / name, target_dir / name)
                 except OSError as r:
                     restore_failed = True
-                    logger.critical("Could not restore %s from backup: %s", orig, r)
+                    logger.critical("Could not restore %s from backup: %s",
+                                    target_dir / name, r)
             shutil.rmtree(staging_dir, ignore_errors=True)
             if restore_failed:
                 raise PromotionError(
@@ -1080,8 +1154,14 @@ class Promoter:
                 f"Failed to activate new version; previous version restored: {e}"
             ) from e
 
+        self.last_swap_seconds = time.monotonic() - started
+        logger.info(
+            "Swapped %d file(s) into %s in %.2fs (%d replaced, %d retired)",
+            len(staged), target_dir, self.last_swap_seconds,
+            len(backup_names & staged_set), len(leftovers),
+        )
         shutil.rmtree(staging_dir, ignore_errors=True)
-        if files_to_remove:
+        if backup_names:
             try:
                 shutil.rmtree(backup_dir)
             except OSError as e:
