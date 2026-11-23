@@ -79,6 +79,10 @@ class MainWindow(QMainWindow):
         # sources to re-check once theirs finishes (value: was waiting on a render)
         self._auto_check_workers: dict[str, AutoPromoteCheckWorker] = {}
         self._auto_check_rerun: dict[str, bool] = {}
+        # What the last auto-promote check saw of each source's candidate
+        # version (SettleState); a version is promoted only once two checks
+        # in a row saw the same files.
+        self._auto_settle: dict = {}
         self._target_conflicts: dict = {}
         self._source_status: dict = {}  # filled by StatusWorker
         self._deferred_refresh_results: dict = None  # scan results deferred due to promotion in progress
@@ -3843,6 +3847,7 @@ class MainWindow(QMainWindow):
     def _toggle_watcher(self):
         if self.watcher.is_running:
             self.watcher.stop()
+            self._auto_settle.clear()
             self.watch_toggle.setText("Start Watching")
             self.watch_toggle.setChecked(False)
             self.auto_promote_cb.setEnabled(False)
@@ -3891,10 +3896,13 @@ class MainWindow(QMainWindow):
         - No promotion is already in progress
         - The source has a previous promotion (history entry)
         - A newer highest version exists
+        - That version is complete: unchanged since the previous check, no
+          frame gaps, not a partial range of the last promoted version, last
+          frames not open for writing, container files (MOV/MXF/...)
+          finalised. While it isn't, it re-checks every RENDER_WAIT_RETRY_MS
+          — the watcher doesn't see frames landing inside a version folder
         - The new version's frame range matches the last promoted version
         - There are no obsolete layers in the target
-        - Its container files (MOV/MXF/...) have finished rendering; if not,
-          it re-checks every RENDER_WAIT_RETRY_MS until they have
         - The source's link mode is available
 
         At most one check runs per source; a request while one is running
@@ -3926,7 +3934,8 @@ class MainWindow(QMainWindow):
             return
 
         worker = AutoPromoteCheckWorker(
-            self.config, source, waiting_on_render, RENDER_SETTLE_SECONDS, parent=self,
+            self.config, source, waiting_on_render, RENDER_SETTLE_SECONDS,
+            previous_settle=self._auto_settle.get(source_name), parent=self,
         )
         self._auto_check_workers[source_name] = worker
         worker.decided.connect(self._on_auto_promote_decided)
@@ -3949,6 +3958,8 @@ class MainWindow(QMainWindow):
         name = decision.source_name
         if decision.versions is not None:
             self._versions_cache[name] = decision.versions
+        if decision.settle is not None:
+            self._auto_settle[name] = decision.settle
 
         # The world may have moved on while the check ran.
         if name in self._auto_check_rerun or not self._auto_promote_enabled():
@@ -3973,14 +3984,17 @@ class MainWindow(QMainWindow):
 
         version = decision.version
         if decision.action == ap.WAIT_RENDER:
+            detail = decision.reason
+            if decision.waiting_file and decision.waiting_file not in detail:
+                detail = f"{decision.waiting_file}: {detail}"
             if not decision.waiting_on_render:
                 logger.info(
                     f"Auto-promote of {name} {version.version_string} "
-                    f"waiting for render to finish: {decision.waiting_file} ({decision.reason})"
+                    f"waiting for render to finish ({detail})"
                 )
             self.statusBar().showMessage(
                 f"Auto-promote waiting for {name} {version.version_string} "
-                f"to finish rendering ({decision.waiting_file})"
+                f"to finish rendering ({detail})"
             )
             self._schedule_render_wait_retry(name)
             return
@@ -3989,6 +4003,7 @@ class MainWindow(QMainWindow):
             promoter = self._promoters.get(name)
             if promoter is None:
                 return  # latest target removed while the check ran
+            self._auto_settle.pop(name, None)
             logger.info(f"Auto-promoting {name}: {version.version_string}")
             self.statusBar().showMessage(
                 f"Auto-promoting {name} to {version.version_string}..."

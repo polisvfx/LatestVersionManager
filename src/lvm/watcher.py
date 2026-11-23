@@ -12,7 +12,10 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, QTimer, Slot, QMetaObject, Qt, Q_ARG
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, DirCreatedEvent, FileCreatedEvent
+from watchdog.events import (
+    FileSystemEventHandler, DirCreatedEvent, FileCreatedEvent,
+    DirMovedEvent, FileMovedEvent,
+)
 
 from .models import WatchedSource
 
@@ -29,6 +32,13 @@ class _FolderEventHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if isinstance(event, (DirCreatedEvent, FileCreatedEvent)):
+            self.callback(self.source.name)
+
+    def on_moved(self, event):
+        # Renders that write to a temp name and rename into place (or a
+        # version folder moved in from elsewhere on the share) arrive as a
+        # move, not a create.
+        if isinstance(event, (DirMovedEvent, FileMovedEvent)):
             self.callback(self.source.name)
 
 
