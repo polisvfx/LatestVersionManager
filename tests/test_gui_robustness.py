@@ -280,6 +280,126 @@ class TestAutoPromoteOffGuiThread(_MainWindowTestBase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestIncrementalRefreshUI(_MainWindowTestBase):
+    """Refresh queueing and in-place source-list updates (plan item #10)."""
+
+    def setUp(self):
+        super().setUp()
+        from src.lvm.models import ProjectConfig, VersionInfo, WatchedSource
+        from src.lvm.scanner import VersionScanner
+        self.sources = []
+        for name in ("alpha", "beta"):
+            d = self.tmp / name
+            d.mkdir()
+            self.sources.append(WatchedSource(name=name, source_dir=str(d)))
+        self.win.config = ProjectConfig(project_name="P", watched_sources=self.sources)
+        for s in self.sources:
+            self.win._scanners[s.name] = VersionScanner(s)
+            self.win._versions_cache[s.name] = [
+                VersionInfo("v001", 1, str(self.tmp / s.name / "v001"), file_count=1),
+                VersionInfo("v002", 2, str(self.tmp / s.name / "v002"), file_count=1),
+            ]
+        self.win._source_status = {s.name: {"status": "no_version"} for s in self.sources}
+        self.win._populate_source_list()
+        self.win._select_source_by_name("alpha")
+
+    def _item(self, name):
+        for i in range(self.win.source_list.topLevelItemCount()):
+            item = self.win.source_list.topLevelItem(i)
+            if item.data(0, 0x0100) == name:  # Qt.UserRole
+                return item
+        return None
+
+    def _status_col(self):
+        return self.win._source_col_keys.index("status")
+
+    def test_busy_refresh_is_queued_not_dropped(self):
+        self.win._scan_worker = object()          # a scan is running
+        self.win._refresh_sources_by_name(["beta"], background=True)
+        self.win._refresh_sources_by_name(["alpha"], background=True)
+        self.assertEqual(self.win._pending_refresh_names, {"alpha", "beta"})
+        self.assertFalse(self.win._rescan_after_cache)
+
+        calls = []
+        with patch.object(type(self.win), "_refresh_selected_sources",
+                          lambda win, idx, select_source=None, background=False:
+                          calls.append((sorted(idx), background))):
+            self.win._scan_worker = None          # the scan finished
+            self.win._check_reload_pending()
+        self.assertEqual(calls, [([0, 1], True)])
+        self.assertEqual(self.win._pending_refresh_names, set())
+
+    def test_user_request_in_queue_makes_it_a_user_refresh(self):
+        self.win._scan_worker = object()
+        self.win._refresh_sources_by_name(["beta"], background=True)
+        self.win._refresh_sources_by_name(["alpha"])  # user-initiated
+        calls = []
+        with patch.object(type(self.win), "_refresh_selected_sources",
+                          lambda win, idx, select_source=None, background=False:
+                          calls.append(background)):
+            self.win._scan_worker = None
+            self.win._check_reload_pending()
+        self.assertEqual(calls, [False])
+
+    def test_partial_refresh_updates_rows_in_place(self):
+        alpha_item, beta_item = self._item("alpha"), self._item("beta")
+        version_item = self.win.version_tree.topLevelItem(1)   # v001 (newest first)
+        self.win.version_tree.setCurrentItem(version_item)
+        selected_path = version_item.data(0, 0x0100).source_path
+
+        self.win._on_partial_status_complete(
+            {"beta": {"status": "error", "integrity": {"valid": False, "message": "x"}},
+             "alpha": {"status": "no_version"}},
+            {}, {}, {},
+        )
+
+        self.assertIs(self._item("alpha"), alpha_item, "row was rebuilt")
+        self.assertIs(self._item("beta"), beta_item, "row was rebuilt")
+        self.assertEqual(beta_item.text(self._status_col()), "Error")
+        self.assertIs(self.win.source_list.currentItem(), alpha_item)
+        current = self.win.version_tree.currentItem()
+        self.assertIsNotNone(current, "version selection lost")
+        self.assertEqual(current.data(0, 0x0100).source_path, selected_path)
+
+    def test_filter_membership_change_rebuilds_list(self):
+        self.win.source_filter.setCurrentText("Newer Available")
+        self.win._apply_source_filter()
+        self.assertIsNone(self._item("beta"))
+        self.win._on_partial_status_complete({"beta": {"status": "newer"}}, {}, {}, {})
+        self.assertIsNotNone(self._item("beta"), "newly matching source not shown")
+
+    def test_background_refresh_keeps_buttons_enabled(self):
+        import time as _time
+        self.win.btn_promote.setEnabled(True)
+        self.win.btn_refresh.setEnabled(True)
+        self.win._refresh_selected_sources([1], background=True)
+        try:
+            self.assertTrue(self.win.btn_promote.isEnabled())
+            self.assertTrue(self.win.btn_refresh.isEnabled())
+            self.assertEqual(set(self.win._scan_worker.previous_cache), {"beta"})
+        finally:
+            deadline = _time.monotonic() + 10
+            while ((self.win._scan_worker or self.win._status_worker)
+                   and _time.monotonic() < deadline):
+                QApplication.processEvents()
+                _time.sleep(0.01)
+
+    def test_user_refresh_is_full_and_disables_buttons(self):
+        import time as _time
+        self.win.btn_promote.setEnabled(True)
+        self.win._refresh_selected_sources([1])
+        try:
+            self.assertFalse(self.win.btn_promote.isEnabled())
+            self.assertEqual(self.win._scan_worker.previous_cache, {})
+        finally:
+            deadline = _time.monotonic() + 10
+            while ((self.win._scan_worker or self.win._status_worker)
+                   and _time.monotonic() < deadline):
+                QApplication.processEvents()
+                _time.sleep(0.01)
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
 class TestWatcherEvents(unittest.TestCase):
 
     def test_created_and_moved_events_reach_callback(self):
