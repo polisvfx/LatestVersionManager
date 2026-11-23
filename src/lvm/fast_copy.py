@@ -316,13 +316,12 @@ def _linux_copy_file_range(src: Path, dst: Path) -> bool:
     if not hasattr(os, "copy_file_range"):
         return False
     try:
-        src_size = src.stat().st_size
-        if src_size == 0:
-            # copy_file_range doesn't handle empty files — just create it
-            dst.touch()
-            return True
         chunk = 128 * 1024 * 1024  # 128 MB
         with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+            # Size from the open handle: a separate src.stat() is one more
+            # path lookup (a network round-trip on NFS/CIFS) per frame.
+            # An empty source leaves the freshly created, empty dst.
+            src_size = os.fstat(fsrc.fileno()).st_size
             copied = 0
             while copied < src_size:
                 written = os.copy_file_range(

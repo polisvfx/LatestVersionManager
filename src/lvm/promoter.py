@@ -43,6 +43,12 @@ _FRAME_EXT_RE = re.compile(r"([._])(\d+)\.(\w+)$")
 # Number of threads for parallel file copy operations — adapts to CPU count
 _COPY_WORKERS = min(os.cpu_count() or 4, 8)
 
+# Renames during the swap run in parallel: over SMB each rename is a network
+# round-trip, so a 2,000-frame swap done one rename at a time kept the
+# target incomplete for tens of seconds. Small swaps stay sequential.
+_SWAP_WORKERS = 8
+_SWAP_PARALLEL_MIN = 5
+
 # Hidden working directories used by staged (transactional) promotion.
 # New files are fully written into the staging dir, then swapped into the
 # target with same-volume renames; old files are parked in the backup dir
@@ -146,6 +152,8 @@ class Promoter:
         # Cache derived tokens for file renaming
         self._rename_tokens = None
         self._cancelled = threading.Event()
+        # Duration of the last swap phase, for the promotion summary log line.
+        self.last_swap_seconds: Optional[float] = None
 
         # Warn about unknown tokens in file rename template
         unknown = validate_rename_template(watched_source.file_rename_template)
@@ -158,6 +166,40 @@ class Promoter:
     def cancel(self):
         """Signal that the current promotion should be aborted at the next checkpoint."""
         self._cancelled.set()
+
+    def _media_entries(self, directory) -> list:
+        """Media files in *directory* as ``os.DirEntry``, sorted by name.
+
+        One ``os.scandir`` pass. ``Path.iterdir()`` + ``is_file()`` costs a
+        stat per entry — one SMB round-trip per frame — while DirEntry
+        carries the file type (and on Windows the stat data) from the
+        listing itself. Raises OSError like ``iterdir`` would.
+        """
+        with os.scandir(directory) as it:
+            entries = [
+                e for e in it
+                if has_media_extension(e.name, self._valid_extensions) and e.is_file()
+            ]
+        entries.sort(key=lambda e: e.name)
+        return entries
+
+    def _list_media(self, directory) -> list[Path]:
+        """Media files in *directory* as sorted Paths (see :meth:`_media_entries`)."""
+        return [Path(e.path) for e in self._media_entries(directory)]
+
+    @staticmethod
+    def _max_entry_mtime(entries) -> Optional[float]:
+        """Newest mtime among DirEntries, using their cached stat where the
+        platform provides one."""
+        newest = None
+        for e in entries:
+            try:
+                mt = e.stat().st_mtime
+            except OSError:
+                continue
+            if newest is None or mt > newest:
+                newest = mt
+        return newest
 
     def detect_obsolete_layers(self, version: VersionInfo) -> list[dict]:
         """Return layers present in the target but absent from the new version.
@@ -179,10 +221,7 @@ class Promoter:
         valid_extensions = self._valid_extensions
 
         # Layers currently in the target directory
-        target_files = sorted(
-            f for f in target_dir.iterdir()
-            if f.is_file() and f.suffix.lower() in valid_extensions
-        )
+        target_files = self._list_media(target_dir)
         # Other sources sharing this target are not "layers" of this one.
         target_files = self._drop_foreign_files(
             target_files, target_dir, self._compute_latest_basename(version)
@@ -195,10 +234,7 @@ class Promoter:
         # Layers in the incoming version
         source_path = Path(version.source_path)
         if source_path.is_dir():
-            source_files = sorted(
-                f for f in source_path.iterdir()
-                if f.is_file() and f.suffix.lower() in valid_extensions
-            )
+            source_files = self._list_media(source_path)
             if source_path == Path(self.source.source_dir):
                 source_files = self._filter_version_files(source_files, version)
         else:
@@ -254,6 +290,7 @@ class Promoter:
             PromotionError: If the promotion fails or is cancelled.
         """
         self._cancelled.clear()
+        self.last_swap_seconds = None
         started = time.monotonic()
         if user is None:
             try:
@@ -369,11 +406,11 @@ class Promoter:
             # otherwise sibling sources sharing the same latest_target would
             # bleed their mtimes into our record and cause spurious "modified
             # since promotion" warnings on the next verify().
-            own_target_files = [
-                Path(e.path)
-                for e in self._filter_to_own_target_files(self._scan_target_media(target_dir))
-            ]
-            entry.target_mtime = self._get_max_mtime(target_dir, files=own_target_files or None)
+            own_entries = self._filter_to_own_target_files(self._scan_target_media(target_dir))
+            own_target_files = [Path(e.path) for e in own_entries]
+            # From the listing's DirEntries — not one stat per frame.
+            entry.target_mtime = (self._max_entry_mtime(own_entries) if own_entries
+                                  else self._get_max_mtime(target_dir))
             entry.pinned = pinned
             # Capture the on-disk stem so NLE companion scripts can match this
             # sidecar to its clip even when several sources share a target dir.
@@ -398,10 +435,12 @@ class Promoter:
         elapsed = time.monotonic() - started
         size = getattr(version, "total_size_bytes", 0) or 0
         rate = f", {_human_size(size / elapsed)}/s" if size and elapsed > 0 else ""
+        swap = (f", swap {self.last_swap_seconds:.2f}s"
+                if self.last_swap_seconds is not None else "")
         logger.info(
-            "Promotion complete: %s %s — %d file(s), %s, %s mode, %.1fs%s",
+            "Promotion complete: %s %s — %d file(s), %s, %s mode, %.1fs%s%s",
             self.source.name, version.version_string, version.file_count,
-            _human_size(size), self.source.link_mode, elapsed, rate,
+            _human_size(size), self.source.link_mode, elapsed, rate, swap,
         )
         return entry
 
@@ -549,10 +588,7 @@ class Promoter:
         the old version stays live until the new one is complete.
         """
         valid_extensions = self._valid_extensions
-        source_files = sorted(
-            f for f in source_dir.iterdir()
-            if f.is_file() and f.suffix.lower() in valid_extensions
-        )
+        source_files = self._list_media(source_dir)
 
         # When source_dir is the watched source root (flat file layout),
         # it contains files from ALL versions — filter to only the target version.
@@ -613,10 +649,10 @@ class Promoter:
             if self._cancelled.is_set():
                 return
             target_name = self._remap_filename(src_file.name)
-            target_file = target_dir / target_name
-            if target_file.exists() or target_file.is_symlink():
-                target_file.unlink()
-            smart_copy(src_file, target_file, cancel_event=self._cancelled)
+            # target_dir is the staging dir, emptied by _prepare_staging_dir,
+            # so there is nothing to remove first (that check cost 1-2 stats
+            # per frame over SMB).
+            smart_copy(src_file, target_dir / target_name, cancel_event=self._cancelled)
             with counter_lock:
                 completed += 1
                 done = completed
@@ -971,13 +1007,17 @@ class Promoter:
         and the hidden staging/backup dirs are never included.
         """
         try:
-            entries = list(target_dir.iterdir())
+            with os.scandir(target_dir) as it:
+                entries = list(it)
         except OSError as e:
             raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
 
+        def is_media(e) -> bool:
+            return has_media_extension(e.name, valid_extensions) and e.is_file()
+
         # Build a set of filenames to preserve
         if keep_layers:
-            media_files = [f for f in entries if f.is_file() and f.suffix.lower() in valid_extensions]
+            media_files = [Path(e.path) for e in entries if is_media(e)]
             groups = _group_files_by_sequence(media_files) if media_files else {}
             keep_files: set[str] = set()
             for prefix, files in groups.items():
@@ -987,58 +1027,121 @@ class Promoter:
             keep_files = set()
 
         removal: list[Path] = []
-        for f in entries:
-            if f.is_file() and f.suffix.lower() in valid_extensions:
-                if f.name not in keep_files:
-                    removal.append(f)
-            elif f.is_symlink():
-                removal.append(f)
+        for e in entries:
+            if is_media(e):
+                if e.name not in keep_files:
+                    removal.append(Path(e.path))
+            elif e.is_symlink():
+                removal.append(Path(e.path))
         return self._drop_foreign_files(removal, target_dir, own_stem)
+
+    @staticmethod
+    def _run_renames(fn, names: list[str]) -> None:
+        """Call *fn(name)* for every name, in parallel for larger sets.
+
+        After the first failure no further names are started (renames
+        already in flight finish), then the first exception is re-raised so
+        the caller can roll back.
+        """
+        if len(names) < _SWAP_PARALLEL_MIN:
+            for name in names:
+                fn(name)
+            return
+        errors: list[BaseException] = []
+        stop = threading.Event()
+
+        def run(name):
+            if stop.is_set():
+                return
+            try:
+                fn(name)
+            except BaseException as e:  # noqa: BLE001 - re-raised below
+                stop.set()
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=min(_SWAP_WORKERS, len(names))) as executor:
+            list(executor.map(run, names))
+        if errors:
+            raise errors[0]
 
     def _swap_staged_into_target(self, staging_dir: Path, target_dir: Path,
                                  files_to_remove: list[Path]) -> None:
-        """Activate a fully-staged version: retire the old files into a
-        backup dir, rename the staged files into place, drop the backup.
+        """Activate a fully-staged version, renaming each staged file into
+        the target and parking whatever it replaces in a backup dir.
 
-        Every step is a same-volume rename, so the window where the target
-        is inconsistent shrinks from the whole copy duration to
-        milliseconds. On failure the backup is restored; even on a double
-        fault (swap fails AND restore fails) the old files survive in the
-        backup dir, which the next promotion restores via
+        Every step is a same-volume rename. Each name is swapped as one unit
+        — old file to the backup, new file into place — so a frame is
+        missing for the duration of one rename, not for the whole swap, and
+        the renames run in parallel (:data:`_SWAP_WORKERS`). Old files that
+        have no replacement (e.g. frames outside the new range) are retired
+        after all new files are in place. While the swap runs the target
+        holds a mix of old and new frames; how long that lasts is logged.
+
+        Any existing file a staged file would overwrite is backed up, not
+        only those in *files_to_remove*, so a rollback restores everything.
+        On failure the placed files are removed and the backup is restored;
+        even on a double fault (swap fails AND restore fails) the old files
+        survive in the backup dir, which the next promotion restores via
         :meth:`_cleanup_orphaned_promotion_dirs`.
         """
+        started = time.monotonic()
         backup_dir = target_dir / BACKUP_DIRNAME
-        moved: list[tuple[Path, Path]] = []   # (original, backup) pairs
-        placed: list[Path] = []
         try:
-            if files_to_remove:
+            with os.scandir(staging_dir) as it:
+                staged = sorted(e.name for e in it)
+            with os.scandir(target_dir) as it:
+                existing = {e.name for e in it} - {STAGING_DIRNAME, BACKUP_DIRNAME}
+        except OSError as e:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
+
+        staged_set = set(staged)
+        retire = {f.name for f in files_to_remove}
+        backup_names = retire | (existing & staged_set)
+        leftovers = sorted(retire - staged_set)  # old files with no replacement
+
+        lock = threading.Lock()
+        moved: list[str] = []    # names parked in backup_dir
+        placed: list[str] = []   # staged names renamed into target_dir
+
+        def swap_one(name: str) -> None:
+            if name in backup_names:
+                os.replace(target_dir / name, backup_dir / name)
+                with lock:
+                    moved.append(name)
+            os.replace(staging_dir / name, target_dir / name)
+            with lock:
+                placed.append(name)
+
+        def retire_one(name: str) -> None:
+            os.replace(target_dir / name, backup_dir / name)
+            with lock:
+                moved.append(name)
+
+        try:
+            if backup_names:
                 if backup_dir.exists():
                     shutil.rmtree(backup_dir, ignore_errors=True)
                 backup_dir.mkdir(parents=True, exist_ok=True)
                 self._set_hidden_attribute(backup_dir)
-                for f in files_to_remove:
-                    dest = backup_dir / f.name
-                    os.replace(f, dest)
-                    moved.append((f, dest))
-            for entry in sorted(staging_dir.iterdir()):
-                dest = target_dir / entry.name
-                os.replace(entry, dest)
-                placed.append(dest)
-        except OSError as e:
+            self._run_renames(swap_one, staged)
+            self._run_renames(retire_one, leftovers)
+        except Exception as e:
             # Roll back: drop whatever was already placed, then return the
             # old files from the backup dir.
-            for p in placed:
+            for name in placed:
                 try:
-                    p.unlink(missing_ok=True)
+                    (target_dir / name).unlink(missing_ok=True)
                 except OSError:
                     pass
             restore_failed = False
-            for orig, bak in moved:
+            for name in moved:
                 try:
-                    os.replace(bak, orig)
+                    os.replace(backup_dir / name, target_dir / name)
                 except OSError as r:
                     restore_failed = True
-                    logger.critical("Could not restore %s from backup: %s", orig, r)
+                    logger.critical("Could not restore %s from backup: %s",
+                                    target_dir / name, r)
             shutil.rmtree(staging_dir, ignore_errors=True)
             if restore_failed:
                 raise PromotionError(
@@ -1051,8 +1154,14 @@ class Promoter:
                 f"Failed to activate new version; previous version restored: {e}"
             ) from e
 
+        self.last_swap_seconds = time.monotonic() - started
+        logger.info(
+            "Swapped %d file(s) into %s in %.2fs (%d replaced, %d retired)",
+            len(staged), target_dir, self.last_swap_seconds,
+            len(backup_names & staged_set), len(leftovers),
+        )
         shutil.rmtree(staging_dir, ignore_errors=True)
-        if files_to_remove:
+        if backup_names:
             try:
                 shutil.rmtree(backup_dir)
             except OSError as e:
@@ -1126,10 +1235,11 @@ class Promoter:
             )
 
     def _link_or_copy(self, source: Path, target: Path):
-        """Route to the correct file operation based on link_mode."""
-        if target.exists() or target.is_symlink():
-            target.unlink()
+        """Route to the correct file operation based on link_mode.
 
+        *target* is always inside the freshly emptied staging dir, so no
+        existence check / unlink is needed (it cost 1-2 stats per frame).
+        """
         mode = self.source.link_mode
         if mode == "symlink":
             self._create_symlink(source, target)
@@ -1178,10 +1288,7 @@ class Promoter:
             files = [Path(e.path) for e in cached_entries]
         else:
             try:
-                files = [
-                    f for f in target_dir.iterdir()
-                    if f.is_file() and f.suffix.lower() in self._valid_extensions
-                ]
+                files = self._list_media(target_dir)
             except OSError as e:
                 raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
 
@@ -1269,18 +1376,19 @@ class Promoter:
         valid_extensions = self._valid_extensions
 
         if source_path.is_dir():
-            source_files = sorted(
-                f for f in source_path.iterdir()
-                if f.is_file() and f.suffix.lower() in valid_extensions
-            )
+            source_entries = self._media_entries(source_path)
+            source_files = [Path(e.path) for e in source_entries]
         else:
+            source_entries = None
             source_files = [source_path] if source_path.is_file() else []
 
         file_map = []
         total_size = 0
-        for f in source_files:
+        for i, f in enumerate(source_files):
             try:
-                size = f.stat().st_size
+                # DirEntry.stat() reuses the listing's data on Windows.
+                st = source_entries[i].stat() if source_entries is not None else f.stat()
+                size = st.st_size
             except OSError:
                 size = 0
             target_name = self._remap_filename(f.name)
@@ -1346,12 +1454,7 @@ class Promoter:
         the files belonging to *version* so that mtime checks are accurate.
         """
         if source_path.is_dir() and source_path == Path(self.source.source_dir):
-            valid_extensions = self._valid_extensions
-            all_files = sorted(
-                f for f in source_path.iterdir()
-                if f.is_file() and f.suffix.lower() in valid_extensions
-            )
-            return self._filter_version_files(all_files, version)
+            return self._filter_version_files(self._list_media(source_path), version)
         return None
 
     @staticmethod
