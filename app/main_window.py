@@ -24,7 +24,7 @@ from app._common import (
 from app.widgets import _GROUP_COLOR_PALETTE
 from app.workers import (
     PromoteWorker, ThumbnailWorker, ThumbnailQueueWorker, ScanWorker,
-    StatusWorker, SyncNamesWorker, ProjectLoadWorker,
+    StatusWorker, SyncNamesWorker, ProjectLoadWorker, AutoPromoteCheckWorker,
 )
 from app.widgets import VersionTreeWidget, SourceListWidget, SourceItemDelegate
 from app.dialogs.about import AboutDialog
@@ -75,6 +75,10 @@ class MainWindow(QMainWindow):
         self._force_promote: bool = False
         # Sources whose auto-promote is waiting for a container render to finish
         self._render_wait_sources: set[str] = set()
+        # Auto-promote checks running off the GUI thread, by source name, and
+        # sources to re-check once theirs finishes (value: was waiting on a render)
+        self._auto_check_workers: dict[str, AutoPromoteCheckWorker] = {}
+        self._auto_check_rerun: dict[str, bool] = {}
         self._target_conflicts: dict = {}
         self._source_status: dict = {}  # filled by StatusWorker
         self._deferred_refresh_results: dict = None  # scan results deferred due to promotion in progress
@@ -3868,134 +3872,140 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _normalize_frame_range(frame_range):
-        """Extract core frame range, stripping gap annotations.
+        """Extract core frame range, stripping gap annotations (see
+        :func:`src.lvm.auto_promote.normalize_frame_range`)."""
+        from src.lvm.auto_promote import normalize_frame_range
+        return normalize_frame_range(frame_range)
 
-        '1001-1120 (95/120 frames, gaps detected)' -> '1001-1120'
-        '1001-1120' -> '1001-1120'
-        None -> None
-        """
-        if frame_range is None:
-            return None
-        return frame_range.split(" ")[0].split("(")[0].strip()
+    def _auto_promote_enabled(self) -> bool:
+        return self.auto_promote_cb.isChecked() and self.watcher.is_running
 
     def _try_auto_promote(self, source_name: str):
-        """Attempt auto-promotion for a source after watcher detected changes.
+        """Attempt auto-promotion for a source after the watcher saw changes.
 
-        Auto-promotes only when:
-        - The Auto-Promote checkbox is checked
+        Cheap guards run here; the checks that touch the filesystem run on an
+        :class:`AutoPromoteCheckWorker` and come back through
+        :meth:`_on_auto_promote_decided`. Auto-promotes only when:
+
+        - The Auto-Promote checkbox is checked and the watcher is running
         - No promotion is already in progress
         - The source has a previous promotion (history entry)
         - A newer highest version exists
         - The new version's frame range matches the last promoted version
+        - There are no obsolete layers in the target
         - Its container files (MOV/MXF/...) have finished rendering; if not,
           it re-checks every RENDER_WAIT_RETRY_MS until they have
+        - The source's link mode is available
+
+        At most one check runs per source; a request while one is running
+        re-runs the check once the current one has finished.
         """
         waiting_on_render = source_name in self._render_wait_sources
         self._render_wait_sources.discard(source_name)
 
-        if not self.auto_promote_cb.isChecked() or not self.watcher.is_running:
+        if not self._auto_promote_enabled():
+            return
+
+        if source_name in self._auto_check_workers:
+            # Newer files may have landed since that check started.
+            self._auto_check_rerun[source_name] = (
+                self._auto_check_rerun.get(source_name, False) or waiting_on_render
+            )
             return
 
         if self._worker is not None:
-            if waiting_on_render:
-                # Keep waiting rather than dropping the pending auto-promote.
-                self._schedule_render_wait_retry(source_name)
-                return
-            logger.info(f"Auto-promote skipped for {source_name}: promotion already in progress")
-            self.statusBar().showMessage(
-                f"Auto-promote skipped for {source_name}: promotion already in progress"
-            )
+            self._auto_promote_blocked_by_promotion(source_name, waiting_on_render)
             return
 
-        # Find promoter (only exists for sources with a latest_target)
-        promoter = self._promoters.get(source_name)
-        if not promoter:
+        # Only sources with a latest target have a promoter; the scanner
+        # exists once the source's status has been computed.
+        if source_name not in self._promoters or source_name not in self._scanners:
+            return
+        source = self._source_by_name(source_name)
+        if source is None:
             return
 
-        # Re-scan to pick up the new version
-        scanner = self._scanners.get(source_name)
-        if not scanner:
-            return
-
-        versions = scanner.scan()
-        self._versions_cache[source_name] = versions
-        if not versions:
-            return
-
-        highest = versions[-1]
-
-        # Check last promoted version
-        current_entry = promoter.get_current_version()
-        if not current_entry:
-            logger.info(f"Auto-promote skipped for {source_name}: no previous promotion (promote manually first)")
-            self.statusBar().showMessage(
-                f"Auto-promote skipped for {source_name}: no previous promotion exists"
-            )
-            return
-
-        if version_strings_match(highest.version_string, current_entry.version, highest.version_number):
-            return  # Already on highest
-
-        # Compare frame ranges (normalized to strip gap annotations)
-        prev_range = self._normalize_frame_range(current_entry.frame_range)
-        new_range = self._normalize_frame_range(highest.frame_range)
-
-        if prev_range != new_range:
-            msg = (
-                f"Auto-promote skipped for {source_name}: "
-                f"frame range changed ({prev_range} \u2192 {new_range})"
-            )
-            logger.info(msg)
-            self.statusBar().showMessage(msg)
-            return
-
-        # Check for obsolete layers (cannot show interactive dialog in auto path)
-        obsolete = promoter.detect_obsolete_layers(highest)
-        if obsolete:
-            layer_names = ", ".join(l["name"] for l in obsolete)
-            msg = (
-                f"Auto-promote skipped for {source_name}: "
-                f"obsolete layers in target ({layer_names})"
-            )
-            logger.info(msg)
-            self.statusBar().showMessage(msg)
-            return
-
-        # Don't publish a QuickTime/MXF the renderer is still writing. The
-        # watcher only fires when the file is created, so poll until done.
-        unfinished = promoter.find_unfinished_renders(
-            highest, settle_seconds=RENDER_SETTLE_SECONDS
+        worker = AutoPromoteCheckWorker(
+            self.config, source, waiting_on_render, RENDER_SETTLE_SECONDS, parent=self,
         )
-        if unfinished:
-            path, why = unfinished[0]
-            if not waiting_on_render:
-                logger.info(
-                    f"Auto-promote of {source_name} {highest.version_string} "
-                    f"waiting for render to finish: {path.name} ({why})"
-                )
-            self.statusBar().showMessage(
-                f"Auto-promote waiting for {source_name} {highest.version_string} "
-                f"to finish rendering ({path.name})"
-            )
+        self._auto_check_workers[source_name] = worker
+        worker.decided.connect(self._on_auto_promote_decided)
+        worker.finished.connect(lambda: self._on_auto_check_thread_done(source_name, worker))
+        worker.start()
+
+    def _auto_promote_blocked_by_promotion(self, source_name: str, waiting_on_render: bool):
+        if waiting_on_render:
+            # Keep waiting rather than dropping the pending auto-promote.
             self._schedule_render_wait_retry(source_name)
             return
+        msg = f"Auto-promote skipped for {source_name}: promotion already in progress"
+        logger.info(msg)
+        self.statusBar().showMessage(msg)
 
-        # Pre-check link mode (avoid modal dialogs in auto-promote path)
-        mode = promoter.source.link_mode
-        available, reason = check_link_mode_available(mode)
-        if not available:
-            logger.warning(f"Auto-promote skipped for {source_name}: {reason}")
-            self.statusBar().showMessage(
-                f"Auto-promote skipped for {source_name}: {reason}"
+    def _on_auto_promote_decided(self, decision):
+        """Main-thread half of auto-promote: act on a worker's decision."""
+        from src.lvm import auto_promote as ap
+
+        name = decision.source_name
+        if decision.versions is not None:
+            self._versions_cache[name] = decision.versions
+
+        # The world may have moved on while the check ran.
+        if name in self._auto_check_rerun or not self._auto_promote_enabled():
+            return  # superseded by a newer request / auto-promote switched off
+
+        if decision.action == ap.NOOP:
+            return
+
+        if decision.action in (ap.SKIP, ap.ERROR):
+            msg = f"Auto-promote skipped for {name}: {decision.reason}"
+            detail = f" ({decision.log_detail})" if decision.log_detail else ""
+            logger.log(decision.log_level, msg + detail)
+            self.statusBar().showMessage(msg)
+            return
+
+        if self._worker is not None:
+            # A manual or batch promotion started while the check ran.
+            self._auto_promote_blocked_by_promotion(
+                name, decision.waiting_on_render or decision.action == ap.WAIT_RENDER,
             )
             return
 
-        # All checks passed — auto-promote
-        logger.info(f"Auto-promoting {source_name}: {highest.version_string}")
-        self.statusBar().showMessage(
-            f"Auto-promoting {source_name} to {highest.version_string}..."
-        )
-        self._start_promotion(promoter, highest)
+        version = decision.version
+        if decision.action == ap.WAIT_RENDER:
+            if not decision.waiting_on_render:
+                logger.info(
+                    f"Auto-promote of {name} {version.version_string} "
+                    f"waiting for render to finish: {decision.waiting_file} ({decision.reason})"
+                )
+            self.statusBar().showMessage(
+                f"Auto-promote waiting for {name} {version.version_string} "
+                f"to finish rendering ({decision.waiting_file})"
+            )
+            self._schedule_render_wait_retry(name)
+            return
+
+        if decision.action == ap.PROMOTE:
+            promoter = self._promoters.get(name)
+            if promoter is None:
+                return  # latest target removed while the check ran
+            logger.info(f"Auto-promoting {name}: {version.version_string}")
+            self.statusBar().showMessage(
+                f"Auto-promoting {name} to {version.version_string}..."
+            )
+            self._start_promotion(promoter, version)
+
+    def _on_auto_check_thread_done(self, source_name: str, worker):
+        """The check thread has exited: release it and run a queued re-check."""
+        if self._auto_check_workers.get(source_name) is worker:
+            del self._auto_check_workers[source_name]
+        worker.deleteLater()
+        if source_name in self._auto_check_rerun:
+            waiting = self._auto_check_rerun.pop(source_name)
+            if waiting:
+                # Consumed again immediately by _try_auto_promote.
+                self._render_wait_sources.add(source_name)
+            self._try_auto_promote(source_name)
 
     def _schedule_render_wait_retry(self, source_name: str):
         """Re-run auto-promote for *source_name* after RENDER_WAIT_RETRY_MS.
@@ -4268,6 +4278,7 @@ class MainWindow(QMainWindow):
         # Disconnect signals and stop all background workers to avoid
         # callbacks firing into a half-destroyed window.
         for worker in (self._scan_worker, self._status_worker,
+                        *self._auto_check_workers.values(),
                         self._worker, self._thumb_worker,
                         self._thumb_queue_worker,
                         self._project_load_worker):

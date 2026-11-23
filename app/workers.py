@@ -373,6 +373,43 @@ class StatusWorker(QThread):
 
 
 
+class AutoPromoteCheckWorker(QThread):
+    """Runs the auto-promote checks for one source off the GUI thread.
+
+    Every check touches the filesystem — rescan, history sidecar, obsolete-
+    layer listing, container render check, link-mode probe — which froze the
+    window for seconds on a share. The worker builds its own Promoter and
+    VersionScanner so it never shares mutable state with the GUI thread or a
+    running PromoteWorker. ``decided`` always fires exactly once; the built-in
+    ``QThread.finished`` fires after ``run()`` has returned.
+    """
+    decided = Signal(object)  # AutoPromoteDecision
+
+    def __init__(self, config: ProjectConfig, source: WatchedSource,
+                 waiting_on_render: bool, settle_seconds: float, parent=None):
+        super().__init__(parent)
+        self._config = config
+        self._source = source
+        self._waiting_on_render = waiting_on_render
+        self._settle_seconds = settle_seconds
+
+    def run(self):
+        from src.lvm.auto_promote import AutoPromoteDecision, evaluate_auto_promote, ERROR
+        try:
+            promoter = Promoter(
+                self._source, self._config.task_tokens, self._config.project_name,
+                nle_rename_options=self._config.nle_rename_options(),
+            )
+            scanner = VersionScanner(self._source, self._config.task_tokens)
+            decision = evaluate_auto_promote(promoter, scanner, self._settle_seconds)
+        except Exception as e:  # e.g. PromotionError: latest target removed meanwhile
+            decision = AutoPromoteDecision(self._source.name, ERROR, reason=f"check failed: {e}",
+                                           log_level=logging.WARNING)
+        decision.waiting_on_render = self._waiting_on_render
+        self.decided.emit(decision)
+
+
+
 class SyncNamesWorker(QThread):
     """Runs the Resolve rename in-process on a worker thread.
 
