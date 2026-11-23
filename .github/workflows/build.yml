@@ -106,6 +106,7 @@ jobs:
           python -m unittest tests.test_drop_sources -v
           python -m unittest tests.test_robustness -v
           python -m unittest tests.test_auto_promote -v
+          python -m unittest tests.test_watch_backends -v
 
       # ── Inject release version into package ─────────────────────────────
       # When triggered by a published release (tag e.g. v1.2.3), patch

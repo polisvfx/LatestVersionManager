@@ -1,14 +1,22 @@
 """
-File Watcher - monitors source directories for new versions using watchdog.
+File Watcher - monitors source directories for new versions.
 
 Emits Qt signals when new version folders or files appear so the GUI
 can update without manual refresh.
+
+Two backends, chosen per source (see :func:`fsinfo.choose_watch_backend`):
+
+- **native** — watchdog's OS change notifications. Instant, but on macOS and
+  Linux they don't see changes other machines make on a network share.
+- **polling** — :class:`dirpoll.DirectoryPoller`, one directory listing per
+  source per interval. Used for network shares on macOS/Linux, for sources
+  whose directory wasn't reachable when watching started, and as the
+  fallback when a native watch dies (share dropped, buffer overflow).
 """
 
 __all__ = ["SourceWatcher"]
 
 import logging
-from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, QTimer, Slot, QMetaObject, Qt, Q_ARG
 from watchdog.observers import Observer
@@ -17,9 +25,14 @@ from watchdog.events import (
     DirMovedEvent, FileMovedEvent,
 )
 
+from .dirpoll import DirectoryPoller
+from .fsinfo import NATIVE, POLLING, choose_watch_backend
 from .models import WatchedSource
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_POLL_INTERVAL = 10.0
+HEALTH_CHECK_INTERVAL_MS = 15_000
 
 
 class _FolderEventHandler(FileSystemEventHandler):
@@ -60,54 +73,157 @@ class SourceWatcher(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._observer = None
+        self._poller = None
         self._handlers = {}
+        self._native_watches = {}  # source name -> ObservedWatch
+        self._source_dirs = {}     # source name -> directory
+        self._running = False
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(2000)  # 2 second debounce
         self._debounce_timer.timeout.connect(self._flush_pending)
         self._pending_sources = set()
+        self._health_timer = QTimer(self)
+        self._health_timer.setInterval(HEALTH_CHECK_INTERVAL_MS)
+        self._health_timer.timeout.connect(self._check_health)
 
-    def start(self, sources: list[WatchedSource]):
-        """Start watching all configured source directories."""
+    def start(self, sources: list[WatchedSource], mode: str = "auto",
+              poll_interval: float = DEFAULT_POLL_INTERVAL):
+        """Start watching all configured source directories.
+
+        *mode* is ``auto`` (poll network shares on macOS/Linux, native
+        events elsewhere), ``native`` or ``polling``.
+        """
         self.stop()
 
         self._observer = Observer()
-        watched_count = 0
+        self._poller = DirectoryPoller(self._on_change, interval=poll_interval)
+        # Start the observer *before* scheduling: on a running observer each
+        # schedule() opens its directory right away and raises on its own,
+        # whereas one missing directory makes Observer.start() fail for all.
+        self._observer.start()
 
         for source in sources:
-            source_path = Path(source.source_dir)
-            if not source_path.exists():
-                logger.warning(f"Cannot watch non-existent directory: {source_path}")
+            if not source.source_dir:
                 continue
+            path = str(source.source_dir)
+            self._source_dirs[source.name] = path
+            backend = choose_watch_backend(path, mode)
+            if backend == NATIVE and self._schedule_native(source):
+                continue
+            self._poller.add(source.name, path)
 
-            handler = _FolderEventHandler(self._on_change, source)
-            self._handlers[source.name] = handler
+        native = len(self._native_watches)
+        polled = len(self._poller.keys)
+        if not native:
+            self._observer.stop()
+            self._observer.join(timeout=5)
+        if polled:
+            self._poller.start()
+        self._running = bool(native or polled)
+        if self._running:
+            self._health_timer.start()
+            # Catch watches whose thread died right at startup quickly.
+            QTimer.singleShot(2000, self._check_health)
+        self._emit_status()
 
-            try:
-                self._observer.schedule(handler, str(source_path), recursive=False)
-                watched_count += 1
-                logger.info(f"Watching: {source_path}")
-            except Exception as e:
-                logger.error(f"Failed to watch {source_path}: {e}")
-
-        if watched_count > 0:
-            self._observer.start()
-            self.watch_status_changed.emit(f"Watching {watched_count} source(s)")
-        else:
-            self.watch_status_changed.emit("No directories to watch")
+    def _schedule_native(self, source: WatchedSource) -> bool:
+        handler = _FolderEventHandler(self._on_change, source)
+        try:
+            watch = self._observer.schedule(handler, str(source.source_dir), recursive=False)
+        except Exception as e:
+            # Missing or unreachable directory — the poller retries it.
+            logger.warning(f"Native watch failed for {source.source_dir} ({e}); polling instead")
+            return False
+        self._handlers[source.name] = handler
+        self._native_watches[source.name] = watch
+        logger.info(f"Watching: {source.source_dir}")
+        return True
 
     def stop(self):
         """Stop all watchers."""
+        self._running = False
+        self._health_timer.stop()
         if self._observer and self._observer.is_alive():
             self._observer.stop()
             self._observer.join(timeout=5)
         self._observer = None
+        if self._poller is not None:
+            self._poller.stop()
+        self._poller = None
         self._handlers.clear()
+        self._native_watches.clear()
+        self._source_dirs.clear()
         self._pending_sources.clear()
         self.watch_status_changed.emit("Watcher stopped")
 
+    # -- health -------------------------------------------------------------
+
+    def _check_health(self):
+        """Move sources whose native watch has died to the poller.
+
+        A watchdog emitter thread ends when its directory disappears or the
+        share drops; nothing else notices, so the source would silently stop
+        being watched. Only thread liveness is checked here — no filesystem
+        access on the GUI thread.
+        """
+        if not self._running or self._observer is None:
+            return
+        observer_alive = self._observer.is_alive()
+        alive_watches = set()
+        if observer_alive:
+            alive_watches = {e.watch for e in list(self._observer.emitters) if e.is_alive()}
+        dead = [name for name, watch in self._native_watches.items()
+                if not observer_alive or watch not in alive_watches]
+        if not dead:
+            if self._poller is not None and self._poller.keys and not self._poller.is_alive():
+                logger.warning("Directory poller stopped — restarting it")
+                self._poller.start()
+            return
+
+        for name in dead:
+            watch = self._native_watches.pop(name)
+            self._handlers.pop(name, None)
+            if observer_alive:
+                try:
+                    self._observer.unschedule(watch)
+                except Exception:
+                    pass
+            logger.warning(
+                f"Native watch for '{name}' stopped ({self._source_dirs.get(name)}); "
+                f"switching to polling"
+            )
+            self._poller.add(name, self._source_dirs[name])
+            # Anything may have arrived while the watch was dead.
+            self._on_change_main_thread(name)
+        if not self._poller.is_alive():
+            self._poller.start()
+        self._emit_status()
+
+    def _emit_status(self):
+        native = len(self._native_watches)
+        polled = len(self._poller.keys) if self._poller is not None else 0
+        total = native + polled
+        if not total:
+            self.watch_status_changed.emit("No directories to watch")
+            return
+        msg = f"Watching {total} source(s)"
+        if polled:
+            msg += f" ({polled} by polling every {self._poller.interval:g}s)"
+        self.watch_status_changed.emit(msg)
+
+    def backend_for(self, source_name: str):
+        """``"native"``, ``"polling"`` or None — for status display and tests."""
+        if source_name in self._native_watches:
+            return NATIVE
+        if self._poller is not None and source_name in self._poller.keys:
+            return POLLING
+        return None
+
+    # -- events -------------------------------------------------------------
+
     def _on_change(self, source_name: str):
-        """Called by watchdog handler (background thread) — marshal to main thread.
+        """Called by watchdog / the poller (background thread) — marshal to main thread.
 
         Thread safety: QueuedConnection ensures _on_change_main_thread runs on
         the main/GUI thread, so _pending_sources and _debounce_timer are only
@@ -132,4 +248,8 @@ class SourceWatcher(QObject):
 
     @property
     def is_running(self) -> bool:
-        return self._observer is not None and self._observer.is_alive()
+        if not self._running:
+            return False
+        native_ok = self._observer is not None and self._observer.is_alive()
+        polling_ok = self._poller is not None and self._poller.is_alive()
+        return native_ok or polling_ok

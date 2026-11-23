@@ -1023,6 +1023,8 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             dlg.apply_to_config(self.config)
             self._mark_dirty()
+            if self.watcher.is_running:
+                self._start_watcher()  # pick up a changed watch mode / poll interval
             self.project_label.setText(f"{self.config.project_name}")
             if self.config_path:
                 self._save_project()
@@ -3853,10 +3855,18 @@ class MainWindow(QMainWindow):
             self.auto_promote_cb.setEnabled(False)
         else:
             if self.config:
-                self.watcher.start(self.config.watched_sources)
+                self._start_watcher()
                 self.watch_toggle.setText("Stop Watching")
                 self.watch_toggle.setChecked(True)
                 self.auto_promote_cb.setEnabled(True)
+
+    def _start_watcher(self):
+        """(Re)start the watcher with the project's sources and watch settings."""
+        self.watcher.start(
+            self.config.watched_sources,
+            mode=self.config.watch_mode,
+            poll_interval=self.config.watch_poll_interval,
+        )
 
     def _on_watcher_change(self, source_name: str):
         """A watched source had new files — refresh only that source."""

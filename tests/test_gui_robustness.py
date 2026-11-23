@@ -297,5 +297,72 @@ class TestWatcherEvents(unittest.TestCase):
         self.assertEqual(seen, ["S", "S", "S"])
 
 
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestSourceWatcherBackends(unittest.TestCase):
+
+    def setUp(self):
+        _app()
+        from src.lvm.models import WatchedSource
+        from src.lvm.watcher import SourceWatcher
+        self.tmp = Path(tempfile.mkdtemp(prefix="lvm_watch_"))
+        (self.tmp / "renders").mkdir()
+        self.src = WatchedSource(name="shot", source_dir=str(self.tmp / "renders"))
+        self.watcher = SourceWatcher()
+        self.watcher._debounce_timer.setInterval(10)
+        self.changed = []
+        self.status = []
+        self.watcher.source_changed.connect(self.changed.append)
+        self.watcher.watch_status_changed.connect(self.status.append)
+
+    def tearDown(self):
+        self.watcher.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _spin_until(self, cond, timeout=5.0):
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while not cond() and _time.monotonic() < deadline:
+            QApplication.processEvents()
+            _time.sleep(0.01)
+        QApplication.processEvents()
+        return cond()
+
+    def test_polling_mode_reports_new_version_folder(self):
+        import time as _time
+        self.watcher.start([self.src], mode="polling", poll_interval=0.05)
+        self.assertEqual(self.watcher.backend_for("shot"), "polling")
+        self.assertTrue(self.watcher.is_running)
+        self.assertIn("by polling", self.status[-1])
+        _time.sleep(0.15)  # first poll records the current state
+        (self.tmp / "renders" / "shot_v002").mkdir()
+        self.assertTrue(self._spin_until(lambda: self.changed), "no source_changed")
+        self.assertEqual(self.changed, ["shot"])
+
+    def test_missing_folder_falls_back_to_polling(self):
+        from src.lvm.models import WatchedSource
+        missing = WatchedSource(name="later", source_dir=str(self.tmp / "not_mounted"))
+        self.watcher.start([self.src, missing], mode="native", poll_interval=0.05)
+        self.assertEqual(self.watcher.backend_for("shot"), "native")
+        self.assertEqual(self.watcher.backend_for("later"), "polling")
+        (self.tmp / "not_mounted").mkdir()  # share comes online
+        self.assertTrue(self._spin_until(lambda: "later" in self.changed))
+
+    def test_dead_native_watch_switches_to_polling_with_catch_up(self):
+        self.watcher.start([self.src], mode="native", poll_interval=0.05)
+        self.assertEqual(self.watcher.backend_for("shot"), "native")
+        # Simulate the emitter thread dying (share dropped): its watch is gone.
+        self.watcher._observer.unschedule(self.watcher._native_watches["shot"])
+        self.watcher._check_health()
+        self.assertEqual(self.watcher.backend_for("shot"), "polling")
+        self.assertTrue(self.watcher.is_running)
+        self.assertTrue(self._spin_until(lambda: self.changed), "no catch-up rescan")
+
+    def test_stop_ends_both_backends(self):
+        self.watcher.start([self.src], mode="polling", poll_interval=0.05)
+        self.watcher.stop()
+        self.assertFalse(self.watcher.is_running)
+        self.assertEqual(self.status[-1], "Watcher stopped")
+
+
 if __name__ == "__main__":
     unittest.main()
