@@ -1,6 +1,6 @@
 """
-Robustness tests: atomic config writes, history sidecar failure modes,
-bounded timecode probing, and parallel-copy progress.
+Robustness tests: atomic config writes, config schema versioning, history
+sidecar failure modes, bounded timecode probing, and parallel-copy progress.
 
 Self-contained: temp directories, no external data. Portable (no Qt).
 """
@@ -18,10 +18,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from lvm import timecode
-from lvm.config import load_config, save_config, write_config_snapshot
+from lvm.config import (
+    MIGRATIONS, load_config, migrate_config_data, save_config, write_config_snapshot,
+)
 from lvm.fileutil import atomic_write_json
 from lvm.history import HistoryManager
-from lvm.models import HistoryEntry, ProjectConfig, VersionInfo, WatchedSource
+from lvm.models import CONFIG_VERSION, HistoryEntry, ProjectConfig, VersionInfo, WatchedSource
 from lvm.promoter import Promoter, PromotionError
 
 
@@ -219,6 +221,97 @@ class TestParallelCopyProgress(_TmpDirTest):
         )
         self.assertEqual(len(seen), n)
         self.assertEqual(sorted(seen), list(range(1, n + 1)))
+
+
+# ============================================================================
+# Config schema versioning
+# ============================================================================
+
+class TestConfigVersioning(_TmpDirTest):
+
+    def _write(self, data) -> Path:
+        p = self.tmp / "project.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        return p
+
+    def _legacy(self) -> dict:
+        return {
+            "project_name": "Old",
+            "default_use_symlinks": True,
+            "source_list_columns": ["version", "layer_count"],
+            "watched_sources": [{
+                "name": "A", "source_dir": "src_a",
+                "use_symlinks": True, "override_use_symlinks": True,
+            }],
+        }
+
+    def test_every_version_has_a_migration(self):
+        self.assertEqual(sorted(MIGRATIONS), list(range(1, CONFIG_VERSION + 1)))
+
+    def test_to_dict_writes_current_version(self):
+        self.assertEqual(ProjectConfig(project_name="P").to_dict()["config_version"],
+                         CONFIG_VERSION)
+
+    def test_unversioned_file_is_migrated(self):
+        cfg = load_config(str(self._write(self._legacy())))
+        self.assertEqual(cfg.loaded_config_version, 0)
+        self.assertEqual(cfg.default_link_mode, "symlink")
+        self.assertEqual(cfg.source_list_columns, ["version", "layers"])
+        src = cfg.watched_sources[0]
+        self.assertEqual(src.link_mode, "symlink")
+        self.assertTrue(src.override_link_mode)
+
+    def test_save_after_migration_drops_legacy_keys(self):
+        path = self._write(self._legacy())
+        save_config(load_config(str(path)), str(path))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["config_version"], CONFIG_VERSION)
+        self.assertNotIn("default_use_symlinks", data)
+        self.assertNotIn("use_symlinks", data["watched_sources"][0])
+        self.assertNotIn("override_use_symlinks", data["watched_sources"][0])
+        # And it loads again as the current version.
+        self.assertEqual(load_config(str(path)).loaded_config_version, CONFIG_VERSION)
+
+    def test_migration_keeps_explicit_new_keys(self):
+        data = self._legacy()
+        data["default_link_mode"] = "hardlink"
+        data["watched_sources"][0]["link_mode"] = "copy"
+        migrate_config_data(data)
+        self.assertEqual(data["default_link_mode"], "hardlink")
+        self.assertEqual(data["watched_sources"][0]["link_mode"], "copy")
+
+    def test_current_version_runs_no_migration(self):
+        data = {"config_version": CONFIG_VERSION, "project_name": "P",
+                "default_use_symlinks": True}
+        with patch.dict(MIGRATIONS, {v: self.fail for v in MIGRATIONS}):
+            self.assertEqual(migrate_config_data(data), CONFIG_VERSION)
+
+    def test_newer_version_loads_with_warning_and_is_left_alone(self):
+        data = self._legacy()
+        data["config_version"] = CONFIG_VERSION + 4
+        path = self._write(data)
+        with self.assertLogs("lvm.config", level="WARNING") as logs:
+            cfg = load_config(str(path))
+        self.assertIn("newer LVM", "\n".join(logs.output))
+        self.assertEqual(cfg.loaded_config_version, CONFIG_VERSION + 4)
+        self.assertEqual(cfg.project_name, "Old")
+        # No migration ran on the raw data.
+        raw = dict(data)
+        self.assertEqual(migrate_config_data(raw), CONFIG_VERSION + 4)
+        self.assertIn("default_use_symlinks", raw)
+
+    def test_invalid_version_treated_as_zero(self):
+        for bad in ("2", -1, True, 1.5, None):
+            data = self._legacy()
+            data["config_version"] = bad
+            with self.assertLogs("lvm.config", level="WARNING"):
+                self.assertEqual(migrate_config_data(data), 0)
+            self.assertEqual(data["config_version"], CONFIG_VERSION)
+            self.assertNotIn("default_use_symlinks", data)
+
+    def test_non_object_json_is_refused(self):
+        with self.assertRaises(ValueError):
+            load_config(str(self._write([1, 2, 3])))
 
 
 if __name__ == "__main__":

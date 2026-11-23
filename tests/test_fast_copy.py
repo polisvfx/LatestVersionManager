@@ -207,6 +207,46 @@ class TestPreserveMetadata(unittest.TestCase):
         self.assertAlmostEqual(src_mtime, dst_mtime, delta=2.0)
 
 
+@unittest.skipUnless(sys.platform == "win32", "CopyFileExW is Windows-only")
+class TestWin32NoCopystat(unittest.TestCase):
+    """After CopyFileExW, smart_copy skips copystat: the copy already keeps
+    the last-write time and the attributes."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="lvm_nocopystat_")
+        self.src = Path(self.tmpdir) / "frame.1001.exr"
+        self.src.write_bytes(os.urandom(64 * 1024))
+        os.utime(self.src, ns=(1_600_000_000_000_000_000, 1_500_000_000_987_654_300))
+        self.dst = Path(self.tmpdir) / "copy.1001.exr"
+
+    def tearDown(self):
+        for f in (self.src, self.dst):
+            if f.exists():
+                os.chmod(f, 0o666)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_copystat_not_called(self):
+        with patch("lvm.fast_copy.shutil.copystat") as copystat:
+            smart_copy(self.src, self.dst)
+        copystat.assert_not_called()
+
+    def test_mtime_kept_exactly(self):
+        smart_copy(self.src, self.dst)
+        self.assertEqual(os.stat(self.src).st_mtime_ns, os.stat(self.dst).st_mtime_ns)
+
+    def test_read_only_kept(self):
+        import stat
+        os.chmod(self.src, stat.S_IREAD)
+        smart_copy(self.src, self.dst)
+        self.assertFalse(os.stat(self.dst).st_mode & stat.S_IWRITE)
+
+    def test_fallback_still_copies_metadata(self):
+        with patch("lvm.fast_copy._win32_copy_file", return_value=False):
+            smart_copy(self.src, self.dst)
+        self.assertEqual(os.stat(self.src).st_mtime_ns // 1000,
+                         os.stat(self.dst).st_mtime_ns // 1000)
+
+
 class TestLinuxCopyFileRange(unittest.TestCase):
     """Test the Linux copy_file_range wrapper."""
 

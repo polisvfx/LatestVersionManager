@@ -905,8 +905,23 @@ class MainWindow(QMainWindow):
             self._update_title()
             self._refresh_sync_names_state()
             self.statusBar().showMessage(f"Loaded: {path}")
+            self._warn_if_newer_config(config)
         finally:
             self._project_load_worker = None
+
+    def _warn_if_newer_config(self, config):
+        """A newer LVM saved this project: unknown settings would be lost on
+        save, so say so once, right after loading."""
+        if config.loaded_config_version <= CONFIG_VERSION:
+            return
+        QMessageBox.warning(
+            self, "Project saved by a newer LVM",
+            f"This project was saved by a newer version of Latest Version "
+            f"Manager (config version {config.loaded_config_version}; this "
+            f"version understands up to {CONFIG_VERSION}).\n\n"
+            f"Settings this version doesn't know are ignored, and saving the "
+            f"project here will remove them. Update LVM before changing it.",
+        )
 
     def _on_project_load_error(self, message: str, path: str):
         """Called on the main thread when ProjectLoadWorker raises."""

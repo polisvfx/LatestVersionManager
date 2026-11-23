@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Optional
 
 # Default file extensions including video formats
+# Schema version of the project JSON, written as "config_version" on save.
+# Files without the field are version 0. Bump this together with a new entry
+# in config.MIGRATIONS whenever the stored format changes.
+CONFIG_VERSION = 1
+
 DEFAULT_FILE_EXTENSIONS = [".exr", ".dpx", ".tiff", ".tif", ".png", ".jpg", ".mov", ".mxf", ".mp4"]
 
 
@@ -535,6 +540,9 @@ class ProjectConfig:
     discover_and_promote_skip_preview: bool = False
     # Runtime only — not serialized, set by config loader
     project_dir: str = field(default="", repr=False)
+    # Runtime only — the "config_version" the file had when it was loaded.
+    # Above CONFIG_VERSION means a newer LVM wrote it (see config.load_config).
+    loaded_config_version: int = field(default=CONFIG_VERSION, repr=False)
 
     def nle_rename_options(self) -> dict:
         """Bundle the NLE rename-composition fields into a single dict.
@@ -562,6 +570,7 @@ class ProjectConfig:
 
     def to_dict(self) -> dict:
         d = {
+            "config_version": CONFIG_VERSION,
             "project_name": self.project_name,
             "watched_sources": [s.to_dict() for s in self.watched_sources],
         }

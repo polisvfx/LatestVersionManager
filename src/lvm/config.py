@@ -17,10 +17,73 @@ import re
 from pathlib import Path
 
 from .fileutil import atomic_write_json
-from .models import ProjectConfig, make_relative
+from .models import CONFIG_VERSION, ProjectConfig, make_relative
 from .task_tokens import derive_source_tokens
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Config schema migrations
+# ---------------------------------------------------------------------------
+
+def _migrate_v0_to_v1(data: dict) -> None:
+    """Rename keys from before link modes and the layers column.
+
+    ``ProjectConfig.from_dict`` still reads the old names (templates and
+    tests hand it raw dicts), so this only makes the upgrade explicit and
+    drops the old keys from the file on the next save.
+    """
+    if "default_use_symlinks" in data and "default_link_mode" not in data:
+        data["default_link_mode"] = "symlink" if data["default_use_symlinks"] else "copy"
+    data.pop("default_use_symlinks", None)
+    cols = data.get("source_list_columns")
+    if isinstance(cols, list):
+        data["source_list_columns"] = ["layers" if c == "layer_count" else c for c in cols]
+    for src in data.get("watched_sources", []):
+        if not isinstance(src, dict):
+            continue
+        if "use_symlinks" in src and "link_mode" not in src:
+            src["link_mode"] = "symlink" if src["use_symlinks"] else "copy"
+        src.pop("use_symlinks", None)
+        if "override_use_symlinks" in src and "override_link_mode" not in src:
+            src["override_link_mode"] = src["override_use_symlinks"]
+        src.pop("override_use_symlinks", None)
+
+
+# MIGRATIONS[n] upgrades the raw JSON dict from version n-1 to n, in place.
+# Every version from 1 to CONFIG_VERSION needs an entry.
+MIGRATIONS = {
+    1: _migrate_v0_to_v1,
+}
+
+
+def migrate_config_data(data: dict, source: str = "") -> int:
+    """Bring a raw project dict up to :data:`CONFIG_VERSION` in place.
+
+    Returns the version the data had. Data from a *newer* LVM is left
+    untouched (with a warning): fields this version doesn't know are
+    ignored on load and dropped if the project is saved here.
+    """
+    version = data.get("config_version", 0)
+    if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+        logger.warning("Invalid config_version %r in %s — treating it as 0",
+                       version, source or "project config")
+        version = 0
+    if version > CONFIG_VERSION:
+        logger.warning(
+            "%s was saved by a newer LVM (config version %d, this version "
+            "understands up to %d). Settings it doesn't know are ignored, and "
+            "saving it here will drop them.",
+            source or "Project config", version, CONFIG_VERSION,
+        )
+        return version
+    for target in range(version + 1, CONFIG_VERSION + 1):
+        MIGRATIONS[target](data)
+        logger.info("Migrated %s to config version %d",
+                    source or "project config", target)
+    data["config_version"] = CONFIG_VERSION
+    return version
 
 DEFAULT_CONFIG_NAME = "lvm_project.json"
 
@@ -177,9 +240,14 @@ def load_config(config_path: str) -> ProjectConfig:
 
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Not a project config (expected a JSON object): {path}")
+
+    file_version = migrate_config_data(data, path.name)
 
     config = ProjectConfig.from_dict(data)
     config.project_dir = str(path.parent)
+    config.loaded_config_version = file_version
 
     # Resolve relative project_root to absolute
     if config.project_root and not Path(config.project_root).is_absolute():
