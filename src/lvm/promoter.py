@@ -109,6 +109,21 @@ def _resolve_unc_safe(path: Path) -> Path:
     return resolved
 
 
+def _throttled_byte_progress(callback: Callable[[int, int, str], None], name: str,
+                             interval: float = 0.1) -> Callable[[int, int], None]:
+    """Wrap *callback(done, total, name)* so it runs at most every *interval*
+    seconds — CopyFileExW reports every chunk, which would flood the GUI with
+    signals. The final update (done >= total) is always delivered."""
+    last = [float("-inf")]
+
+    def report(done: int, total: int) -> None:
+        now = time.monotonic()
+        if done >= total or now - last[0] >= interval:
+            last[0] = now
+            callback(done, total, name)
+    return report
+
+
 class PromotionError(Exception):
     """Raised when a promotion fails."""
     pass
@@ -269,6 +284,7 @@ class Promoter:
         force: bool = False,
         pinned: bool = False,
         keep_layers: Optional[set[str]] = None,
+        byte_progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> HistoryEntry:
         """
         Promote a version to be the current "latest".
@@ -282,6 +298,11 @@ class Promoter:
             keep_layers: Optional set of raw prefixes whose files should be
                          preserved in the target directory instead of being
                          cleared.  Pass ``None`` (default) to clear everything.
+            byte_progress_callback: Optional callback(bytes_copied,
+                         total_bytes, filename) while a single-file version
+                         (MOV/MXF/...) is copied, at most ~10 times a second.
+                         Where the platform copy can't report bytes (macOS),
+                         it isn't called.
 
         Returns:
             The HistoryEntry that was recorded.
@@ -388,7 +409,8 @@ class Promoter:
                 if source_path.is_dir():
                     self._promote_sequence(source_path, target_dir, version, progress_callback, keep_layers=keep_layers)
                 else:
-                    self._promote_single_file(source_path, target_dir, progress_callback)
+                    self._promote_single_file(source_path, target_dir, progress_callback,
+                                              byte_progress_callback)
             except PromotionError:
                 raise
             except CopyCancelled:
@@ -689,6 +711,7 @@ class Promoter:
         source_file: Path,
         target_dir: Path,
         progress_callback: Optional[Callable],
+        byte_progress_callback: Optional[Callable] = None,
     ):
         """Copy/symlink a single file to the target via the staging dir.
 
@@ -707,7 +730,9 @@ class Promoter:
 
         staging_dir = self._prepare_staging_dir(target_dir)
         try:
-            self._link_or_copy(source_file, staging_dir / target_name)
+            byte_cb = (_throttled_byte_progress(byte_progress_callback, source_file.name)
+                       if byte_progress_callback else None)
+            self._link_or_copy(source_file, staging_dir / target_name, progress_cb=byte_cb)
             if self._cancelled.is_set():
                 raise PromotionError(
                     "Promotion cancelled by user — target left unchanged."
@@ -1308,8 +1333,11 @@ class Promoter:
                 f"but only {_human_size(free)} is free at {target_dir}"
             )
 
-    def _link_or_copy(self, source: Path, target: Path):
+    def _link_or_copy(self, source: Path, target: Path, progress_cb=None):
         """Route to the correct file operation based on link_mode.
+
+        *progress_cb(bytes_copied, total_bytes)* is passed to the copy (links
+        are instant and report nothing).
 
         *target* is always inside the freshly emptied staging dir, so no
         existence check / unlink is needed (it cost 1-2 stats per frame).
@@ -1320,7 +1348,7 @@ class Promoter:
         elif mode == "hardlink":
             self._create_hardlink(source, target)
         else:
-            smart_copy(source, target, cancel_event=self._cancelled)
+            smart_copy(source, target, cancel_event=self._cancelled, progress_cb=progress_cb)
 
     def _create_symlink(self, source: Path, target: Path):
         """Create a symlink, handling platform differences."""

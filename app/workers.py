@@ -26,6 +26,9 @@ from app._common import (
 class PromoteWorker(QThread):
     """Runs the file copy in a background thread."""
     progress = Signal(int, int, str)   # current, total, filename
+    # bytes copied, total bytes, filename — floats, as Qt's int is 32-bit
+    # and a single MOV/MXF can be far larger than 2 GB.
+    byte_progress = Signal(float, float, str)
     finished = Signal(object)          # HistoryEntry on success
     error = Signal(str)                # error message
 
@@ -50,6 +53,7 @@ class PromoteWorker(QThread):
                 force=self.force,
                 pinned=self.pinned,
                 keep_layers=self.keep_layers,
+                byte_progress_callback=self._on_byte_progress,
             )
             self.finished.emit(entry)
         except PromotionError as e:
@@ -59,6 +63,9 @@ class PromoteWorker(QThread):
 
     def _on_progress(self, current, total, filename):
         self.progress.emit(current, total, filename)
+
+    def _on_byte_progress(self, done, total, filename):
+        self.byte_progress.emit(float(done), float(total), filename)
 
 
 # ---------------------------------------------------------------------------
