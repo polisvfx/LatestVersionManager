@@ -95,8 +95,8 @@ class TestStatusWorkerErrors(unittest.TestCase):
         self.assertEqual(conflicts, {})
 
 
-@unittest.skipUnless(HAVE_QT, "PySide6 not available")
-class TestMainWindowWiring(unittest.TestCase):
+class _MainWindowTestBase(unittest.TestCase):
+    """MainWindow on a throwaway INI QSettings, last-project restore disabled."""
 
     def setUp(self):
         _app()
@@ -119,6 +119,10 @@ class TestMainWindowWiring(unittest.TestCase):
         for p in self._patches:
             p.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestMainWindowWiring(_MainWindowTestBase):
 
     def test_selection_slots_connected_once(self):
         from src.lvm.models import ProjectConfig, WatchedSource
@@ -159,6 +163,91 @@ class TestMainWindowWiring(unittest.TestCase):
         self.assertFalse(self.win._dirty)
         self.assertTrue(Path(self.win.config_path).exists())
         self.assertEqual(Path(self.win.config.project_dir), self.tmp.resolve())
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestAutoPromoteOffGuiThread(_MainWindowTestBase):
+    """Auto-promote's filesystem checks run on AutoPromoteCheckWorker."""
+
+    def setUp(self):
+        super().setUp()
+        import threading
+        from unittest.mock import PropertyMock
+        from src.lvm.models import ProjectConfig, WatchedSource
+        from src.lvm.promoter import Promoter
+        from src.lvm.scanner import VersionScanner
+        from src.lvm.watcher import SourceWatcher
+
+        renders = self.tmp / "renders"
+        self.src = WatchedSource(
+            name="shot", source_dir=str(renders), latest_target=str(self.tmp / "online"),
+            version_pattern="_v{version}", file_extensions=[".exr"],
+        )
+        for version in ("v001", "v002"):
+            vdir = renders / f"shot_{version}"
+            vdir.mkdir(parents=True)
+            for f in range(1001, 1004):
+                (vdir / f"shot_{version}.{f}.exr").write_bytes(b"x")
+        Promoter(self.src).promote(VersionScanner(self.src).scan()[0], user="t")  # v001 live
+
+        self.win.config = ProjectConfig(project_name="P", watched_sources=[self.src])
+        self.win._promoters["shot"] = Promoter(self.src)
+        self.win._scanners["shot"] = VersionScanner(self.src)
+        self.win.auto_promote_cb.setEnabled(True)
+        self.win.auto_promote_cb.setChecked(True)
+
+        self.scan_threads = []
+        real_scan = VersionScanner.scan
+
+        def spy_scan(scanner):
+            self.scan_threads.append(threading.current_thread())
+            return real_scan(scanner)
+
+        self.started = []
+        extra = [
+            patch.object(SourceWatcher, "is_running", new_callable=PropertyMock, return_value=True),
+            patch.object(VersionScanner, "scan", spy_scan),
+            patch.object(type(self.win), "_start_promotion",
+                         lambda win, promoter, version, keep_layers=None:
+                         self.started.append(version.version_string)),
+        ]
+        for p in extra:
+            p.start()
+        self._patches.extend(extra)
+
+    def _drain(self, timeout=10.0):
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while self.win._auto_check_workers and _time.monotonic() < deadline:
+            QApplication.processEvents()
+            _time.sleep(0.01)
+        QApplication.processEvents()
+        self.assertEqual(self.win._auto_check_workers, {}, "check worker did not finish")
+
+    def test_checks_run_on_worker_thread(self):
+        import threading
+        self.win._try_auto_promote("shot")
+        self.assertEqual(self.started, [], "promotion decided synchronously")
+        self._drain()
+        self.assertEqual(self.started, ["v002"])
+        self.assertTrue(self.scan_threads)
+        self.assertNotIn(threading.main_thread(), self.scan_threads,
+                         "scan ran on the GUI thread")
+        self.assertEqual(self.win._versions_cache["shot"][-1].version_string, "v002")
+
+    def test_requests_during_a_check_are_coalesced(self):
+        self.win._try_auto_promote("shot")
+        self.win._try_auto_promote("shot")
+        self.win._try_auto_promote("shot")
+        self._drain()
+        self._drain()  # the queued re-check
+        self.assertEqual(self.started, ["v002"], "expected exactly one promotion")
+
+    def test_switching_auto_promote_off_drops_pending_decision(self):
+        self.win._try_auto_promote("shot")
+        self.win.auto_promote_cb.setChecked(False)
+        self._drain()
+        self.assertEqual(self.started, [])
 
 
 if __name__ == "__main__":
