@@ -167,7 +167,9 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         self.btn_refresh = QPushButton("Refresh All")
-        self.btn_refresh.clicked.connect(self._refresh_all)
+        # The explicit Refresh button always lists every folder again; all
+        # automatic refreshes reuse unchanged version folders.
+        self.btn_refresh.clicked.connect(lambda: self._refresh_all(full=True))
         self.btn_refresh.setEnabled(False)
         toolbar.addWidget(self.btn_refresh)
 
@@ -2555,8 +2557,12 @@ class MainWindow(QMainWindow):
 
         self._check_reload_pending()
 
-    def _refresh_all(self):
-        """Re-scan all sources in background thread."""
+    def _refresh_all(self, full: bool = False):
+        """Re-scan all sources in background thread.
+
+        Incremental by default (unchanged version folders are reused);
+        ``full=True`` lists every folder again.
+        """
         if not self.config or not self.config.watched_sources:
             self._reload_ui()
             return
@@ -2575,7 +2581,8 @@ class MainWindow(QMainWindow):
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
         self.statusBar().showMessage("Scanning sources...")
 
-        self._scan_worker = ScanWorker(self.config, previous_cache=dict(self._versions_cache), parent=self)
+        previous = {} if full else dict(self._versions_cache)
+        self._scan_worker = ScanWorker(self.config, previous_cache=previous, parent=self)
         self._scan_worker.progress.connect(self._on_refresh_progress)
         self._scan_worker.finished.connect(self._on_refresh_complete)
         self._scan_worker.error.connect(self._on_refresh_error)

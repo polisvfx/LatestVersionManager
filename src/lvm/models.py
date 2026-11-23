@@ -120,6 +120,9 @@ class VersionInfo:
     # True once timecode extraction ran and found nothing, so files without
     # timecode aren't re-probed on every selection / refresh.
     timecode_checked: bool = False
+    # Version folders only: scan-settings fingerprint + folder mtime at scan
+    # time. An incremental rescan reuses this VersionInfo while it matches.
+    scan_token: str = ""
 
     @property
     def total_size_human(self) -> str:
@@ -152,6 +155,8 @@ class VersionInfo:
             d["date_string"] = self.date_string
         if self.timecode_checked:
             d["timecode_checked"] = True
+        if self.scan_token:
+            d["scan_token"] = self.scan_token
         return d
 
     @classmethod
@@ -170,6 +175,7 @@ class VersionInfo:
             date_string=data.get("date_string"),
             date_sortable=data.get("date_sortable", 0),
             timecode_checked=bool(data.get("timecode_checked", False)),
+            scan_token=data.get("scan_token", "") or "",
         )
 
 

@@ -9,18 +9,39 @@ Handles both:
 __all__ = [
     "VersionScanner", "detect_sequence_from_file",
     "scan_directory_as_version", "create_manual_version",
+    "source_scan_fingerprint",
 ]
 
+import dataclasses
+import hashlib
+import json
 import os
 import re
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from .models import VersionInfo, WatchedSource
 from .task_tokens import derive_source_tokens, parse_date_to_sortable, format_date_display
 
 logger = logging.getLogger(__name__)
+
+
+def source_scan_fingerprint(source: WatchedSource, task_tokens: Optional[list] = None) -> str:
+    """Hash of every setting that changes what a scan finds for *source*.
+
+    Part of each version folder's ``scan_token``, so an incremental rescan
+    never reuses results produced under different settings.
+    """
+    key = json.dumps({
+        "source_dir": str(source.source_dir),
+        "version_pattern": source.version_pattern,
+        "file_extensions": sorted(e.lower() for e in source.file_extensions),
+        "sample_filename": source.sample_filename,
+        "date_format": getattr(source, "date_format", ""),
+        "task_tokens": list(task_tokens or []),
+    }, sort_keys=True)
+    return hashlib.md5(key.encode("utf-8")).hexdigest()[:16]
 
 
 class VersionScanner:
@@ -38,6 +59,10 @@ class VersionScanner:
             watched_source.version_pattern, self._date_format)
         self._task_tokens = task_tokens or []
         self._expected_basename = self._compute_expected_basename()
+        self._fingerprint = source_scan_fingerprint(watched_source, self._task_tokens)
+        # Counters from the last scan() — for logging / benchmarks.
+        self.last_reused = 0
+        self.last_scanned = 0
 
     def _compute_expected_basename(self) -> str:
         """Compute the expected basename from the source's sample_filename.
@@ -108,7 +133,7 @@ class VersionScanner:
         else:
             return re.compile(pattern)
 
-    def scan(self) -> list[VersionInfo]:
+    def scan(self, previous: Optional[Iterable[VersionInfo]] = None) -> list[VersionInfo]:
         """
         Scan the source directory and return all detected versions,
         sorted by version number (ascending).
@@ -116,7 +141,22 @@ class VersionScanner:
         Timecode extraction is lazy - not performed during scan.
         Uses os.scandir for faster directory listing — DirEntry caches
         is_dir/is_file from the OS listing, avoiding per-entry stat() over SMB.
+
+        *previous* (an earlier result for this source) makes the scan
+        incremental: a version folder whose modification time and scan
+        settings are unchanged (same ``scan_token``) is not listed again —
+        its earlier VersionInfo is reused, timecode included. A folder's
+        mtime changes when entries are added, removed or renamed, not when a
+        file inside grows, so the newest version folder (the one a render may
+        still be writing into) is always listed. Flat-layout files come from
+        the source listing itself and are always current.
         """
+        self.last_reused = 0
+        self.last_scanned = 0
+        reusable = {}
+        for v in previous or ():
+            if getattr(v, "scan_token", ""):
+                reusable[os.path.normcase(os.path.normpath(v.source_path))] = v
         source_path = Path(self.source.source_dir)
         if not source_path.exists():
             logger.warning(f"Source directory does not exist: {source_path}")
@@ -138,12 +178,33 @@ class VersionScanner:
 
         valid_extensions = set(ext.lower() for ext in self.source.file_extensions)
 
+        # The newest version folder is always rescanned (see docstring).
+        newest_dir = None
+        if reusable:
+            best = None
+            for entry in raw_entries:
+                if entry.is_dir(follow_symlinks=False) and self._matches_basename(entry.name):
+                    parsed = self._extract_version(entry.name)
+                    if parsed is not None:
+                        rank = (parsed[3], parsed[1])  # (date_sortable, version_number)
+                        if best is None or rank > best:
+                            best, newest_dir = rank, entry.path
+
         for entry in raw_entries:
             if entry.is_dir(follow_symlinks=False):
                 if not self._matches_basename(entry.name):
                     continue
+                token = self._folder_token(entry)
+                prev = reusable.get(os.path.normcase(os.path.normpath(entry.path)))
+                if (prev is not None and token and prev.scan_token == token
+                        and entry.path != newest_dir):
+                    versions.append(dataclasses.replace(prev))
+                    self.last_reused += 1
+                    continue
                 version_info = self._scan_version_folder(Path(entry.path))
+                self.last_scanned += 1
                 if version_info:
+                    version_info.scan_token = token
                     versions.append(version_info)
             elif entry.is_file(follow_symlinks=False):
                 if not self._matches_basename(entry.name):
@@ -214,6 +275,22 @@ class VersionScanner:
 
         versions.sort(key=lambda v: (v.date_sortable, v.version_number))
         return versions
+
+    def _folder_token(self, entry: os.DirEntry) -> str:
+        """``scan_token`` for a version folder, or "" if its mtime is unknown.
+
+        Uses os.stat() on the folder itself, not DirEntry.stat(): on Windows
+        the latter comes from the *parent's* directory index, which NTFS
+        updates lazily — it can show an old mtime for a folder that just
+        gained files, which would make a changed folder look unchanged.
+        One stat per version folder is still far cheaper than listing all
+        of its frames again.
+        """
+        try:
+            mtime_ns = os.stat(entry.path, follow_symlinks=False).st_mtime_ns
+        except OSError:
+            return ""
+        return f"{self._fingerprint}:{mtime_ns}"
 
     def _extract_version(self, name: str) -> Optional[tuple[str, int, Optional[str], int]]:
         """
