@@ -324,8 +324,8 @@ class MainWindow(QMainWindow):
         self.btn_promote_all.setStyleSheet(promote_style_main)
         self.btn_promote_all.setEnabled(False)
         self.btn_promote_all.setToolTip(
-            "Promotes sources that are not on their highest version.\n"
-            "Hold Shift to force re-promote all sources."
+            "Promotes sources that are not on their highest version (F9).\n"
+            "Hold Shift to force re-promote all sources (Shift+F9)."
         )
         self.btn_promote_all.clicked.connect(self._promote_all_or_selected)
         promote_layout.addWidget(self.btn_promote_all, stretch=1)
@@ -727,7 +727,11 @@ class MainWindow(QMainWindow):
         source_menu.addSeparator()
 
         promote_all_action = QAction("&Promote All to Latest", self)
-        promote_all_action.setShortcut(QKeySequence("Ctrl+Alt+Up"))
+        # F9 is shown in the menu; Ctrl+Alt+Up still works. The Shift
+        # variants force re-promotion (_promote_all_or_selected reads Shift).
+        promote_all_action.setShortcuts([
+            QKeySequence(s) for s in PROMOTE_ALL_SHORTCUTS + PROMOTE_ALL_FORCE_SHORTCUTS
+        ])
         promote_all_action.triggered.connect(self._promote_all_or_selected)
         source_menu.addAction(promote_all_action)
 

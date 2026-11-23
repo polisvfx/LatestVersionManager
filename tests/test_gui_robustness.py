@@ -528,5 +528,75 @@ class TestSourceWatcherBackends(unittest.TestCase):
         self.assertEqual(self.status[-1], "Watcher stopped")
 
 
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestPromoteAllShortcuts(_MainWindowTestBase):
+    """F9 promotes all; Enter, F9 and Ctrl+Alt+Up confirm the review dialog."""
+
+    def _dialog(self):
+        from app.dialogs.batch_promote import BatchPromoteReviewDialog
+        from src.lvm.models import VersionInfo, WatchedSource
+        src = WatchedSource(name="S", source_dir=str(self.tmp))
+        ver = VersionInfo(version_string="v002", version_number=2,
+                          source_path=str(self.tmp / "v002"))
+        dlg = BatchPromoteReviewDialog([(src, ver)], {}, {}, [], [], parent=self.win)
+        dlg.show()
+        dlg.activateWindow()
+        from PySide6.QtTest import QTest
+        QTest.qWaitForWindowActive(dlg, 1000)
+        self.addCleanup(dlg.deleteLater)
+        return dlg
+
+    def _press(self, dlg, key, modifiers=None, autorep=False):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        mods = modifiers if modifiers is not None else Qt.NoModifier
+        target = QApplication.focusWidget() or dlg
+        for etype in (QEvent.ShortcutOverride, QEvent.KeyPress):
+            ev = QKeyEvent(etype, key, mods, "", autorep)
+            QApplication.sendEvent(target, ev)
+        QApplication.sendEvent(target, QKeyEvent(QEvent.KeyRelease, key, mods, "", autorep))
+        QApplication.processEvents()
+
+    def test_menu_action_has_f9_and_old_shortcut(self):
+        from PySide6.QtGui import QKeySequence
+        action = next(a for m in self.win.menuBar().actions()
+                      for a in m.menu().actions() if a.text() == "&Promote All to Latest")
+        seqs = [s.toString() for s in action.shortcuts()]
+        self.assertEqual(seqs[0], "F9")
+        for want in ("Ctrl+Alt+Up", "Shift+F9", "Ctrl+Alt+Shift+Up"):
+            self.assertIn(QKeySequence(want).toString(), seqs)
+
+    def test_promote_is_default_button(self):
+        dlg = self._dialog()
+        self.assertTrue(dlg.btn_promote.isDefault())
+
+    def test_return_and_enter_confirm(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDialog
+        for key in (Qt.Key_Return, Qt.Key_Enter):
+            dlg = self._dialog()
+            dlg.tree.setFocus()
+            self._press(dlg, key)
+            self.assertEqual(dlg.result(), QDialog.Accepted, key)
+
+    def test_promote_all_shortcuts_confirm(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDialog
+        mods_ctrl_alt = Qt.ControlModifier | Qt.AltModifier
+        for key, mods in ((Qt.Key_F9, Qt.NoModifier), (Qt.Key_Up, mods_ctrl_alt),
+                          (Qt.Key_F9, Qt.ShiftModifier),
+                          (Qt.Key_Up, mods_ctrl_alt | Qt.ShiftModifier)):
+            dlg = self._dialog()
+            self._press(dlg, key, mods)
+            self.assertEqual(dlg.result(), QDialog.Accepted, (key, mods))
+
+    def test_held_f9_does_not_confirm(self):
+        from PySide6.QtCore import Qt
+        dlg = self._dialog()
+        self._press(dlg, Qt.Key_F9, autorep=True)
+        self.assertTrue(dlg.isVisible())
+        self.assertEqual(dlg.result(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
