@@ -588,7 +588,8 @@ class Promoter:
         the old version stays live until the new one is complete.
         """
         valid_extensions = self._valid_extensions
-        source_files = self._list_media(source_dir)
+        source_entries = {e.path: e for e in self._media_entries(source_dir)}
+        source_files = [Path(p) for p in source_entries]
 
         # When source_dir is the watched source root (flat file layout),
         # it contains files from ALL versions — filter to only the target version.
@@ -597,6 +598,20 @@ class Promoter:
 
         if not source_files:
             raise PromotionError(f"No matching files found in {source_dir}")
+
+        # What the staging dir must contain afterwards: staged name -> source
+        # size. Two source files renamed to the same target name would
+        # silently overwrite each other — refuse instead.
+        expected: dict[str, Optional[int]] = {}
+        for src_file in source_files:
+            name = self._remap_filename(src_file.name)
+            if name in expected:
+                raise PromotionError(
+                    f"Two source files map to the same target name '{name}' "
+                    f"(check the file rename template) — nothing was promoted."
+                )
+            entry = source_entries.get(str(src_file))
+            expected[name] = self._entry_size(entry) if entry is not None else None
 
         total = len(source_files)
         mode = self.source.link_mode
@@ -621,6 +636,7 @@ class Promoter:
                 raise PromotionError(
                     "Promotion cancelled by user — target left unchanged."
                 )
+            self._verify_staged(staging_dir, expected)
         except BaseException:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
@@ -684,6 +700,11 @@ class Promoter:
         if progress_callback:
             progress_callback(0, 1, source_file.name)
 
+        try:
+            source_size: Optional[int] = os.stat(source_file).st_size
+        except OSError:
+            source_size = None
+
         staging_dir = self._prepare_staging_dir(target_dir)
         try:
             self._link_or_copy(source_file, staging_dir / target_name)
@@ -691,6 +712,7 @@ class Promoter:
                 raise PromotionError(
                     "Promotion cancelled by user — target left unchanged."
                 )
+            self._verify_staged(staging_dir, {target_name: source_size})
         except BaseException:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
@@ -1034,6 +1056,58 @@ class Promoter:
             elif e.is_symlink():
                 removal.append(Path(e.path))
         return self._drop_foreign_files(removal, target_dir, own_stem)
+
+    @staticmethod
+    def _entry_size(entry) -> Optional[int]:
+        try:
+            return entry.stat().st_size
+        except OSError:
+            return None
+
+    def _verify_staged(self, staging_dir: Path, expected: dict) -> None:
+        """Check the staging dir before anything in the target is touched.
+
+        *expected* maps each staged name to the size of its source file
+        (None = unknown, only presence is checked). One listing of the
+        staging dir; sizes follow symlinks, so in symlink mode this also
+        catches a link that doesn't resolve. On Windows the sizes come with
+        the listing; elsewhere each one is a stat of a file just written.
+
+        Raises PromotionError (the caller discards the staging dir, so the
+        target keeps the previous version) when a file is missing, there is
+        an unexpected extra file, or a size differs from its source — for
+        example a copy cut short, or a source still being written.
+        """
+        try:
+            with os.scandir(staging_dir) as it:
+                staged = {e.name: e for e in it}
+        except OSError as e:
+            raise PromotionError(f"Cannot read staging directory {staging_dir}: {e}") from e
+
+        problems = []
+        for name in sorted(set(expected) - set(staged)):
+            problems.append(f"{name}: missing from the staged copy")
+        for name in sorted(set(staged) - set(expected)):
+            problems.append(f"{name}: not expected in the staged copy")
+        for name in sorted(set(expected) & set(staged)):
+            want = expected[name]
+            if want is None:
+                continue
+            got = self._entry_size(staged[name])
+            if got is None:
+                problems.append(f"{name}: staged file can't be read")
+            elif got != want:
+                problems.append(
+                    f"{name}: {got:,} bytes staged, source has {want:,} "
+                    f"(copy cut short, or the source is still being written)"
+                )
+        if problems:
+            shown = "\n  ".join(problems[:10])
+            more = f"\n  ... and {len(problems) - 10} more" if len(problems) > 10 else ""
+            raise PromotionError(
+                f"Staged copy failed verification — target left unchanged:\n  {shown}{more}"
+            )
+        logger.debug("Verified %d staged file(s) in %s", len(expected), staging_dir)
 
     @staticmethod
     def _run_renames(fn, names: list[str]) -> None:
