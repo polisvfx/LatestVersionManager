@@ -31,7 +31,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeDat
 from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
 from PySide6.QtSvg import QSvgRenderer
 
-from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEntry, make_relative, DEFAULT_FILE_EXTENSIONS, version_strings_match
+from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEntry, make_relative, DEFAULT_FILE_EXTENSIONS, version_strings_match, CONFIG_VERSION
 from src.lvm.config import load_config, save_config, create_example_config, create_project, apply_project_defaults, _expand_group_token, _resolve_group_root
 from src.lvm.scanner import VersionScanner, detect_sequence_from_file, scan_directory_as_version, create_manual_version
 from src.lvm.promoter import Promoter, PromotionError, generate_report

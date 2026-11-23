@@ -164,6 +164,25 @@ class TestMainWindowWiring(_MainWindowTestBase):
         self.assertTrue(Path(self.win.config_path).exists())
         self.assertEqual(Path(self.win.config.project_dir), self.tmp.resolve())
 
+    def test_newer_config_version_warns(self):
+        from src.lvm.models import CONFIG_VERSION, ProjectConfig
+        cfg = ProjectConfig(project_name="P")
+        cfg.loaded_config_version = CONFIG_VERSION + 1
+        with patch("app.main_window.QMessageBox.warning") as warn:
+            self.win._warn_if_newer_config(cfg)
+        warn.assert_called_once()
+        self.assertIn("newer version", warn.call_args.args[2])
+
+    def test_current_config_version_does_not_warn(self):
+        from src.lvm.models import ProjectConfig
+        for v in (0, None):
+            cfg = ProjectConfig(project_name="P")
+            if v is not None:
+                cfg.loaded_config_version = v
+            with patch("app.main_window.QMessageBox.warning") as warn:
+                self.win._warn_if_newer_config(cfg)
+            warn.assert_not_called()
+
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")
 class TestAutoPromoteOffGuiThread(_MainWindowTestBase):
