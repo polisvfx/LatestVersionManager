@@ -187,7 +187,12 @@ class UpdateDownloadWorker(QThread):
 
 
 class ScanWorker(QThread):
-    """Scans project sources in a background thread."""
+    """Scans project sources in a background thread.
+
+    With *previous_cache* ({source name: earlier versions}) the scan is
+    incremental: unchanged version folders are reused instead of listed
+    again (see ``VersionScanner.scan``). Pass none for a full rescan.
+    """
     progress = Signal(int, int, str)  # current_index, total, source_name
     finished = Signal(dict)           # {source_name: (versions, status_info)}
     error = Signal(str)
@@ -200,13 +205,20 @@ class ScanWorker(QThread):
 
     def run(self):
         try:
+            import time as _time
+            started = _time.monotonic()
             results = {}
             total = len(self._sources)
             tc_mode = self.config.timecode_mode
+            counts = {"reused": 0, "scanned": 0}
+            counts_lock = threading.Lock()
 
             def _scan_one(source):
                 scanner = VersionScanner(source, self.config.task_tokens)
-                versions = scanner.scan()
+                versions = scanner.scan(previous=self.previous_cache.get(source.name))
+                with counts_lock:
+                    counts["reused"] += scanner.last_reused
+                    counts["scanned"] += scanner.last_scanned
                 return source.name, versions
 
             worker_count = min(8, total)
@@ -236,6 +248,11 @@ class ScanWorker(QThread):
                 all_versions = [v for versions in results.values() for v in versions]
                 populate_timecodes_parallel(all_versions, max_workers=8)
 
+            folders = counts["reused"] + counts["scanned"]
+            logger.info(
+                "Scanned %d source(s) in %.2fs — %d of %d version folder(s) unchanged and reused",
+                total, _time.monotonic() - started, counts["reused"], folders,
+            )
             self.finished.emit(results)
         except Exception as e:
             self.error.emit(str(e))

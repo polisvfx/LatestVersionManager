@@ -91,6 +91,12 @@ class MainWindow(QMainWindow):
         self._project_load_worker: ProjectLoadWorker = None
         self._reload_pending: bool = False
         self._rescan_after_cache: bool = False
+        # Sources whose refresh was requested while a scan/status worker was
+        # busy; refreshed together once it finishes. _pending_refresh_user is
+        # True if any of those requests came from the user (full rescan,
+        # buttons disabled) rather than the watcher.
+        self._pending_refresh_names: set[str] = set()
+        self._pending_refresh_user: bool = False
         self._reload_select_source: str = None  # source to select after async _reload_ui
         self._refresh_select_source: str = None  # source name to re-select after background refresh
         self._thumb_worker: ThumbnailWorker = None
@@ -167,7 +173,9 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         self.btn_refresh = QPushButton("Refresh All")
-        self.btn_refresh.clicked.connect(self._refresh_all)
+        # The explicit Refresh button always lists every folder again; all
+        # automatic refreshes reuse unchanged version folders.
+        self.btn_refresh.clicked.connect(lambda: self._refresh_all(full=True))
         self.btn_refresh.setEnabled(False)
         toolbar.addWidget(self.btn_refresh)
 
@@ -2105,10 +2113,21 @@ class MainWindow(QMainWindow):
             self._check_reload_pending()
 
     def _check_reload_pending(self):
-        """If another reload was requested while one was running, start it now."""
+        """After a scan/status cycle: start a reload, or the per-source
+        refreshes, that were requested while it was running."""
         if self._reload_pending:
             self._reload_pending = False
+            self._pending_refresh_names.clear()  # a full reload covers them
+            self._pending_refresh_user = False
             self._reload_ui()
+            return
+        if (self._pending_refresh_names and self._scan_worker is None
+                and self._status_worker is None and self.config):
+            names = sorted(self._pending_refresh_names)
+            background = not self._pending_refresh_user
+            self._pending_refresh_names.clear()
+            self._pending_refresh_user = False
+            self._refresh_sources_by_name(names, background=background)
 
     # Keep old name as alias for the cache-first load path
     def _reload_ui_from_cache(self, cached_versions: dict):
@@ -2280,29 +2299,10 @@ class MainWindow(QMainWindow):
             self.source_list.setSortingEnabled(True)
             return
 
-        filter_mode = self.source_filter.currentText()
-        search_query = self.source_search.text().strip() if hasattr(self, 'source_search') else ""
         group_by = self.group_by_check.isChecked() if hasattr(self, 'group_by_check') else False
 
         # Build filtered source list
-        filtered = []
-        for source in self.config.watched_sources:
-            info = self._source_status.get(source.name, {})
-            status = info.get("status", "no_target")
-
-            # Apply status filter
-            if filter_mode == "Newer Available" and status != "newer":
-                continue
-            if filter_mode == "Stale" and status != "stale":
-                continue
-            if filter_mode == "Not on Highest" and status not in ("newer", "deliberate", "stale", "no_version"):
-                continue
-
-            # Apply search filter
-            if not self._source_matches_search(source, search_query):
-                continue
-
-            filtered.append(source)
+        filtered = [s for s in self.config.watched_sources if self._source_visible(s)]
 
         if group_by and self.config.groups:
             # Sort: grouped sources first (by group name, then source name), ungrouped last
@@ -2411,20 +2411,27 @@ class MainWindow(QMainWindow):
         if self.source_list.topLevelItemCount() > 0:
             self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
 
-    def _refresh_sources_by_name(self, source_names: list[str], select_source: str = None):
+    def _refresh_sources_by_name(self, source_names: list[str], select_source: str = None,
+                                 background: bool = False):
         """Re-scan only the given sources (by name) using the background worker path.
 
         Delegates to _refresh_selected_sources which uses ScanWorker + StatusWorker
-        so the UI stays responsive even on slow network paths.
+        so the UI stays responsive even on slow network paths. *background*
+        marks a refresh the user didn't ask for (watcher): it is incremental
+        and leaves the buttons usable.
         """
         if not self.config:
             return
         if self._scan_worker is not None or self._status_worker is not None:
-            # A worker is already running — schedule a full refresh once it finishes
-            # rather than silently dropping this request.
-            logger.debug("Refresh worker busy — scheduling full rescan after current worker")
-            self._rescan_after_cache = True
-            self._refresh_select_source = select_source
+            # Queue it; _check_reload_pending runs the queue when the worker
+            # is done. (This used to set _rescan_after_cache, which only the
+            # project-load path reads, so the request was silently dropped.)
+            logger.debug("Refresh worker busy — queueing refresh of %s", ", ".join(source_names))
+            self._pending_refresh_names.update(source_names)
+            if not background:
+                self._pending_refresh_user = True
+            if select_source:
+                self._refresh_select_source = select_source
             return
 
         # Resolve source names to indices
@@ -2435,7 +2442,8 @@ class MainWindow(QMainWindow):
         if not indices:
             return
 
-        self._refresh_selected_sources(indices, select_source=select_source)
+        self._refresh_selected_sources(indices, select_source=select_source,
+                                       background=background)
 
     def _refresh_all_with_selection(self, select_source: str = None):
         """Re-scan all sources in background, restoring the given source selection on completion."""
@@ -2453,11 +2461,14 @@ class MainWindow(QMainWindow):
                 self._refresh_selected_sources([i])
                 return
 
-    def _refresh_selected_sources(self, indices: list[int], select_source: str = None):
+    def _refresh_selected_sources(self, indices: list[int], select_source: str = None,
+                                  background: bool = False):
         """Re-scan only the specified sources in background thread.
 
-        *select_source* is re-selected afterwards; by default the currently
-        selected source is kept.
+        *select_source* is selected afterwards if given; otherwise the
+        current selection is kept. A *background* refresh (watcher) reuses
+        unchanged version folders and doesn't disable any buttons; a user
+        refresh lists everything again.
         """
         if not self.config or self._scan_worker is not None or self._status_worker is not None:
             return
@@ -2465,22 +2476,26 @@ class MainWindow(QMainWindow):
         if not sources:
             return
 
-        # Remember which source to re-select after refresh
-        if select_source is None and self._current_source:
-            select_source = self._current_source.name
-        self._refresh_select_source = select_source
+        if select_source:
+            self._refresh_select_source = select_source
 
-        self.btn_refresh.setEnabled(False)
-        self.btn_refresh_versions.setEnabled(False)
-        self.btn_promote.setEnabled(False)
-        self.btn_promote_all.setEnabled(False)
-        self.btn_promote_split_all.setEnabled(False)
+        if not background:
+            self.btn_refresh.setEnabled(False)
+            self.btn_refresh_versions.setEnabled(False)
+            self.btn_promote.setEnabled(False)
+            self.btn_promote_all.setEnabled(False)
+            self.btn_promote_split_all.setEnabled(False)
         names = ", ".join(s.name for s in sources)
         self._scan_indicator.setText("Updating...")
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
         self.statusBar().showMessage(f"Scanning: {names}")
 
-        self._scan_worker = ScanWorker(self.config, sources=sources, parent=self)
+        previous = (
+            {s.name: self._versions_cache.get(s.name, []) for s in sources}
+            if background else {}
+        )
+        self._scan_worker = ScanWorker(self.config, sources=sources,
+                                       previous_cache=previous, parent=self)
         self._scan_worker.progress.connect(self._on_refresh_progress)
         self._scan_worker.finished.connect(self._on_partial_refresh_complete)
         self._scan_worker.error.connect(self._on_refresh_error)
@@ -2522,41 +2537,118 @@ class MainWindow(QMainWindow):
             self._target_conflicts.setdefault(name_a, []).append(name_b)
             self._target_conflicts.setdefault(name_b, []).append(name_a)
 
-        # Rebuild source list and restore selection
-        self.source_list.clear()
-        self.version_tree.clear()
-        self.history_tree.clear()
+        # Update the refreshed rows in place — rebuilding the whole list
+        # (and both trees) on every watcher event flickered, lost the scroll
+        # position and the selected version. Fall back to a rebuild only when
+        # a row has to appear or disappear under the current filter.
+        refreshed = set(source_status)
+        if not self._update_source_items(refreshed):
+            self._apply_source_filter()
 
         self.btn_refresh.setEnabled(True)
-        self.btn_import_version.setEnabled(False)
-        self.btn_refresh_versions.setEnabled(False)
-        self.btn_promote.setEnabled(False)
-        self.btn_revert.setEnabled(False)
-        self.btn_promote_all.setEnabled(len(self.config.watched_sources) > 0 and self._worker is None)
-
-        self._populate_source_list()
-
         self._scan_indicator.setText("")
-        self._update_discover_promote_button()
         count = getattr(self, '_partial_scan_count', 0)
         self.statusBar().showMessage(f"Refreshed {count} source{'s' if count != 1 else ''}", 3000)
 
-        # Restore selection
-        if self._refresh_select_source:
-            for i in range(self.source_list.topLevelItemCount()):
-                if self.source_list.topLevelItem(i).data(0, Qt.UserRole) == self._refresh_select_source:
-                    self.source_list.setCurrentItem(self.source_list.topLevelItem(i))
-                    self._refresh_select_source = None
-                    self._check_reload_pending()
-                    return
+        target = self._refresh_select_source
         self._refresh_select_source = None
-        if self.source_list.topLevelItemCount() > 0:
+        current = self._current_source.name if self._current_source else None
+        if target and target != current:
+            self._select_source_by_name(target)       # re-renders via selection change
+        elif current in refreshed:
+            self._rerender_current_source()
+        elif current is None and self.source_list.topLevelItemCount() > 0:
             self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
+
+        # Re-derive button states from the (unchanged or restored) selection.
+        self.btn_refresh_versions.setEnabled(self._current_source is not None)
+        self._on_version_selected()
+        self._on_history_selected()
+        self._on_source_selection_changed()
 
         self._check_reload_pending()
 
-    def _refresh_all(self):
-        """Re-scan all sources in background thread."""
+    def _source_visible(self, source: WatchedSource) -> bool:
+        """Whether *source* passes the status filter and search box."""
+        filter_mode = self.source_filter.currentText()
+        status = self._source_status.get(source.name, {}).get("status", "no_target")
+        if filter_mode == "Newer Available" and status != "newer":
+            return False
+        if filter_mode == "Stale" and status != "stale":
+            return False
+        if filter_mode == "Not on Highest" and status not in ("newer", "deliberate", "stale", "no_version"):
+            return False
+        search_query = self.source_search.text().strip() if hasattr(self, 'source_search') else ""
+        return self._source_matches_search(source, search_query)
+
+    def _update_source_items(self, names: set) -> bool:
+        """Refresh the source-list rows for *names* in place.
+
+        Returns False (nothing or only part updated) when the list needs a
+        full rebuild instead: a source that should now appear or disappear
+        under the active filter, or one that isn't in the config any more.
+        """
+        items = {}
+        for i in range(self.source_list.topLevelItemCount()):
+            item = self.source_list.topLevelItem(i)
+            key = item.data(0, Qt.UserRole)
+            if key:
+                items[key] = item
+        updates = []
+        for name in names:
+            source = self._source_by_name(name)
+            if source is None:
+                return False
+            item = items.get(name)
+            if (item is not None) != self._source_visible(source):
+                return False
+            if item is not None:
+                updates.append((item, source))
+        self.source_list.setUpdatesEnabled(False)
+        try:
+            for item, source in updates:
+                fresh = self._make_source_item(source)
+                for col in range(fresh.columnCount()):
+                    item.setText(col, fresh.text(col))
+                    item.setForeground(col, fresh.foreground(col))
+                    item.setToolTip(col, fresh.toolTip(col))
+        finally:
+            self.source_list.setUpdatesEnabled(True)
+        return True
+
+    def _rerender_current_source(self):
+        """Rebuild the version/history trees of the selected source after its
+        data changed, keeping the selected versions and the scroll position."""
+        if not self._current_source:
+            return
+        selected = {
+            getattr(item.data(0, Qt.UserRole), "source_path", None)
+            for item in self.version_tree.selectedItems()
+        }
+        current_item = self.version_tree.currentItem()
+        current_key = (getattr(current_item.data(0, Qt.UserRole), "source_path", None)
+                       if current_item else None)
+        v_scroll = self.version_tree.verticalScrollBar().value()
+        h_scroll = self.history_tree.verticalScrollBar().value()
+
+        self._on_source_selected_by_name(self._current_source.name)
+
+        for i in range(self.version_tree.topLevelItemCount()):
+            item = self.version_tree.topLevelItem(i)
+            key = getattr(item.data(0, Qt.UserRole), "source_path", None)
+            if key is not None and key == current_key:
+                self.version_tree.setCurrentItem(item)
+            if key is not None and key in selected:
+                item.setSelected(True)
+        self.version_tree.verticalScrollBar().setValue(v_scroll)
+        self.history_tree.verticalScrollBar().setValue(h_scroll)
+
+    def _refresh_all(self, full: bool = False):
+        """Re-scan all sources in background thread.
+
+        Incremental by default (unchanged version folders are reused);
+        ``full=True`` lists every folder again.
+        """
         if not self.config or not self.config.watched_sources:
             self._reload_ui()
             return
@@ -2575,7 +2667,8 @@ class MainWindow(QMainWindow):
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
         self.statusBar().showMessage("Scanning sources...")
 
-        self._scan_worker = ScanWorker(self.config, previous_cache=dict(self._versions_cache), parent=self)
+        previous = {} if full else dict(self._versions_cache)
+        self._scan_worker = ScanWorker(self.config, previous_cache=previous, parent=self)
         self._scan_worker.progress.connect(self._on_refresh_progress)
         self._scan_worker.finished.connect(self._on_refresh_complete)
         self._scan_worker.error.connect(self._on_refresh_error)
@@ -3871,11 +3964,12 @@ class MainWindow(QMainWindow):
     def _on_watcher_change(self, source_name: str):
         """A watched source had new files — refresh only that source."""
         logger.info(f"Watcher detected changes in: {source_name}")
-        self._versions_cache.pop(source_name, None)
 
-        # Refresh only the changed source instead of all sources
+        # Refresh only the changed source, incrementally. The cached versions
+        # are kept: the scan reuses them, and selecting the source meanwhile
+        # shows them instead of scanning on the GUI thread.
         if self.config:
-            self._refresh_sources_by_name([source_name])
+            self._refresh_sources_by_name([source_name], background=True)
 
         self.statusBar().showMessage(f"New version detected in: {source_name}")
 
