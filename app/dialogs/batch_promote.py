@@ -22,7 +22,12 @@ from app._common import (
 
 
 class BatchPromoteReviewDialog(QDialog):
-    """Review table for batch promotion with per-source checkboxes."""
+    """Review table for batch promotion with per-source checkboxes.
+
+    Enter/Return confirms (Promote Selected is the default button), and so
+    do the Promote All shortcuts (F9, Ctrl+Alt+Up and their Shift variants):
+    pressing the shortcut again promotes.
+    """
 
     def __init__(self, promote_list, source_status, promoters, already_current, skipped, parent=None):
         super().__init__(parent)
@@ -92,8 +97,10 @@ class BatchPromoteReviewDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_select_all = QPushButton("Select All")
+        btn_select_all.setAutoDefault(False)
         btn_select_all.clicked.connect(lambda: self._set_all_checked(True))
         btn_deselect_all = QPushButton("Deselect All")
+        btn_deselect_all.setAutoDefault(False)
         btn_deselect_all.clicked.connect(lambda: self._set_all_checked(False))
         btn_row.addWidget(btn_select_all)
         btn_row.addWidget(btn_deselect_all)
@@ -105,14 +112,27 @@ class BatchPromoteReviewDialog(QDialog):
             "border-radius: 4px; font-weight: bold; }"
             "QPushButton:hover { background-color: #4d7aae; }"
         )
+        btn_promote.setToolTip("Enter, F9 or Ctrl+Alt+Up")
+        btn_promote.setDefault(True)
         btn_promote.clicked.connect(self.accept)
         btn_row.addWidget(btn_promote)
+        self.btn_promote = btn_promote
 
         btn_cancel = QPushButton("Cancel")
+        btn_cancel.setAutoDefault(False)
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
 
         layout.addLayout(btn_row)
+
+        # The Promote All shortcut confirms, so F9, F9 promotes. Auto-repeat
+        # is off: holding F9 down to open the dialog must not also confirm it.
+        self._confirm_shortcuts = []
+        for seq in PROMOTE_ALL_SHORTCUTS + PROMOTE_ALL_FORCE_SHORTCUTS:
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setAutoRepeat(False)
+            sc.activated.connect(self.accept)
+            self._confirm_shortcuts.append(sc)
 
     def _set_all_checked(self, checked):
         state = Qt.Checked if checked else Qt.Unchecked

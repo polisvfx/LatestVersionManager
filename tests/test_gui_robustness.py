@@ -528,5 +528,228 @@ class TestSourceWatcherBackends(unittest.TestCase):
         self.assertEqual(self.status[-1], "Watcher stopped")
 
 
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestPromoteAllShortcuts(_MainWindowTestBase):
+    """F9 promotes all; Enter, F9 and Ctrl+Alt+Up confirm the review dialog."""
+
+    def _dialog(self):
+        from app.dialogs.batch_promote import BatchPromoteReviewDialog
+        from src.lvm.models import VersionInfo, WatchedSource
+        src = WatchedSource(name="S", source_dir=str(self.tmp))
+        ver = VersionInfo(version_string="v002", version_number=2,
+                          source_path=str(self.tmp / "v002"))
+        dlg = BatchPromoteReviewDialog([(src, ver)], {}, {}, [], [], parent=self.win)
+        dlg.show()
+        dlg.activateWindow()
+        from PySide6.QtTest import QTest
+        QTest.qWaitForWindowActive(dlg, 1000)
+        self.addCleanup(dlg.deleteLater)
+        return dlg
+
+    def _press(self, dlg, key, modifiers=None, autorep=False):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        mods = modifiers if modifiers is not None else Qt.NoModifier
+        target = QApplication.focusWidget() or dlg
+        for etype in (QEvent.ShortcutOverride, QEvent.KeyPress):
+            ev = QKeyEvent(etype, key, mods, "", autorep)
+            QApplication.sendEvent(target, ev)
+        QApplication.sendEvent(target, QKeyEvent(QEvent.KeyRelease, key, mods, "", autorep))
+        QApplication.processEvents()
+
+    def test_menu_action_has_f9_and_old_shortcut(self):
+        from PySide6.QtGui import QKeySequence
+        action = next(a for m in self.win.menuBar().actions()
+                      for a in m.menu().actions() if a.text() == "&Promote All to Latest")
+        seqs = [s.toString() for s in action.shortcuts()]
+        self.assertEqual(seqs[0], "F9")
+        for want in ("Ctrl+Alt+Up", "Shift+F9", "Ctrl+Alt+Shift+Up"):
+            self.assertIn(QKeySequence(want).toString(), seqs)
+
+    def test_promote_is_default_button(self):
+        dlg = self._dialog()
+        self.assertTrue(dlg.btn_promote.isDefault())
+
+    def test_return_and_enter_confirm(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDialog
+        for key in (Qt.Key_Return, Qt.Key_Enter):
+            dlg = self._dialog()
+            dlg.tree.setFocus()
+            self._press(dlg, key)
+            self.assertEqual(dlg.result(), QDialog.Accepted, key)
+
+    def test_promote_all_shortcuts_confirm(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDialog
+        mods_ctrl_alt = Qt.ControlModifier | Qt.AltModifier
+        for key, mods in ((Qt.Key_F9, Qt.NoModifier), (Qt.Key_Up, mods_ctrl_alt),
+                          (Qt.Key_F9, Qt.ShiftModifier),
+                          (Qt.Key_Up, mods_ctrl_alt | Qt.ShiftModifier)):
+            dlg = self._dialog()
+            self._press(dlg, key, mods)
+            self.assertEqual(dlg.result(), QDialog.Accepted, (key, mods))
+
+    def test_held_f9_does_not_confirm(self):
+        from PySide6.QtCore import Qt
+        dlg = self._dialog()
+        self._press(dlg, Qt.Key_F9, autorep=True)
+        self.assertTrue(dlg.isVisible())
+        self.assertEqual(dlg.result(), 0)
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestResolveMetadataSetting(unittest.TestCase):
+    """Settings -> NLE -> Resolve metadata combo round-trips the option."""
+
+    def test_combo_reads_and_writes_option(self):
+        _app()
+        from app.dialogs.settings import ProjectSettingsDialog
+        from src.lvm.models import ProjectConfig
+        cfg = ProjectConfig(project_name="P", nle_resolve_metadata_field="Description")
+        dlg = ProjectSettingsDialog(cfg)
+        self.addCleanup(dlg.deleteLater)
+        self.assertEqual(dlg.nle_metadata_combo.currentData(), "Description")
+        dlg.nle_metadata_combo.setCurrentIndex(dlg.nle_metadata_combo.findData(""))
+        dlg.apply_to_config(cfg)
+        self.assertEqual(cfg.nle_resolve_metadata_field, "")
+        dlg.nle_metadata_combo.setCurrentIndex(dlg.nle_metadata_combo.findData("Comments"))
+        dlg.apply_to_config(cfg)
+        self.assertEqual(cfg.nle_resolve_metadata_field, "Comments")
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestAutoPromoteNotifier(unittest.TestCase):
+    """Level filtering, de-duplication and the active-window rule."""
+
+    def setUp(self):
+        _app()
+        from unittest.mock import MagicMock
+        from PySide6.QtWidgets import QWidget
+        from app.notifier import AutoPromoteNotifier
+        self.window = QWidget()
+        self.addCleanup(self.window.deleteLater)
+        self.n = AutoPromoteNotifier(self.window)
+        self.tray = MagicMock()
+
+    def _level(self, level):
+        with patch("app.notifier.AutoPromoteNotifier.available", return_value=False):
+            self.n.set_level(level)
+        self.n._tray = None if level == "off" else self.tray
+
+    def test_off_shows_nothing(self):
+        self._level("off")
+        self.assertFalse(self.n.notify("a", "failed", "a: boom"))
+
+    def test_problems_level_filters(self):
+        self._level("problems")
+        self.assertFalse(self.n.notify("a", "promoted", "a -> v002"))
+        self.assertFalse(self.n.notify("a", "waiting", "a waiting"))
+        self.assertTrue(self.n.notify("a", "skipped", "a: range"))
+        self.assertTrue(self.n.notify("b", "failed", "b: boom"))
+        self.assertEqual(self.tray.showMessage.call_count, 2)
+
+    def test_all_level_and_dedupe(self):
+        self._level("all")
+        self.assertTrue(self.n.notify("a", "skipped", "a: range"))
+        self.assertFalse(self.n.notify("a", "skipped", "a: range"))  # same again
+        self.assertTrue(self.n.notify("a", "promoted", "a -> v002"))
+        self.assertTrue(self.n.notify("a", "skipped", "a: range"))  # after something else
+
+    def test_not_shown_while_window_active(self):
+        self._level("all")
+        with patch.object(self.window, "isActiveWindow", return_value=True):
+            self.assertFalse(self.n.notify("a", "failed", "a: boom"))
+        self.tray.showMessage.assert_not_called()
+
+    def test_unknown_level_is_off(self):
+        self._level("loud")
+        self.assertEqual(self.n.level, "off")
+
+    def test_click_selects_source(self):
+        from unittest.mock import MagicMock
+        clicked = MagicMock()
+        self.n._on_clicked = clicked
+        self._level("all")
+        self.n.notify("shot", "promoted", "shot -> v003")
+        self.n._message_clicked()
+        clicked.assert_called_once_with("shot")
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestAutoPromoteNotifications(_MainWindowTestBase):
+    """MainWindow reports auto-promote outcomes to the notifier."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest.mock import MagicMock
+        self.notify = MagicMock()
+        self.win._notifier.notify = self.notify
+        self._enabled = patch.object(type(self.win), "_auto_promote_enabled", return_value=True)
+        self._enabled.start()
+        self.addCleanup(self._enabled.stop)
+
+    def _decision(self, action, **kw):
+        from src.lvm.auto_promote import AutoPromoteDecision
+        return AutoPromoteDecision(source_name="shot", action=action, **kw)
+
+    def test_skip_and_error_notify(self):
+        from src.lvm import auto_promote as ap
+        self.win._on_auto_promote_decided(self._decision(ap.SKIP, reason="frame range changed"))
+        self.notify.assert_called_with("shot", "skipped", "shot: frame range changed")
+        self.win._on_auto_promote_decided(self._decision(ap.ERROR, reason="scan failed"))
+        self.notify.assert_called_with("shot", "failed", "shot: scan failed")
+
+    def test_waiting_notifies_first_time_only(self):
+        from src.lvm import auto_promote as ap
+        from src.lvm.models import VersionInfo
+        v = VersionInfo("v002", 2, str(self.tmp / "v002"))
+        with patch.object(self.win, "_schedule_render_wait_retry"):
+            self.win._on_auto_promote_decided(self._decision(ap.WAIT_RENDER, version=v,
+                                                             reason="open"))
+            self.win._on_auto_promote_decided(self._decision(ap.WAIT_RENDER, version=v,
+                                                             reason="open",
+                                                             waiting_on_render=True))
+        self.assertEqual(self.notify.call_count, 1)
+        self.assertEqual(self.notify.call_args.args[1], "waiting")
+
+    def test_auto_promotion_finish_and_failure_notify(self):
+        from src.lvm.models import HistoryEntry
+        entry = HistoryEntry(version="v002", source="", set_by="t", set_at="")
+        with patch.object(self.win, "_process_deferred_or_refresh"), \
+             patch.object(self.win, "_maybe_auto_sync_nle"):
+            self.win._promoting_source_name = "shot"
+            self.win._auto_promoting_name = "shot"
+            self.win._on_promote_finished(entry)
+        self.notify.assert_called_once_with("shot", "promoted", "shot → v002")
+        self.assertIsNone(self.win._auto_promoting_name)
+
+        self.notify.reset_mock()
+        with patch("app.main_window.QMessageBox.critical"):
+            self.win._promoting_source_name = "shot"
+            self.win._auto_promoting_name = "shot"
+            self.win._on_promote_error("Disk full\nmore detail")
+        self.notify.assert_called_once_with("shot", "failed", "shot: Disk full")
+
+    def test_manual_promotion_does_not_notify(self):
+        from src.lvm.models import HistoryEntry
+        entry = HistoryEntry(version="v002", source="", set_by="t", set_at="")
+        with patch.object(self.win, "_process_deferred_or_refresh"), \
+             patch.object(self.win, "_maybe_auto_sync_nle"):
+            self.win._promoting_source_name = "shot"
+            self.win._on_promote_finished(entry)
+        self.notify.assert_not_called()
+
+    def test_option_round_trip(self):
+        from src.lvm.models import ProjectConfig
+        cfg = ProjectConfig(project_name="P", auto_promote_notifications="problems")
+        d = cfg.to_dict()
+        self.assertEqual(ProjectConfig.from_dict(d).auto_promote_notifications, "problems")
+        d["auto_promote_notifications"] = "loud"
+        self.assertEqual(ProjectConfig.from_dict(d).auto_promote_notifications, "off")
+        self.assertNotIn("auto_promote_notifications",
+                         ProjectConfig(project_name="P").to_dict())
+
+
 if __name__ == "__main__":
     unittest.main()

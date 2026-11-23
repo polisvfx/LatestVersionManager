@@ -20,6 +20,12 @@ Every clip LVM manages also gets a status flag (one per clip):
 The other flag colours are left alone. Change the ``FLAG_*`` constants
 below to use different colours, or set ``FLAG_CLIPS = False`` to disable.
 
+When the project enables it (Settings -> NLE -> Resolve metadata), each
+clip's "Comments" or "Description" field also shows the promotion, e.g.
+``LVM v005 | 2026-11-20 | mp``. The field is only written while it is
+empty or holds an earlier LVM value (starts with ``LVM ``), so notes typed
+by editors are never overwritten.
+
 Install (Windows):
     %APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support\\Fusion\\Scripts\\Edit\\
 
@@ -339,6 +345,42 @@ def _write_promotion_metadata(item, marker):
         pass
 
 
+METADATA_PREFIX = "LVM "
+
+
+def _visible_metadata_value(cur):
+    """``LVM v005 | 2026-11-20 | mp`` for the sidecar's current promotion."""
+    parts = [f"{METADATA_PREFIX}{cur.get('version', '')}".strip()]
+    date = (cur.get("set_at") or "")[:10]
+    if date:
+        parts.append(date)
+    if cur.get("set_by"):
+        parts.append(cur["set_by"])
+    return " | ".join(parts)
+
+
+def _write_visible_metadata(item, cur):
+    """Write the promotion into the visible field the project chose.
+
+    Returns ``"written"``, ``"current"`` (already up to date), ``"kept"``
+    (the field holds someone else's text) or ``""`` (not enabled).
+    """
+    field = cur.get("nle_metadata_field") or ""
+    if not field:
+        return ""
+    value = _visible_metadata_value(cur)
+    existing = item.GetMetadata(field)
+    if isinstance(existing, dict):
+        existing = existing.get(field, "")
+    existing = existing if isinstance(existing, str) else ""
+    if existing == value:
+        return "current"
+    if existing.strip() and not existing.startswith(METADATA_PREFIX):
+        return "kept"
+    item.SetMetadata(field, value)
+    return "written"
+
+
 def _clip_flags(item):
     try:
         return list(item.GetFlagList() or [])
@@ -414,7 +456,8 @@ def _empty_stats(ok, errors=0):
     return {
         "renamed": 0, "idempotent": 0, "no_match": 0, "errors": errors,
         STATUS_WATCHED: 0, STATUS_PROMOTED: 0, STATUS_STALE: 0,
-        "flag_errors": 0, "ok": ok,
+        "flag_errors": 0, "metadata_written": 0, "metadata_kept": 0,
+        "ok": ok,
     }
 
 
@@ -478,6 +521,8 @@ def rename_clips(resolve, log=None):
     processed = 0
     status_counts = {STATUS_WATCHED: 0, STATUS_PROMOTED: 0, STATUS_STALE: 0}
     flag_errors = 0
+    metadata_written = 0
+    metadata_kept = 0
     stale_cache = {}
     HEARTBEAT_EVERY = 250
 
@@ -522,6 +567,16 @@ def rename_clips(resolve, log=None):
                     detail = f" ({reason})" if reason else ""
                     log("info", f"  [{_STATUS_FLAGS[status]} flag] {clip_name}{detail}")
 
+        try:
+            meta = _write_visible_metadata(item, cur)
+        except Exception as e:
+            log("warning", f"  could not write metadata on {clip_name!r}: {e}")
+        else:
+            if meta == "written":
+                metadata_written += 1
+            elif meta == "kept":
+                metadata_kept += 1
+
         if not new_name:
             skipped_match += 1
             continue
@@ -564,6 +619,10 @@ def rename_clips(resolve, log=None):
         log("info", f"Flagged stale ({FLAG_STALE}):      {status_counts[STATUS_STALE]}")
         if flag_errors:
             log("warning", f"Flag errors:        {flag_errors}")
+    if metadata_written or metadata_kept:
+        log("info", f"Metadata written:   {metadata_written}")
+    if metadata_kept:
+        log("info", f"Metadata kept (field has other text): {metadata_kept}")
     stats = _empty_stats(ok=True, errors=errors)
     stats.update(status_counts)
     stats.update({
@@ -571,6 +630,8 @@ def rename_clips(resolve, log=None):
         "idempotent": skipped_idempotent,
         "no_match": skipped_match,
         "flag_errors": flag_errors,
+        "metadata_written": metadata_written,
+        "metadata_kept": metadata_kept,
     })
     return stats
 

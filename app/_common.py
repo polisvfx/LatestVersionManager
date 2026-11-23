@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QToolButton, QSpinBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeData, QTimer
-from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence
+from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 
 from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEntry, make_relative, DEFAULT_FILE_EXTENSIONS, version_strings_match, CONFIG_VERSION
@@ -157,6 +157,12 @@ elif _PLATFORM == "Windows":
 else:
     _REVEAL_LABEL = "Open in File Browser"
 
+
+# "Promote All to Latest": the menu action and the batch review dialog's
+# confirm both answer to these. With Shift, Promote All re-promotes sources
+# already on their highest version.
+PROMOTE_ALL_SHORTCUTS = ("F9", "Ctrl+Alt+Up")
+PROMOTE_ALL_FORCE_SHORTCUTS = ("Shift+F9", "Ctrl+Alt+Shift+Up")
 
 # Container/single-file extensions that don't carry a frame number in their
 # output filename. Used by the resolved-path preview to decide whether to

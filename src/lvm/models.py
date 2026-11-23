@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Optional
 
 # Default file extensions including video formats
+# Visible Resolve clip metadata fields LVM may write the promoted version
+# into (Settings -> NLE). Both persist through the scripting API.
+NLE_METADATA_FIELDS = ("Comments", "Description")
+
 # Schema version of the project JSON, written as "config_version" on save.
 # Files without the field are version 0. Bump this together with a new entry
 # in config.MIGRATIONS whenever the stored format changes.
@@ -211,6 +215,9 @@ class HistoryEntry:
     nle_display_stem: str = ""                  # final stem to set as the NLE clip name
     nle_display_include_frame: bool = False     # append the frame digits for image sequences
     nle_display_include_extension: bool = False # append the file extension
+    # Visible Resolve metadata field ("Comments", "Description") the companion
+    # writes "LVM <version> | <date> | <user>" into; "" = off.
+    nle_metadata_field: str = ""
 
     def to_dict(self) -> dict:
         d = {
@@ -243,6 +250,8 @@ class HistoryEntry:
             d["nle_display_include_frame"] = True
         if self.nle_display_include_extension:
             d["nle_display_include_extension"] = True
+        if self.nle_metadata_field:
+            d["nle_metadata_field"] = self.nle_metadata_field
         return d
 
     @classmethod
@@ -266,6 +275,7 @@ class HistoryEntry:
             nle_display_stem=data.get("nle_display_stem", ""),
             nle_display_include_frame=data.get("nle_display_include_frame", False),
             nle_display_include_extension=data.get("nle_display_include_extension", False),
+            nle_metadata_field=data.get("nle_metadata_field", ""),
         )
 
     @classmethod
@@ -531,10 +541,17 @@ class ProjectConfig:
     nle_rename_include_extension: bool = False     # append file extension
     nle_rename_custom_enabled: bool = False        # use a custom token template instead of the default
     nle_rename_custom_template: str = "{source_name}"  # template; tokens: {source_name}, {shot}, {sequence}, {task}
+    # Visible Resolve clip metadata field LVM writes the promoted version
+    # into ("" = off; see NLE_METADATA_FIELDS). Travels to the companion via
+    # the history sidecar, like the rename options.
+    nle_resolve_metadata_field: str = ""
     # ----- Discover & Promote (one-click roundtrip) -----
     # Enables the "Discover & Promote" button below the Promote row in the
     # main window. Disabled by default — opt-in from Project Settings.
     discover_and_promote_enabled: bool = False
+    # Desktop notifications for auto-promote outcomes: "off", "problems"
+    # (skipped / failed) or "all" (also promoted / waiting for render).
+    auto_promote_notifications: str = "off"
     # When True, the first-run preview dialog is suppressed on subsequent
     # clicks. Set by the user via an opt-out checkbox in the preview dialog.
     discover_and_promote_skip_preview: bool = False
@@ -557,6 +574,7 @@ class ProjectConfig:
             "include_extension": self.nle_rename_include_extension,
             "custom_enabled":    self.nle_rename_custom_enabled,
             "custom_template":   self.nle_rename_custom_template or "{source_name}",
+            "metadata_field":    self.nle_resolve_metadata_field,
         }
 
     @property
@@ -635,8 +653,12 @@ class ProjectConfig:
             d["nle_rename_custom_enabled"] = True
         if self.nle_rename_custom_template and self.nle_rename_custom_template != "{source_name}":
             d["nle_rename_custom_template"] = self.nle_rename_custom_template
+        if self.nle_resolve_metadata_field:
+            d["nle_resolve_metadata_field"] = self.nle_resolve_metadata_field
         if self.discover_and_promote_enabled:
             d["discover_and_promote_enabled"] = True
+        if self.auto_promote_notifications != "off":
+            d["auto_promote_notifications"] = self.auto_promote_notifications
         if self.discover_and_promote_skip_preview:
             d["discover_and_promote_skip_preview"] = True
         return d
@@ -682,7 +704,11 @@ class ProjectConfig:
             nle_rename_include_extension=data.get("nle_rename_include_extension", False),
             nle_rename_custom_enabled=data.get("nle_rename_custom_enabled", False),
             nle_rename_custom_template=data.get("nle_rename_custom_template", "{source_name}"),
+            nle_resolve_metadata_field=data.get("nle_resolve_metadata_field", "")
+            if data.get("nle_resolve_metadata_field") in NLE_METADATA_FIELDS else "",
             discover_and_promote_enabled=data.get("discover_and_promote_enabled", False),
+            auto_promote_notifications=data.get("auto_promote_notifications", "off")
+            if data.get("auto_promote_notifications") in ("off", "problems", "all") else "off",
             discover_and_promote_skip_preview=data.get("discover_and_promote_skip_preview", False),
         )
 

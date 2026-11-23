@@ -820,6 +820,7 @@ class Promoter:
         entry.nle_display_stem = stem
         entry.nle_display_include_frame = bool(opts.get("include_frame", False))
         entry.nle_display_include_extension = bool(opts.get("include_extension", False))
+        entry.nle_metadata_field = opts.get("metadata_field") or ""
 
     def _compute_latest_basename(self, version: VersionInfo,
                                   written_files: Optional[list] = None) -> str:

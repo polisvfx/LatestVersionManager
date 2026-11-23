@@ -178,6 +178,26 @@ class ProjectSettingsDialog(QDialog):
         )
         general.addRow("", self.discover_promote_cb)
 
+        from app.notifier import AutoPromoteNotifier
+        self.notify_combo = QComboBox()
+        self.notify_combo.addItem("Off", "off")
+        self.notify_combo.addItem("Problems only (skipped, failed)", "problems")
+        self.notify_combo.addItem("All (also promoted, waiting for render)", "all")
+        idx = self.notify_combo.findData(getattr(config, "auto_promote_notifications", "off"))
+        self.notify_combo.setCurrentIndex(max(idx, 0))
+        if AutoPromoteNotifier.available():
+            self.notify_combo.setToolTip(
+                "Desktop notifications for Auto-Promote, through a tray icon.\n"
+                "Not shown while the LVM window is active; the same message\n"
+                "for a source isn't repeated."
+            )
+        else:
+            self.notify_combo.setToolTip(
+                "No system tray on this desktop, so notifications can't be "
+                "shown. The setting is kept for other machines."
+            )
+        general.addRow("Auto-promote notifications:", self.notify_combo)
+
         top_layout.addWidget(general_section)
 
         # ==================================================================
@@ -527,6 +547,26 @@ class ProjectSettingsDialog(QDialog):
             "color: #c8c8c8; font-size: 11pt; font-family: Consolas, monospace;"
         )
         nle.addRow("Preview:", self._nle_rename_preview)
+
+        # Visible Resolve metadata: the hidden promotion marker is always
+        # written; this also puts "LVM v005 | 2026-11-20 | user" into a
+        # field editors can see in the Metadata panel.
+        from src.lvm.models import NLE_METADATA_FIELDS
+        self.nle_metadata_combo = QComboBox()
+        self.nle_metadata_combo.addItem("Off", "")
+        for fld in NLE_METADATA_FIELDS:
+            self.nle_metadata_combo.addItem(fld, fld)
+        idx = self.nle_metadata_combo.findData(
+            getattr(config, "nle_resolve_metadata_field", "") or "")
+        self.nle_metadata_combo.setCurrentIndex(max(idx, 0))
+        self.nle_metadata_combo.setToolTip(
+            "Resolve sync writes the promoted version, date and user into this\n"
+            "clip metadata field, e.g. \"LVM v005 | 2026-11-20 | mp\".\n"
+            "Only a field that is empty or was written by LVM (starts with\n"
+            "\"LVM \") is changed, so notes editors typed there are kept.\n"
+            "Takes effect for promotions made after the change."
+        )
+        nle.addRow("Resolve metadata:", self.nle_metadata_combo)
 
         # Wire every input that affects the preview.
         self.nle_rename_custom_cb.toggled.connect(
@@ -1160,8 +1200,11 @@ class ProjectSettingsDialog(QDialog):
         config.nle_rename_custom_template = (
             self.nle_rename_custom_edit.text().strip() or "{source_name}"
         )
+        config.nle_resolve_metadata_field = self.nle_metadata_combo.currentData() or ""
 
         # Discover & Promote one-click button
+        config.auto_promote_notifications = self.notify_combo.currentData() or "off"
+
         was_enabled = config.discover_and_promote_enabled
         config.discover_and_promote_enabled = self.discover_promote_cb.isChecked()
         # When the feature is re-enabled, reset the skip-preview opt-out so

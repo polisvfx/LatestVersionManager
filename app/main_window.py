@@ -83,6 +83,11 @@ class MainWindow(QMainWindow):
         # version (SettleState); a version is promoted only once two checks
         # in a row saw the same files.
         self._auto_settle: dict = {}
+        # Source whose current promotion was started by auto-promote (for
+        # the promoted / failed notification); None for manual promotions.
+        self._auto_promoting_name: str | None = None
+        from app.notifier import AutoPromoteNotifier
+        self._notifier = AutoPromoteNotifier(self, on_clicked=self._select_source_by_name)
         self._target_conflicts: dict = {}
         self._source_status: dict = {}  # filled by StatusWorker
         self._deferred_refresh_results: dict = None  # scan results deferred due to promotion in progress
@@ -324,8 +329,8 @@ class MainWindow(QMainWindow):
         self.btn_promote_all.setStyleSheet(promote_style_main)
         self.btn_promote_all.setEnabled(False)
         self.btn_promote_all.setToolTip(
-            "Promotes sources that are not on their highest version.\n"
-            "Hold Shift to force re-promote all sources."
+            "Promotes sources that are not on their highest version (F9).\n"
+            "Hold Shift to force re-promote all sources (Shift+F9)."
         )
         self.btn_promote_all.clicked.connect(self._promote_all_or_selected)
         promote_layout.addWidget(self.btn_promote_all, stretch=1)
@@ -727,7 +732,11 @@ class MainWindow(QMainWindow):
         source_menu.addSeparator()
 
         promote_all_action = QAction("&Promote All to Latest", self)
-        promote_all_action.setShortcut(QKeySequence("Ctrl+Alt+Up"))
+        # F9 is shown in the menu; Ctrl+Alt+Up still works. The Shift
+        # variants force re-promotion (_promote_all_or_selected reads Shift).
+        promote_all_action.setShortcuts([
+            QKeySequence(s) for s in PROMOTE_ALL_SHORTCUTS + PROMOTE_ALL_FORCE_SHORTCUTS
+        ])
         promote_all_action.triggered.connect(self._promote_all_or_selected)
         source_menu.addAction(promote_all_action)
 
@@ -905,6 +914,7 @@ class MainWindow(QMainWindow):
             self._update_title()
             self._refresh_sync_names_state()
             self.statusBar().showMessage(f"Loaded: {path}")
+            self._notifier.set_level(config.auto_promote_notifications)
             self._warn_if_newer_config(config)
         finally:
             self._project_load_worker = None
@@ -1046,6 +1056,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             dlg.apply_to_config(self.config)
             self._mark_dirty()
+            self._notifier.set_level(self.config.auto_promote_notifications)
             if self.watcher.is_running:
                 self._start_watcher()  # pick up a changed watch mode / poll interval
             self.project_label.setText(f"{self.config.project_name}")
@@ -3879,6 +3890,10 @@ class MainWindow(QMainWindow):
             self._current_source.name if self._current_source else "unknown"
         )
         self._promoting_source_name = None
+        if self._auto_promoting_name == promoted_name:
+            self._notifier.notify(promoted_name, "promoted",
+                                  f"{promoted_name} \u2192 {entry.version}")
+        self._auto_promoting_name = None
         self.statusBar().showMessage(
             f"Promoted {promoted_name} \u2192 {entry.version}"
         )
@@ -3910,6 +3925,12 @@ class MainWindow(QMainWindow):
         self._worker = None
         error_source_name = self._promoting_source_name
         self._promoting_source_name = None
+        if error_source_name and self._auto_promoting_name == error_source_name:
+            # Before any message box below: it blocks until dismissed.
+            first_line = (error_msg or "").strip().splitlines()[:1]
+            self._notifier.notify(error_source_name, "failed",
+                                  f"{error_source_name}: {first_line[0] if first_line else 'error'}")
+        self._auto_promoting_name = None
         self.progress_bar.setVisible(False)
         self.btn_cancel_promote.setVisible(False)
         self.btn_promote.setEnabled(True)
@@ -4118,6 +4139,10 @@ class MainWindow(QMainWindow):
             detail = f" ({decision.log_detail})" if decision.log_detail else ""
             logger.log(decision.log_level, msg + detail)
             self.statusBar().showMessage(msg)
+            self._notifier.notify(
+                name, "failed" if decision.action == ap.ERROR else "skipped",
+                f"{name}: {decision.reason}",
+            )
             return
 
         if self._worker is not None:
@@ -4137,6 +4162,11 @@ class MainWindow(QMainWindow):
                     f"Auto-promote of {name} {version.version_string} "
                     f"waiting for render to finish ({detail})"
                 )
+                self._notifier.notify(
+                    name, "waiting",
+                    f"{name} {version.version_string} is still rendering; "
+                    f"it will be promoted when it's complete.",
+                )
             self.statusBar().showMessage(
                 f"Auto-promote waiting for {name} {version.version_string} "
                 f"to finish rendering ({detail})"
@@ -4154,6 +4184,8 @@ class MainWindow(QMainWindow):
                 f"Auto-promoting {name} to {version.version_string}..."
             )
             self._start_promotion(promoter, version)
+            if self._worker is not None:
+                self._auto_promoting_name = name
 
     def _on_auto_check_thread_done(self, source_name: str, worker):
         """The check thread has exited: release it and run a queued re-check."""
@@ -4453,6 +4485,7 @@ class MainWindow(QMainWindow):
 
         self._io_executor.shutdown(wait=False)
         self.watcher.stop()
+        self._notifier.set_level("off")  # remove the tray icon
         event.accept()
 
 
