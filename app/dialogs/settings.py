@@ -178,6 +178,26 @@ class ProjectSettingsDialog(QDialog):
         )
         general.addRow("", self.discover_promote_cb)
 
+        from app.notifier import AutoPromoteNotifier
+        self.notify_combo = QComboBox()
+        self.notify_combo.addItem("Off", "off")
+        self.notify_combo.addItem("Problems only (skipped, failed)", "problems")
+        self.notify_combo.addItem("All (also promoted, waiting for render)", "all")
+        idx = self.notify_combo.findData(getattr(config, "auto_promote_notifications", "off"))
+        self.notify_combo.setCurrentIndex(max(idx, 0))
+        if AutoPromoteNotifier.available():
+            self.notify_combo.setToolTip(
+                "Desktop notifications for Auto-Promote, through a tray icon.\n"
+                "Not shown while the LVM window is active; the same message\n"
+                "for a source isn't repeated."
+            )
+        else:
+            self.notify_combo.setToolTip(
+                "No system tray on this desktop, so notifications can't be "
+                "shown. The setting is kept for other machines."
+            )
+        general.addRow("Auto-promote notifications:", self.notify_combo)
+
         top_layout.addWidget(general_section)
 
         # ==================================================================
@@ -1183,6 +1203,8 @@ class ProjectSettingsDialog(QDialog):
         config.nle_resolve_metadata_field = self.nle_metadata_combo.currentData() or ""
 
         # Discover & Promote one-click button
+        config.auto_promote_notifications = self.notify_combo.currentData() or "off"
+
         was_enabled = config.discover_and_promote_enabled
         config.discover_and_promote_enabled = self.discover_promote_cb.isChecked()
         # When the feature is re-enabled, reset the skip-preview opt-out so

@@ -618,5 +618,138 @@ class TestResolveMetadataSetting(unittest.TestCase):
         self.assertEqual(cfg.nle_resolve_metadata_field, "Comments")
 
 
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestAutoPromoteNotifier(unittest.TestCase):
+    """Level filtering, de-duplication and the active-window rule."""
+
+    def setUp(self):
+        _app()
+        from unittest.mock import MagicMock
+        from PySide6.QtWidgets import QWidget
+        from app.notifier import AutoPromoteNotifier
+        self.window = QWidget()
+        self.addCleanup(self.window.deleteLater)
+        self.n = AutoPromoteNotifier(self.window)
+        self.tray = MagicMock()
+
+    def _level(self, level):
+        with patch("app.notifier.AutoPromoteNotifier.available", return_value=False):
+            self.n.set_level(level)
+        self.n._tray = None if level == "off" else self.tray
+
+    def test_off_shows_nothing(self):
+        self._level("off")
+        self.assertFalse(self.n.notify("a", "failed", "a: boom"))
+
+    def test_problems_level_filters(self):
+        self._level("problems")
+        self.assertFalse(self.n.notify("a", "promoted", "a -> v002"))
+        self.assertFalse(self.n.notify("a", "waiting", "a waiting"))
+        self.assertTrue(self.n.notify("a", "skipped", "a: range"))
+        self.assertTrue(self.n.notify("b", "failed", "b: boom"))
+        self.assertEqual(self.tray.showMessage.call_count, 2)
+
+    def test_all_level_and_dedupe(self):
+        self._level("all")
+        self.assertTrue(self.n.notify("a", "skipped", "a: range"))
+        self.assertFalse(self.n.notify("a", "skipped", "a: range"))  # same again
+        self.assertTrue(self.n.notify("a", "promoted", "a -> v002"))
+        self.assertTrue(self.n.notify("a", "skipped", "a: range"))  # after something else
+
+    def test_not_shown_while_window_active(self):
+        self._level("all")
+        with patch.object(self.window, "isActiveWindow", return_value=True):
+            self.assertFalse(self.n.notify("a", "failed", "a: boom"))
+        self.tray.showMessage.assert_not_called()
+
+    def test_unknown_level_is_off(self):
+        self._level("loud")
+        self.assertEqual(self.n.level, "off")
+
+    def test_click_selects_source(self):
+        from unittest.mock import MagicMock
+        clicked = MagicMock()
+        self.n._on_clicked = clicked
+        self._level("all")
+        self.n.notify("shot", "promoted", "shot -> v003")
+        self.n._message_clicked()
+        clicked.assert_called_once_with("shot")
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestAutoPromoteNotifications(_MainWindowTestBase):
+    """MainWindow reports auto-promote outcomes to the notifier."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest.mock import MagicMock
+        self.notify = MagicMock()
+        self.win._notifier.notify = self.notify
+        self._enabled = patch.object(type(self.win), "_auto_promote_enabled", return_value=True)
+        self._enabled.start()
+        self.addCleanup(self._enabled.stop)
+
+    def _decision(self, action, **kw):
+        from src.lvm.auto_promote import AutoPromoteDecision
+        return AutoPromoteDecision(source_name="shot", action=action, **kw)
+
+    def test_skip_and_error_notify(self):
+        from src.lvm import auto_promote as ap
+        self.win._on_auto_promote_decided(self._decision(ap.SKIP, reason="frame range changed"))
+        self.notify.assert_called_with("shot", "skipped", "shot: frame range changed")
+        self.win._on_auto_promote_decided(self._decision(ap.ERROR, reason="scan failed"))
+        self.notify.assert_called_with("shot", "failed", "shot: scan failed")
+
+    def test_waiting_notifies_first_time_only(self):
+        from src.lvm import auto_promote as ap
+        from src.lvm.models import VersionInfo
+        v = VersionInfo("v002", 2, str(self.tmp / "v002"))
+        with patch.object(self.win, "_schedule_render_wait_retry"):
+            self.win._on_auto_promote_decided(self._decision(ap.WAIT_RENDER, version=v,
+                                                             reason="open"))
+            self.win._on_auto_promote_decided(self._decision(ap.WAIT_RENDER, version=v,
+                                                             reason="open",
+                                                             waiting_on_render=True))
+        self.assertEqual(self.notify.call_count, 1)
+        self.assertEqual(self.notify.call_args.args[1], "waiting")
+
+    def test_auto_promotion_finish_and_failure_notify(self):
+        from src.lvm.models import HistoryEntry
+        entry = HistoryEntry(version="v002", source="", set_by="t", set_at="")
+        with patch.object(self.win, "_process_deferred_or_refresh"), \
+             patch.object(self.win, "_maybe_auto_sync_nle"):
+            self.win._promoting_source_name = "shot"
+            self.win._auto_promoting_name = "shot"
+            self.win._on_promote_finished(entry)
+        self.notify.assert_called_once_with("shot", "promoted", "shot → v002")
+        self.assertIsNone(self.win._auto_promoting_name)
+
+        self.notify.reset_mock()
+        with patch("app.main_window.QMessageBox.critical"):
+            self.win._promoting_source_name = "shot"
+            self.win._auto_promoting_name = "shot"
+            self.win._on_promote_error("Disk full\nmore detail")
+        self.notify.assert_called_once_with("shot", "failed", "shot: Disk full")
+
+    def test_manual_promotion_does_not_notify(self):
+        from src.lvm.models import HistoryEntry
+        entry = HistoryEntry(version="v002", source="", set_by="t", set_at="")
+        with patch.object(self.win, "_process_deferred_or_refresh"), \
+             patch.object(self.win, "_maybe_auto_sync_nle"):
+            self.win._promoting_source_name = "shot"
+            self.win._on_promote_finished(entry)
+        self.notify.assert_not_called()
+
+    def test_option_round_trip(self):
+        from src.lvm.models import ProjectConfig
+        cfg = ProjectConfig(project_name="P", auto_promote_notifications="problems")
+        d = cfg.to_dict()
+        self.assertEqual(ProjectConfig.from_dict(d).auto_promote_notifications, "problems")
+        d["auto_promote_notifications"] = "loud"
+        self.assertEqual(ProjectConfig.from_dict(d).auto_promote_notifications, "off")
+        self.assertNotIn("auto_promote_notifications",
+                         ProjectConfig(project_name="P").to_dict())
+
+
 if __name__ == "__main__":
     unittest.main()

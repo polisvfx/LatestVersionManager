@@ -549,6 +549,9 @@ class ProjectConfig:
     # Enables the "Discover & Promote" button below the Promote row in the
     # main window. Disabled by default — opt-in from Project Settings.
     discover_and_promote_enabled: bool = False
+    # Desktop notifications for auto-promote outcomes: "off", "problems"
+    # (skipped / failed) or "all" (also promoted / waiting for render).
+    auto_promote_notifications: str = "off"
     # When True, the first-run preview dialog is suppressed on subsequent
     # clicks. Set by the user via an opt-out checkbox in the preview dialog.
     discover_and_promote_skip_preview: bool = False
@@ -654,6 +657,8 @@ class ProjectConfig:
             d["nle_resolve_metadata_field"] = self.nle_resolve_metadata_field
         if self.discover_and_promote_enabled:
             d["discover_and_promote_enabled"] = True
+        if self.auto_promote_notifications != "off":
+            d["auto_promote_notifications"] = self.auto_promote_notifications
         if self.discover_and_promote_skip_preview:
             d["discover_and_promote_skip_preview"] = True
         return d
@@ -702,6 +707,8 @@ class ProjectConfig:
             nle_resolve_metadata_field=data.get("nle_resolve_metadata_field", "")
             if data.get("nle_resolve_metadata_field") in NLE_METADATA_FIELDS else "",
             discover_and_promote_enabled=data.get("discover_and_promote_enabled", False),
+            auto_promote_notifications=data.get("auto_promote_notifications", "off")
+            if data.get("auto_promote_notifications") in ("off", "problems", "all") else "off",
             discover_and_promote_skip_preview=data.get("discover_and_promote_skip_preview", False),
         )
 
