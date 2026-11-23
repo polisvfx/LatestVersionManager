@@ -413,6 +413,85 @@ class TestSharedTargetIsolation(_PromoterTestBase):
         )
         self.assert_no_promotion_internals()
 
+    # -- sequence sources sharing one target dir --------------------------
+
+    def _make_seq_source(self, basename):
+        return self._make_source(
+            name=basename,
+            sample_filename=f"{basename}_v001.1001.exr",
+            history_filename=f".latest_history_{basename}.json",
+        )
+
+    def _names_with(self, prefix):
+        return [n for n in self._target_media_names() if n.startswith(prefix + ".")]
+
+    def test_shared_target_sequence_promote_keeps_other_sources(self):
+        """Promoting one sequence source must not retire another source's
+        frames from a shared target — even one whose stem extends ours."""
+        srcA = self._make_seq_source("shotA")
+        srcB = self._make_seq_source("shotA_bg")
+        promA, promB = Promoter(srcA), Promoter(srcB)
+        promA.promote(self._make_version("v001", 1, count=4, basename="shotA"), user="x")
+        promB.promote(self._make_version("v001", 1, count=3, basename="shotA_bg"), user="x")
+        self.assertEqual(len(self._names_with("shotA")), 4)
+        self.assertEqual(len(self._names_with("shotA_bg")), 3)
+
+        promA.promote(self._make_version("v002", 2, count=4, basename="shotA"), user="x")
+
+        b_names = self._names_with("shotA_bg")
+        self.assertEqual(len(b_names), 3, "other source's frames were removed")
+        for n in b_names:
+            self.assertIn(b"shotA_bg_v001", (Path(self.target_dir) / n).read_bytes())
+        for n in self._names_with("shotA"):
+            self.assertIn(b"shotA_v002", (Path(self.target_dir) / n).read_bytes())
+        self.assert_no_promotion_internals()
+
+    def test_shared_target_own_layers_still_retired(self):
+        """This source's obsolete layer files are still cleaned up in a
+        shared target (they share its stem)."""
+        srcA = self._make_seq_source("shotA")
+        srcB = self._make_seq_source("shotB")
+        promA, promB = Promoter(srcA), Promoter(srcB)
+
+        vi1 = self._make_version("v001", 1, count=3, basename="shotA")
+        _make_exr_sequence(vi1.source_path, "shotA_alpha", "v001", 1001, 1003)
+        vi1.file_count = 6
+        promA.promote(vi1, user="x")
+        promB.promote(self._make_version("v001", 1, count=2, basename="shotB"), user="x")
+        self.assertEqual(len(self._names_with("shotA_alpha")), 3)
+
+        vi2 = self._make_version("v002", 2, count=3, basename="shotA")
+        obsolete = promA.detect_obsolete_layers(vi2)
+        self.assertEqual([o["name"] for o in obsolete], ["shotA_alpha"],
+                         "other source's files reported as obsolete layers")
+        promA.promote(vi2, user="x")
+
+        self.assertEqual(self._names_with("shotA_alpha"), [])
+        self.assertEqual(len(self._names_with("shotB")), 2)
+
+    def test_unknown_files_in_shared_target_are_left_alone(self):
+        """In a shared target, files no source claims are never deleted."""
+        srcA = self._make_seq_source("shotA")
+        srcB = self._make_seq_source("shotB")
+        Promoter(srcB).promote(
+            self._make_version("v001", 1, count=2, basename="shotB"), user="x")
+        stray = Path(self.target_dir) / "handmade_plate.1001.exr"
+        stray.write_bytes(b"keep me")
+
+        Promoter(srcA).promote(
+            self._make_version("v001", 1, count=2, basename="shotA"), user="x")
+        self.assertTrue(stray.exists())
+
+    def test_unshared_target_still_clears_everything(self):
+        """Without other sidecars the target belongs to this source alone:
+        unrelated media files are retired as before."""
+        srcA = self._make_seq_source("shotA")
+        stray = Path(self.target_dir) / "old_name.1001.exr"
+        stray.write_bytes(b"old")
+        Promoter(srcA).promote(
+            self._make_version("v001", 1, count=2, basename="shotA"), user="x")
+        self.assertFalse(stray.exists())
+
 
 # ============================================================================
 # Link modes through the staged path

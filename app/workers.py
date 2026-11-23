@@ -248,6 +248,12 @@ class StatusWorker(QThread):
     Runs Promoter.verify() and conflict detection off the main thread so the
     UI stays responsive after scanning completes.  Per-source work is
     parallelised with a ThreadPoolExecutor for I/O-bound speedup.
+
+    ``finished`` is emitted on every exit path, including failures: the GUI
+    only clears its ``_status_worker`` guard in the finished handlers, so a
+    worker that died silently would block every later refresh. A source
+    whose status cannot be computed (unreadable history sidecar, SMB drop,
+    permission denied) is reported with status ``"error"`` instead.
     """
     finished = Signal(dict, dict, dict, dict)  # source_status, target_conflicts, promoters, scanners
 
@@ -259,85 +265,111 @@ class StatusWorker(QThread):
         self._sources = sources or config.watched_sources
 
     def run(self):
+        source_status: dict = {}
+        promoters: dict = {}
+        scanners: dict = {}
+        target_conflicts: dict = {}
+        try:
+            self._compute_all(source_status, promoters, scanners, target_conflicts)
+        except Exception as e:
+            logger.exception("Status computation failed: %s", e)
+        finally:
+            self.finished.emit(source_status, target_conflicts, promoters, scanners)
+
+    def _compute_all(self, source_status: dict, promoters: dict,
+                     scanners: dict, target_conflicts: dict) -> None:
         from src.lvm.conflicts import detect_target_conflicts
-
-        def _compute_one(source):
-            versions = self._versions_cache.get(source.name, [])
-            scanner = VersionScanner(source, self._config.task_tokens)
-            highest = versions[-1] if versions else None
-            highest_ver = highest.version_string if highest else None
-            highest_num = highest.version_number if highest else None
-            current = None
-            status = "no_target"
-            integrity = None
-            promoter = None
-
-            if source.latest_target:
-                promoter = Promoter(source, self._config.task_tokens, self._config.project_name,
-                                    nle_rename_options=self._config.nle_rename_options())
-                current = promoter.get_current_version()
-
-                if not current:
-                    status = "no_version"
-                elif version_strings_match(highest_ver, current.version, highest_num):
-                    integrity = promoter.verify()
-                    if integrity["valid"]:
-                        status = "highest"
-                    elif "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "integrity_fail"
-                elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "deliberate"
-                else:
-                    integrity = promoter.verify()
-                    if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
-                        status = "stale"
-                    else:
-                        status = "newer"
-
-            status_info = {
-                "current": current,
-                "status": status,
-                "has_overrides": source.has_overrides,
-                "integrity": integrity,
-            }
-            return source.name, status_info, promoter, scanner
-
-        source_status = {}
-        promoters = {}
-        scanners = {}
 
         sources = self._sources
         worker_count = min(8, len(sources))
         if worker_count > 1:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                futures = {executor.submit(_compute_one, s): s for s in sources}
-                for future in as_completed(futures):
-                    name, status_info, promoter, scanner = future.result()
-                    source_status[name] = status_info
-                    if promoter:
-                        promoters[name] = promoter
-                    scanners[name] = scanner
+                futures = [executor.submit(self._compute_one_safe, s) for s in sources]
+                results = [f.result() for f in as_completed(futures)]
         else:
-            for source in sources:
-                name, status_info, promoter, scanner = _compute_one(source)
-                source_status[name] = status_info
-                if promoter:
-                    promoters[name] = promoter
-                scanners[name] = scanner
+            results = [self._compute_one_safe(s) for s in sources]
+
+        for name, status_info, promoter, scanner in results:
+            source_status[name] = status_info
+            if promoter:
+                promoters[name] = promoter
+            scanners[name] = scanner
 
         conflicts = detect_target_conflicts(self._config, self._config.task_tokens)
-        target_conflicts = {}
         for target, name_a, name_b in conflicts:
             target_conflicts.setdefault(name_a, []).append(name_b)
             target_conflicts.setdefault(name_b, []).append(name_a)
 
-        self.finished.emit(source_status, target_conflicts, promoters, scanners)
+    def _make_promoter(self, source):
+        return Promoter(source, self._config.task_tokens, self._config.project_name,
+                        nle_rename_options=self._config.nle_rename_options())
+
+    def _compute_one_safe(self, source):
+        """:meth:`_compute_one`, with failures reported as an ``"error"`` status."""
+        try:
+            return self._compute_one(source)
+        except Exception as e:
+            logger.warning("Status check failed for '%s': %s", source.name, e)
+            promoter = None
+            if source.latest_target:
+                try:
+                    promoter = self._make_promoter(source)
+                except Exception:
+                    promoter = None
+            status_info = {
+                "current": None,
+                "status": "error",
+                "has_overrides": source.has_overrides,
+                "integrity": {"valid": False, "message": f"Status check failed: {e}"},
+            }
+            return (source.name, status_info, promoter,
+                    VersionScanner(source, self._config.task_tokens))
+
+    def _compute_one(self, source):
+        versions = self._versions_cache.get(source.name, [])
+        scanner = VersionScanner(source, self._config.task_tokens)
+        highest = versions[-1] if versions else None
+        highest_ver = highest.version_string if highest else None
+        highest_num = highest.version_number if highest else None
+        current = None
+        status = "no_target"
+        integrity = None
+        promoter = None
+
+        if source.latest_target:
+            promoter = self._make_promoter(source)
+            current = promoter.get_current_version()
+
+            if not current:
+                status = "no_version"
+            elif version_strings_match(highest_ver, current.version, highest_num):
+                integrity = promoter.verify()
+                if integrity["valid"]:
+                    status = "highest"
+                elif "modified since promotion" in integrity.get("message", ""):
+                    status = "stale"
+                else:
+                    status = "integrity_fail"
+            elif getattr(current, 'pinned', False) and not has_newer_versions_since(current, versions):
+                integrity = promoter.verify()
+                if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                    status = "stale"
+                else:
+                    status = "deliberate"
+            else:
+                integrity = promoter.verify()
+                if not integrity["valid"] and "modified since promotion" in integrity.get("message", ""):
+                    status = "stale"
+                else:
+                    status = "newer"
+
+        status_info = {
+            "current": current,
+            "status": status,
+            "has_overrides": source.has_overrides,
+            "integrity": integrity,
+        }
+        return source.name, status_info, promoter, scanner
 
 
 

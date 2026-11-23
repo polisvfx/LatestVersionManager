@@ -11,6 +11,7 @@ Gracefully degrades when ffprobe is not available or files lack timecode.
 
 import json
 import logging
+import os
 import shutil
 import struct
 import subprocess
@@ -27,6 +28,17 @@ _ffprobe_checked: bool = False
 
 # Extensions handled by native parsers (no ffprobe needed)
 _NATIVE_TC_EXTENSIONS = {".exr", ".dpx"}
+
+# Media files that normally carry a timecode; tried before anything else in
+# a version folder.
+_TC_PREFERRED_EXTENSIONS = _NATIVE_TC_EXTENSIONS | {
+    ".mov", ".mxf", ".mp4", ".m4v", ".avi", ".mkv",
+}
+
+# A sequence carries the same start timecode in every frame, so probing more
+# than a few files of a folder only costs I/O (one SMB round-trip each) when
+# the frames have no timecode at all.
+MAX_TIMECODE_PROBES = 3
 
 
 def _subprocess_kwargs() -> dict:
@@ -387,8 +399,18 @@ def populate_timecodes(versions: list) -> None:
                   will have their timecode extracted from the source files.
     """
     for v in versions:
-        if v.start_timecode is None:
-            v.start_timecode = extract_timecode_for_version(Path(v.source_path))
+        if _needs_timecode(v):
+            _set_timecode(v, extract_timecode_for_version(Path(v.source_path)))
+
+
+def _needs_timecode(v) -> bool:
+    return v.start_timecode is None and not getattr(v, "timecode_checked", False)
+
+
+def _set_timecode(v, tc: Optional[str]) -> None:
+    v.start_timecode = tc
+    if tc is None:
+        v.timecode_checked = True
 
 
 def populate_timecodes_parallel(
@@ -406,13 +428,13 @@ def populate_timecodes_parallel(
     Workers are capped at 8 by default to stay well under typical OS handle
     limits even when called from another worker thread.
     """
-    pending = [v for v in versions if v.start_timecode is None]
+    pending = [v for v in versions if _needs_timecode(v)]
     if not pending:
         return
 
     if len(pending) == 1 or max_workers <= 1:
-        v = pending[0]
-        v.start_timecode = extract_timecode_for_version(Path(v.source_path))
+        for v in pending:
+            _set_timecode(v, extract_timecode_for_version(Path(v.source_path)))
         return
 
     workers = min(max_workers, len(pending))
@@ -424,7 +446,7 @@ def populate_timecodes_parallel(
         for future in futures:
             v = futures[future]
             try:
-                v.start_timecode = future.result()
+                _set_timecode(v, future.result())
             except Exception as e:
                 logger.debug("Timecode extraction failed for %s: %s", v.source_path, e)
 
@@ -450,11 +472,21 @@ def extract_timecode_for_version(source_path: Path, files: Optional[list[Path]] 
         # Use provided file list or find first file
         if files:
             return extract_timecode(files[0])
-        # Fallback: iterate directory for first media file
-        for f in sorted(source.iterdir()):
-            if f.is_file() and not f.name.startswith("."):
-                tc = extract_timecode(f)
-                if tc is not None:
-                    return tc
+        # Probe the first few files only — media types that carry timecode
+        # first, then by name. Probing every frame of a sequence without
+        # timecode used to cost one header read per frame.
+        try:
+            with os.scandir(source) as it:
+                names = [
+                    e.name for e in it
+                    if not e.name.startswith(".") and e.is_file()
+                ]
+        except OSError:
+            return None
+        names.sort(key=lambda n: (Path(n).suffix.lower() not in _TC_PREFERRED_EXTENSIONS, n))
+        for name in names[:MAX_TIMECODE_PROBES]:
+            tc = extract_timecode(source / name)
+            if tc is not None:
+                return tc
 
     return None

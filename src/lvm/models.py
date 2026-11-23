@@ -117,6 +117,9 @@ class VersionInfo:
     start_timecode: Optional[str] = None  # e.g. "01:00:00:00"
     date_string: Optional[str] = None     # raw date from filename, e.g. "260224"
     date_sortable: int = 0                # YYYYMMDD integer for sorting (0 = no date)
+    # True once timecode extraction ran and found nothing, so files without
+    # timecode aren't re-probed on every selection / refresh.
+    timecode_checked: bool = False
 
     @property
     def total_size_human(self) -> str:
@@ -147,6 +150,8 @@ class VersionInfo:
             d["start_timecode"] = self.start_timecode
         if self.date_string is not None:
             d["date_string"] = self.date_string
+        if self.timecode_checked:
+            d["timecode_checked"] = True
         return d
 
     @classmethod
@@ -164,6 +169,7 @@ class VersionInfo:
             start_timecode=data.get("start_timecode"),
             date_string=data.get("date_string"),
             date_sortable=data.get("date_sortable", 0),
+            timecode_checked=bool(data.get("timecode_checked", False)),
         )
 
 
@@ -364,7 +370,9 @@ class WatchedSource:
         if self.added_at:
             d["added_at"] = self.added_at
         if self.manual_versions:
-            d["manual_versions"] = self.manual_versions
+            # Copies: save_config relativises these paths in place, which
+            # must not leak back into the live config.
+            d["manual_versions"] = [dict(mv) for mv in self.manual_versions]
 
         # Inherited fields — persist *only* when explicitly overridden.
         # Without the override flag the project default flows through at load

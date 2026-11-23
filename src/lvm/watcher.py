@@ -26,7 +26,6 @@ class _FolderEventHandler(FileSystemEventHandler):
         super().__init__()
         self.callback = callback
         self.source = watched_source
-        self._debounce_pending = set()
 
     def on_created(self, event):
         if isinstance(event, (DirCreatedEvent, FileCreatedEvent)):

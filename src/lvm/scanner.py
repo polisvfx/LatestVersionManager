@@ -290,38 +290,6 @@ class VersionScanner:
             date_sortable=date_sortable,
         )
 
-    def _scan_version_file(self, filepath: Path) -> Optional[VersionInfo]:
-        """Scan a single versioned file (e.g. a .mov or .mxf)."""
-        if filepath.suffix.lower() not in self.source.file_extensions:
-            return None
-
-        result = self._extract_version(filepath.name)
-        if result is None:
-            return None
-
-        version_str, version_num, date_str, date_sortable = result
-
-        return VersionInfo(
-            version_string=version_str,
-            version_number=version_num,
-            source_path=str(filepath),
-            frame_range=None,
-            frame_count=1,
-            file_count=1,
-            total_size_bytes=filepath.stat().st_size,
-            start_timecode=None,  # Lazy: extracted on demand via timecode module
-            date_string=date_str,
-            date_sortable=date_sortable,
-        )
-
-    def _collect_files(self, folder: Path) -> list[Path]:
-        """Collect all files in a folder matching the configured extensions.
-
-        Uses os.scandir for faster directory iteration.
-        """
-        files, _ = self._collect_files_with_stats(folder)
-        return files
-
     def _collect_files_with_stats(self, folder: Path) -> tuple[list[Path], int]:
         """Collect files and total size in a single os.scandir pass.
 
