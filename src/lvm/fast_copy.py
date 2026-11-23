@@ -351,8 +351,9 @@ def _linux_copy_file_range(
 def _preserve_metadata(src: Path, dst: Path):
     """Copy timestamps and permissions from src to dst.
 
-    CopyFileExW and copy_file_range don't fully replicate shutil.copy2's
-    metadata handling. macOS copyfile with COPYFILE_ALL does, so skip for that.
+    Used after copy_file_range, which copies data only. Not needed after
+    CopyFileExW (keeps the last-write time and attributes) or macOS copyfile
+    with COPYFILE_ALL.
     """
     try:
         shutil.copystat(str(src), str(dst))
@@ -407,7 +408,10 @@ def smart_copy(
             logger.debug("Native copy (CopyFileExW): %s", src.name)
 
         if _win32_copy_file(src, dst, cancel_event, progress_cb):
-            _preserve_metadata(src, dst)
+            # No copystat: CopyFileExW already carries over the last-write
+            # time and the file attributes (read-only included). copystat
+            # would add a stat, utime and chmod per file — three more SMB
+            # round trips per frame — only to change the access time.
             return
         logger.debug("Falling back to shutil.copy2 for %s", src.name)
 
