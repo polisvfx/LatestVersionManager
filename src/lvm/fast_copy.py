@@ -308,15 +308,21 @@ if sys.platform == "darwin":
 # Linux: os.copy_file_range
 # ---------------------------------------------------------------------------
 
-def _linux_copy_file_range(src: Path, dst: Path) -> bool:
+def _linux_copy_file_range(
+    src: Path,
+    dst: Path,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> bool:
     """Copy using os.copy_file_range() on Linux (Python 3.8+).
 
     Enables kernel-level acceleration for NFS 4.2+, CIFS, btrfs reflinks, etc.
+    With *progress_cb* the copy runs in 32 MB chunks and reports
+    ``(bytes_copied, total_bytes)`` after each one.
     """
     if not hasattr(os, "copy_file_range"):
         return False
     try:
-        chunk = 128 * 1024 * 1024  # 128 MB
+        chunk = (32 if progress_cb else 128) * 1024 * 1024
         with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
             # Size from the open handle: a separate src.stat() is one more
             # path lookup (a network round-trip on NFS/CIFS) per frame.
@@ -330,6 +336,8 @@ def _linux_copy_file_range(src: Path, dst: Path) -> bool:
                 if written == 0:
                     break
                 copied += written
+                if progress_cb:
+                    progress_cb(copied, src_size)
         return True
     except OSError as exc:
         logger.debug("copy_file_range failed for %s: %s", src.name, exc)
@@ -379,8 +387,10 @@ def smart_copy(
         src: Source file path.
         dst: Destination file path.
         cancel_event: Optional threading.Event for cancellation.
-        progress_cb: Optional callback(bytes_copied, total_bytes).
-                     Only effective on Windows (CopyFileExW progress routine).
+        progress_cb: Optional callback(bytes_copied, total_bytes). Reported
+                     on Windows (CopyFileExW progress routine) and Linux
+                     (per copy_file_range chunk); macOS copyfile and the
+                     shutil fallback report nothing.
 
     Raises:
         CopyCancelled: If cancelled via cancel_event.
@@ -413,7 +423,7 @@ def smart_copy(
         logger.debug("Falling back to shutil.copy2 for %s", src.name)
 
     elif sys.platform == "linux":
-        if _linux_copy_file_range(src, dst):
+        if _linux_copy_file_range(src, dst, progress_cb):
             logger.debug("copy_file_range succeeded: %s", src.name)
             _preserve_metadata(src, dst)
             return

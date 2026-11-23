@@ -51,6 +51,15 @@ def _human_size(size_bytes: int) -> str:
     return f"{size:.1f} PB"
 
 
+def _print_byte_progress(done, total, filename):
+    """CLI progress line while a single large file (MOV/MXF) is copied."""
+    def gb(n):
+        return f"{n / 1024 ** 3:.2f} GB"
+    pct = int(done / total * 100) if total else 100
+    print(f"\r  Copying: {filename} {gb(done)} of {gb(total)} ({pct}%)   ",
+          end="", flush=True)
+
+
 def cmd_setup(args):
     """Set up a new project."""
     project_name = args.name
@@ -293,7 +302,9 @@ def cmd_promote(args):
         print(f"\r  Copying: {current}/{total} ({pct}%) - {filename}", end="", flush=True)
 
     try:
-        entry = promoter.promote(target_version, progress_callback=progress, force=getattr(args, 'force', False))
+        entry = promoter.promote(target_version, progress_callback=progress,
+                                 byte_progress_callback=_print_byte_progress,
+                                 force=getattr(args, 'force', False))
     except PromotionError as e:
         print(f"\nPromotion failed: {e}")
         sys.exit(1)
@@ -497,7 +508,8 @@ def cmd_rollback(args):
         pct = int(current / total * 100)
         print(f"\r  Copying: {current}/{total} ({pct}%) - {filename}", end="", flush=True)
 
-    entry = promoter.promote(target_version, progress_callback=progress)
+    entry = promoter.promote(target_version, progress_callback=progress,
+                             byte_progress_callback=_print_byte_progress)
     print(f"\n\nRollback complete. {source.name} is now at {entry.version}")
 
     if args.report:

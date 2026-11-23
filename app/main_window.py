@@ -3797,14 +3797,40 @@ class MainWindow(QMainWindow):
         self._worker = PromoteWorker(promoter, version, self, force=self._force_promote,
                                      pinned=pinned, keep_layers=keep_layers)
         self._worker.progress.connect(self._on_promote_progress)
+        self._worker.byte_progress.connect(self._on_promote_byte_progress)
         self._worker.finished.connect(self._on_promote_finished)
         self._worker.error.connect(self._on_promote_error)
         self._worker.start()
 
     def _on_promote_progress(self, current, total, filename):
+        if total == 1 and current == 0:
+            # A single file (MOV/MXF/...) is starting: show a busy bar until
+            # byte progress arrives — on macOS the copy reports none.
+            self.progress_bar.setMaximum(0)
+            self.progress_bar.setFormat(filename)
+            return
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
         self.progress_bar.setFormat(f"{current}/{total} \u2014 {filename}")
+
+    @staticmethod
+    def _format_bytes(n: float) -> str:
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024:
+                return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+            n /= 1024
+        return f"{n:.1f} TB"
+
+    def _on_promote_byte_progress(self, done: float, total: float, filename: str):
+        """Byte progress of a single large file being copied."""
+        if total <= 0:
+            return
+        self.progress_bar.setMaximum(1000)
+        self.progress_bar.setValue(int(min(done, total) / total * 1000))
+        self.progress_bar.setFormat(
+            f"{filename} \u2014 {self._format_bytes(done)} of "
+            f"{self._format_bytes(total)} ({done / total:.0%})"
+        )
 
     def _cancel_promotion(self):
         """Request cancellation of the running promotion."""

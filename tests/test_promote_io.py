@@ -232,5 +232,144 @@ class TestSwap(_Base):
         self.assertIn(", swap ", text)
 
 
+class TestStagedVerification(_Base):
+    """The staging dir is checked before the swap (plan item #14)."""
+
+    def _promote_v001(self, frames=range(1001, 1006)):
+        promoter = Promoter(self._source())
+        promoter.promote(self._render("v001", frames), user="t")
+        return promoter
+
+    def _assert_target_still_v001(self, frames=range(1001, 1006)):
+        self.assertEqual(self._target_files(), sorted(f"shot.{f}.exr" for f in frames))
+        for name in self._target_files():
+            self.assertIn(b"v001", (self.target / name).read_bytes())
+        self.assertFalse((self.target / STAGING_DIRNAME).exists())
+
+    def test_truncated_copy_is_rejected(self):
+        import lvm.promoter as pm
+        promoter = self._promote_v001()
+        real_copy = pm.smart_copy
+
+        def short_copy(src, dst, *a, **k):
+            real_copy(src, dst, *a, **k)
+            if dst.name == "shot.1003.exr":
+                with open(dst, "r+b") as fh:
+                    fh.truncate(5)
+
+        with patch.object(pm, "smart_copy", short_copy):
+            with self.assertRaises(PromotionError) as cm:
+                promoter.promote(self._render("v002", range(1001, 1006)), user="t")
+        self.assertIn("failed verification", str(cm.exception))
+        self.assertIn("shot.1003.exr: 5 bytes staged, source has 32", str(cm.exception))
+        self._assert_target_still_v001()
+        self.assertEqual(promoter.get_current_version().version, "v001")
+
+    def test_missing_staged_file_is_rejected(self):
+        import lvm.promoter as pm
+        promoter = self._promote_v001()
+        real_copy = pm.smart_copy
+
+        def lossy_copy(src, dst, *a, **k):
+            if dst.name != "shot.1002.exr":
+                real_copy(src, dst, *a, **k)
+
+        with patch.object(pm, "smart_copy", lossy_copy):
+            with self.assertRaises(PromotionError) as cm:
+                promoter.promote(self._render("v002", range(1001, 1006)), user="t")
+        self.assertIn("shot.1002.exr: missing", str(cm.exception))
+        self._assert_target_still_v001()
+
+    def test_two_sources_mapping_to_one_target_name_are_refused(self):
+        promoter = self._promote_v001()
+        v2 = self._render("v002", range(1001, 1003))
+        # "shot-v002" and "shot_v002" both remap to "shot.1001.exr"
+        (Path(v2.source_path) / "shot-v002.1001.exr").write_bytes(b"other")
+        with self.assertRaises(PromotionError) as cm:
+            promoter.promote(v2, user="t")
+        self.assertIn("same target name 'shot.1001.exr'", str(cm.exception))
+        self._assert_target_still_v001()
+
+    def test_truncated_single_file_is_rejected(self):
+        import lvm.promoter as pm
+        self.renders.mkdir(parents=True)
+        source = self._source(file_extensions=[".mov"])
+        promoter = Promoter(source)
+        (self.renders / "shot_v001.mov").write_bytes(b"A" * 100)
+        promoter.promote(VersionInfo("v001", 1, str(self.renders / "shot_v001.mov"),
+                                     file_count=1), user="t", force=True)
+        (self.renders / "shot_v002.mov").write_bytes(b"B" * 100)
+        real_copy = pm.smart_copy
+
+        def short_copy(src, dst, *a, **k):
+            real_copy(src, dst, *a, **k)
+            with open(dst, "r+b") as fh:
+                fh.truncate(10)
+
+        with patch.object(pm, "smart_copy", short_copy):
+            with self.assertRaises(PromotionError) as cm:
+                promoter.promote(VersionInfo("v002", 2, str(self.renders / "shot_v002.mov"),
+                                             file_count=1), user="t", force=True)
+        self.assertIn("10 bytes staged, source has 100", str(cm.exception))
+        self.assertEqual((self.target / "shot.mov").read_bytes(), b"A" * 100)
+
+
+class TestByteProgress(_Base):
+    """Byte-level progress for single large files (plan item #17)."""
+
+    def test_linux_copy_reports_each_chunk(self):
+        import lvm.fast_copy as fc
+        src = self.tmp / "clip.mov"
+        src.write_bytes(b"x" * 100)
+        dst = self.tmp / "out.mov"
+        reports = []
+
+        def ten_bytes_at_a_time(fi, fo, n):
+            data = os.read(fi, min(n, 10))
+            return os.write(fo, data)
+
+        with patch.object(os, "copy_file_range", ten_bytes_at_a_time, create=True):
+            self.assertTrue(fc._linux_copy_file_range(src, dst, lambda d, t: reports.append((d, t))))
+        self.assertEqual(dst.read_bytes(), src.read_bytes())
+        self.assertEqual(reports[-1], (100, 100))
+        self.assertEqual([d for d, _ in reports], list(range(10, 101, 10)))
+
+    def test_throttle_keeps_first_and_final_update(self):
+        from lvm.promoter import _throttled_byte_progress
+        seen = []
+        report = _throttled_byte_progress(lambda d, t, n: seen.append((d, t, n)), "clip.mov",
+                                          interval=60.0)
+        for done in range(0, 1001, 10):
+            report(done, 1000)
+        self.assertEqual(seen, [(0, 1000, "clip.mov"), (1000, 1000, "clip.mov")])
+
+    def test_single_file_promotion_forwards_byte_progress(self):
+        import lvm.promoter as pm
+        self.renders.mkdir(parents=True)
+        (self.renders / "shot_v001.mov").write_bytes(b"A" * 64)
+        real_copy = pm.smart_copy
+
+        def reporting_copy(src, dst, cancel_event=None, progress_cb=None):
+            real_copy(src, dst, cancel_event=cancel_event)
+            if progress_cb:
+                progress_cb(32, 64)
+                progress_cb(64, 64)
+
+        seen = []
+        with patch.object(pm, "smart_copy", reporting_copy):
+            Promoter(self._source(file_extensions=[".mov"])).promote(
+                VersionInfo("v001", 1, str(self.renders / "shot_v001.mov"), file_count=1),
+                user="t", force=True,
+                byte_progress_callback=lambda d, t, n: seen.append((d, t, n)))
+        self.assertEqual(seen[-1], (64, 64, "shot_v001.mov"))
+
+    def test_sequences_report_files_not_bytes(self):
+        seen = []
+        Promoter(self._source()).promote(
+            self._render("v001", range(1001, 1004)), user="t",
+            byte_progress_callback=lambda *a: seen.append(a))
+        self.assertEqual(seen, [])
+
+
 if __name__ == "__main__":
     unittest.main()

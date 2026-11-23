@@ -109,6 +109,21 @@ def _resolve_unc_safe(path: Path) -> Path:
     return resolved
 
 
+def _throttled_byte_progress(callback: Callable[[int, int, str], None], name: str,
+                             interval: float = 0.1) -> Callable[[int, int], None]:
+    """Wrap *callback(done, total, name)* so it runs at most every *interval*
+    seconds — CopyFileExW reports every chunk, which would flood the GUI with
+    signals. The final update (done >= total) is always delivered."""
+    last = [float("-inf")]
+
+    def report(done: int, total: int) -> None:
+        now = time.monotonic()
+        if done >= total or now - last[0] >= interval:
+            last[0] = now
+            callback(done, total, name)
+    return report
+
+
 class PromotionError(Exception):
     """Raised when a promotion fails."""
     pass
@@ -269,6 +284,7 @@ class Promoter:
         force: bool = False,
         pinned: bool = False,
         keep_layers: Optional[set[str]] = None,
+        byte_progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> HistoryEntry:
         """
         Promote a version to be the current "latest".
@@ -282,6 +298,11 @@ class Promoter:
             keep_layers: Optional set of raw prefixes whose files should be
                          preserved in the target directory instead of being
                          cleared.  Pass ``None`` (default) to clear everything.
+            byte_progress_callback: Optional callback(bytes_copied,
+                         total_bytes, filename) while a single-file version
+                         (MOV/MXF/...) is copied, at most ~10 times a second.
+                         Where the platform copy can't report bytes (macOS),
+                         it isn't called.
 
         Returns:
             The HistoryEntry that was recorded.
@@ -388,7 +409,8 @@ class Promoter:
                 if source_path.is_dir():
                     self._promote_sequence(source_path, target_dir, version, progress_callback, keep_layers=keep_layers)
                 else:
-                    self._promote_single_file(source_path, target_dir, progress_callback)
+                    self._promote_single_file(source_path, target_dir, progress_callback,
+                                              byte_progress_callback)
             except PromotionError:
                 raise
             except CopyCancelled:
@@ -588,7 +610,8 @@ class Promoter:
         the old version stays live until the new one is complete.
         """
         valid_extensions = self._valid_extensions
-        source_files = self._list_media(source_dir)
+        source_entries = {e.path: e for e in self._media_entries(source_dir)}
+        source_files = [Path(p) for p in source_entries]
 
         # When source_dir is the watched source root (flat file layout),
         # it contains files from ALL versions — filter to only the target version.
@@ -597,6 +620,20 @@ class Promoter:
 
         if not source_files:
             raise PromotionError(f"No matching files found in {source_dir}")
+
+        # What the staging dir must contain afterwards: staged name -> source
+        # size. Two source files renamed to the same target name would
+        # silently overwrite each other — refuse instead.
+        expected: dict[str, Optional[int]] = {}
+        for src_file in source_files:
+            name = self._remap_filename(src_file.name)
+            if name in expected:
+                raise PromotionError(
+                    f"Two source files map to the same target name '{name}' "
+                    f"(check the file rename template) — nothing was promoted."
+                )
+            entry = source_entries.get(str(src_file))
+            expected[name] = self._entry_size(entry) if entry is not None else None
 
         total = len(source_files)
         mode = self.source.link_mode
@@ -621,6 +658,7 @@ class Promoter:
                 raise PromotionError(
                     "Promotion cancelled by user — target left unchanged."
                 )
+            self._verify_staged(staging_dir, expected)
         except BaseException:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
@@ -673,6 +711,7 @@ class Promoter:
         source_file: Path,
         target_dir: Path,
         progress_callback: Optional[Callable],
+        byte_progress_callback: Optional[Callable] = None,
     ):
         """Copy/symlink a single file to the target via the staging dir.
 
@@ -684,13 +723,21 @@ class Promoter:
         if progress_callback:
             progress_callback(0, 1, source_file.name)
 
+        try:
+            source_size: Optional[int] = os.stat(source_file).st_size
+        except OSError:
+            source_size = None
+
         staging_dir = self._prepare_staging_dir(target_dir)
         try:
-            self._link_or_copy(source_file, staging_dir / target_name)
+            byte_cb = (_throttled_byte_progress(byte_progress_callback, source_file.name)
+                       if byte_progress_callback else None)
+            self._link_or_copy(source_file, staging_dir / target_name, progress_cb=byte_cb)
             if self._cancelled.is_set():
                 raise PromotionError(
                     "Promotion cancelled by user — target left unchanged."
                 )
+            self._verify_staged(staging_dir, {target_name: source_size})
         except BaseException:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
@@ -1036,6 +1083,58 @@ class Promoter:
         return self._drop_foreign_files(removal, target_dir, own_stem)
 
     @staticmethod
+    def _entry_size(entry) -> Optional[int]:
+        try:
+            return entry.stat().st_size
+        except OSError:
+            return None
+
+    def _verify_staged(self, staging_dir: Path, expected: dict) -> None:
+        """Check the staging dir before anything in the target is touched.
+
+        *expected* maps each staged name to the size of its source file
+        (None = unknown, only presence is checked). One listing of the
+        staging dir; sizes follow symlinks, so in symlink mode this also
+        catches a link that doesn't resolve. On Windows the sizes come with
+        the listing; elsewhere each one is a stat of a file just written.
+
+        Raises PromotionError (the caller discards the staging dir, so the
+        target keeps the previous version) when a file is missing, there is
+        an unexpected extra file, or a size differs from its source — for
+        example a copy cut short, or a source still being written.
+        """
+        try:
+            with os.scandir(staging_dir) as it:
+                staged = {e.name: e for e in it}
+        except OSError as e:
+            raise PromotionError(f"Cannot read staging directory {staging_dir}: {e}") from e
+
+        problems = []
+        for name in sorted(set(expected) - set(staged)):
+            problems.append(f"{name}: missing from the staged copy")
+        for name in sorted(set(staged) - set(expected)):
+            problems.append(f"{name}: not expected in the staged copy")
+        for name in sorted(set(expected) & set(staged)):
+            want = expected[name]
+            if want is None:
+                continue
+            got = self._entry_size(staged[name])
+            if got is None:
+                problems.append(f"{name}: staged file can't be read")
+            elif got != want:
+                problems.append(
+                    f"{name}: {got:,} bytes staged, source has {want:,} "
+                    f"(copy cut short, or the source is still being written)"
+                )
+        if problems:
+            shown = "\n  ".join(problems[:10])
+            more = f"\n  ... and {len(problems) - 10} more" if len(problems) > 10 else ""
+            raise PromotionError(
+                f"Staged copy failed verification — target left unchanged:\n  {shown}{more}"
+            )
+        logger.debug("Verified %d staged file(s) in %s", len(expected), staging_dir)
+
+    @staticmethod
     def _run_renames(fn, names: list[str]) -> None:
         """Call *fn(name)* for every name, in parallel for larger sets.
 
@@ -1234,8 +1333,11 @@ class Promoter:
                 f"but only {_human_size(free)} is free at {target_dir}"
             )
 
-    def _link_or_copy(self, source: Path, target: Path):
+    def _link_or_copy(self, source: Path, target: Path, progress_cb=None):
         """Route to the correct file operation based on link_mode.
+
+        *progress_cb(bytes_copied, total_bytes)* is passed to the copy (links
+        are instant and report nothing).
 
         *target* is always inside the freshly emptied staging dir, so no
         existence check / unlink is needed (it cost 1-2 stats per frame).
@@ -1246,7 +1348,7 @@ class Promoter:
         elif mode == "hardlink":
             self._create_hardlink(source, target)
         else:
-            smart_copy(source, target, cancel_event=self._cancelled)
+            smart_copy(source, target, cancel_event=self._cancelled, progress_cb=progress_cb)
 
     def _create_symlink(self, source: Path, target: Path):
         """Create a symlink, handling platform differences."""

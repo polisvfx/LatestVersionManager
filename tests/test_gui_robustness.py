@@ -400,6 +400,31 @@ class TestIncrementalRefreshUI(_MainWindowTestBase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestPromoteProgressDisplay(_MainWindowTestBase):
+    """Byte progress for large single files (plan item #17)."""
+
+    def test_single_file_start_shows_busy_bar(self):
+        self.win._on_promote_progress(0, 1, "clip_v002.mov")
+        self.assertEqual(self.win.progress_bar.maximum(), 0)
+
+    def test_byte_progress_beyond_two_gigabytes(self):
+        gib = 1024 ** 3
+        self.win._on_promote_byte_progress(3.0 * gib, 6.0 * gib, "clip_v002.mov")
+        self.assertEqual(self.win.progress_bar.maximum(), 1000)
+        self.assertEqual(self.win.progress_bar.value(), 500)
+        self.assertEqual(self.win.progress_bar.format(),
+                         "clip_v002.mov — 3.0 GB of 6.0 GB (50%)")
+
+    def test_worker_signal_carries_large_values(self):
+        from app.workers import PromoteWorker
+        seen = []
+        worker = PromoteWorker(promoter=None, version=None)
+        worker.byte_progress.connect(lambda d, t, n: seen.append((d, t, n)))
+        worker._on_byte_progress(5 * 1024 ** 3, 40 * 1024 ** 3, "big.mxf")
+        self.assertEqual(seen, [(5.0 * 1024 ** 3, 40.0 * 1024 ** 3, "big.mxf")])
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
 class TestWatcherEvents(unittest.TestCase):
 
     def test_created_and_moved_events_reach_callback(self):
