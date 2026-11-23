@@ -84,8 +84,11 @@ class TestRunResolveSync(unittest.TestCase):
     """Mock subprocess.run; assert env vars and arguments are correct."""
 
     def setUp(self):
-        self.modules = Path("C:/fake/Resolve/Developer/Scripting/Modules")
-        self.lib = Path("C:/fake/Resolve/fusionscript.dll")
+        # Absolute on every OS, and without "C:" — on Linux/macOS the colon
+        # is the PYTHONPATH separator and would split the path.
+        root = Path(os.path.abspath(os.sep))
+        self.modules = root / "fake" / "Resolve" / "Developer" / "Scripting" / "Modules"
+        self.lib = root / "fake" / "Resolve" / "fusionscript.dll"
 
     def _patch_paths(self):
         return mock.patch.multiple(
@@ -143,7 +146,7 @@ class TestRunResolveSync(unittest.TestCase):
 
     def test_pythonpath_preserves_existing(self):
         completed = mock.MagicMock(returncode=0, stdout="", stderr="")
-        existing = "X:/already/here"
+        existing = os.path.join(os.path.abspath(os.sep), "already", "here")
         with self._patch_paths(), \
              mock.patch.object(Path, "is_file", return_value=True), \
              mock.patch.dict(os.environ, {"PYTHONPATH": existing}, clear=False), \
@@ -601,6 +604,10 @@ class TestPremiereInstaller(unittest.TestCase):
     hermetic, the OS-specific debug-mode toggle is mocked.
     """
 
+    # The debug-mode flags exist on Windows (registry) and macOS (defaults);
+    # Premiere doesn't run on Linux, where none are set.
+    EXPECTED_FLAGS = 4 if sys.platform.startswith(("win", "darwin", "cygwin")) else 0
+
     def setUp(self):
         import tempfile
         self._tmp = Path(tempfile.mkdtemp(prefix="lvm_pr_install_"))
@@ -630,7 +637,7 @@ class TestPremiereInstaller(unittest.TestCase):
                 log=lambda lvl, msg: logged.append((lvl, msg)))
         self.assertTrue(result["ok"])
         self.assertGreater(result["files_copied"], 0)
-        self.assertEqual(result["csxs_flags_set"], 4)
+        self.assertEqual(result["csxs_flags_set"], self.EXPECTED_FLAGS)
         self.assertEqual(result["install_dir"], str(self._install_dir))
         self.assertTrue(result["needs_premiere_restart"])
         # Files actually landed
@@ -688,7 +695,7 @@ class TestPremiereInstaller(unittest.TestCase):
             result = nle_bridge.uninstall_premiere_panel(clear_debug_mode=True)
         self.assertTrue(result["ok"])
         # Hits the OS-specific clear path; mocked to return 4.
-        self.assertEqual(result["csxs_flags_cleared"], 4)
+        self.assertEqual(result["csxs_flags_cleared"], self.EXPECTED_FLAGS)
 
 
 class TestIsPremierePanelInstalled(unittest.TestCase):
