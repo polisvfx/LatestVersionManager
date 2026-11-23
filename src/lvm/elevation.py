@@ -24,7 +24,7 @@ def is_windows() -> bool:
 def is_admin() -> bool:
     """Check if the current process has administrator privileges."""
     if not is_windows():
-        return os.getuid() == 0
+        return os.geteuid() == 0
     try:
         import ctypes
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
@@ -38,12 +38,11 @@ def is_developer_mode() -> bool:
         return True  # non-Windows can always symlink
     try:
         import winreg
-        key = winreg.OpenKey(
+        with winreg.OpenKey(
             winreg.HKEY_LOCAL_MACHINE,
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock",
-        )
-        value, _ = winreg.QueryValueEx(key, "AllowDevelopmentWithoutDevLicense")
-        winreg.CloseKey(key)
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "AllowDevelopmentWithoutDevLicense")
         return bool(value)
     except Exception:
         return False
@@ -109,16 +108,33 @@ def restart_elevated() -> bool:
 
     try:
         import ctypes
+        import subprocess
+        from ctypes import wintypes
+
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        shell32.ShellExecuteW.argtypes = [
+            wintypes.HWND,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            ctypes.c_int,
+        ]
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
+
+        argv = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
+        params = subprocess.list2cmdline(argv) if argv else None
+
         # ShellExecuteW returns an HINSTANCE > 32 on success
-        result = ctypes.windll.shell32.ShellExecuteW(
+        result = shell32.ShellExecuteW(
             None,            # hwnd
             "runas",         # lpOperation — triggers UAC
-            sys.executable,  # lpFile — python.exe / pythonw.exe
-            " ".join(f'"{a}"' for a in sys.argv),  # lpParameters
+            sys.executable,  # lpFile — python.exe / LatestVersionManager.exe
+            params,          # lpParameters
             None,            # lpDirectory
             1,               # nShowCmd — SW_SHOWNORMAL
         )
-        return result > 32
+        return bool(result and result > 32)
     except Exception as e:
         logger.error(f"Failed to restart elevated: {e}")
         return False

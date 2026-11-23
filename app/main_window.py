@@ -96,6 +96,9 @@ class MainWindow(QMainWindow):
         self._scan_worker: ScanWorker = None
         self._status_worker: StatusWorker = None
         self._project_load_worker: ProjectLoadWorker = None
+        self._project_generation: int = 0
+        self._thumb_request_id: int = 0
+        self._active_thumb_workers: set = set()
         self._reload_pending: bool = False
         self._rescan_after_cache: bool = False
         # Sources whose refresh was requested while a scan/status worker was
@@ -885,27 +888,72 @@ class MainWindow(QMainWindow):
             self._load_project(path)
 
     def _load_project(self, path: str):
+        # Refuse switching projects mid-promotion so active PromoteWorker state
+        # cannot be torn down or attributed to a different project.
+        if self._is_promotion_active:
+            QMessageBox.warning(
+                self, "Promotion In Progress",
+                "Cannot switch projects while a promotion is running. "
+                "Wait for it to finish or cancel it first.",
+            )
+            return
         # Reentrancy guard — ignore if a load is already in flight
         if getattr(self, "_project_load_worker", None) is not None and self._project_load_worker.isRunning():
             return
-        self.statusBar().showMessage(f"Loading: {path}…")
-        self._project_load_worker = ProjectLoadWorker(path, self)
-        self._project_load_worker.finished.connect(self._on_project_loaded)
-        self._project_load_worker.error.connect(self._on_project_load_error)
-        self._project_load_worker.start()
+        # Prompt to save unsaved changes before replacing an open project
+        if self.config is not None and self._dirty and self.config_path:
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                "You have unsaved changes in the current project. Save before opening another?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save,
+            )
+            if reply == QMessageBox.Cancel:
+                return
+            if reply == QMessageBox.Save:
+                if not self._save_project(blocking=True):
+                    return
 
-    def _on_project_loaded(self, config, cached, path: str):
+        self._project_generation += 1
+        gen = self._project_generation
+        # Stop watching the outgoing project so its events never fire into the new one
+        if self.watcher.is_running:
+            self.watcher.stop()
+            if hasattr(self, "watch_toggle"):
+                self.watch_toggle.blockSignals(True)
+                self.watch_toggle.setChecked(False)
+                self.watch_toggle.setText("Start Watching")
+                self.watch_toggle.blockSignals(False)
+            if hasattr(self, "auto_promote_cb"):
+                self.auto_promote_cb.setEnabled(False)
+        self._pending_refresh_names.clear()
+        self._reload_pending = False
+        self._auto_settle.clear()
+        self._render_wait_sources.clear()
+        self._auto_check_rerun.clear()
+
+        self.statusBar().showMessage(f"Loading: {path}…")
+        w = ProjectLoadWorker(path, self)
+        self._project_load_worker = w
+        w.completed.connect(lambda cfg, cached, p, g=gen: self._on_project_loaded(cfg, cached, p, g))
+        w.error.connect(lambda msg, p, g=gen: self._on_project_load_error(msg, p, g))
+        w.finished.connect(w.deleteLater)
+        w.start()
+
+    def _on_project_loaded(self, config, cached, path: str, generation: int = None):
         """Called on the main thread when ProjectLoadWorker finishes."""
         try:
+            if generation is not None and generation != self._project_generation:
+                return
+            # Reset in-flight scan/status guards from the previous project so
+            # _reload_ui starts cleanly for the newly loaded project.
+            self._scan_worker = None
+            self._status_worker = None
             self.config = config
             self.config_path = path
             self._add_to_recent(path)
 
             if cached:
-                # Show cached data quickly, then rescan in background.
-                # _reload_ui(cached_versions=...) is async; the background
-                # rescan is triggered in _on_reload_status_complete via
-                # _trigger_background_rescan_after_cache flag.
                 self._rescan_after_cache = True
                 self._reload_ui(cached_versions=cached)
             else:
@@ -936,8 +984,10 @@ class MainWindow(QMainWindow):
             f"project here will remove them. Update LVM before changing it.",
         )
 
-    def _on_project_load_error(self, message: str, path: str):
+    def _on_project_load_error(self, message: str, path: str, generation: int = None):
         """Called on the main thread when ProjectLoadWorker raises."""
+        if generation is not None and generation != self._project_generation:
+            return
         logging.getLogger(__name__).error(
             "Failed to load project %s: %s", path, message
         )
@@ -1051,6 +1101,67 @@ class MainWindow(QMainWindow):
         recents.insert(0, path)
         self._settings.setValue("recent_projects", recents[:10])
 
+    # --- Hook trust management ---
+
+    def _get_trusted_hooks(self) -> list[str]:
+        val = self._settings.value("trusted_hooks", [])
+        if isinstance(val, str):
+            return [val] if val else []
+        if isinstance(val, list):
+            return [str(x) for x in val if x]
+        return []
+
+    def _trust_hook_commands(self, pre_cmd: str, post_cmd: str) -> None:
+        from src.lvm.hook_trust import add_trusted_hook
+        updated = add_trusted_hook(
+            self.config_path or "", pre_cmd, post_cmd, self._get_trusted_hooks()
+        )
+        self._settings.setValue("trusted_hooks", updated)
+
+    def _confirm_hooks_trusted(self, source: WatchedSource, *, is_auto: bool = False) -> bool:
+        """Ensure any configured pre/post-promote shell hooks are approved."""
+        from src.lvm.hook_trust import is_hook_trusted
+        pre = (getattr(source, "pre_promote_cmd", "") or "").strip()
+        post = (getattr(source, "post_promote_cmd", "") or "").strip()
+        if not pre and not post:
+            return True
+        if is_hook_trusted(self.config_path or "", pre, post, self._get_trusted_hooks()):
+            return True
+        if is_auto:
+            msg = (
+                f"Auto-promote skipped for {source.name}: shell hook commands "
+                f"have not been approved for this project yet. Promote manually once to review."
+            )
+            logger.warning(msg)
+            self.statusBar().showMessage(msg)
+            self._notifier.notify(source.name, "skipped", f"{source.name}: unapproved shell hooks")
+            return False
+
+        lines = [
+            f"Promotion for '{source.name}' will execute the following shell command(s):",
+            "",
+        ]
+        if pre:
+            lines.append(f"Pre-promote:\n  {pre}")
+        if post:
+            lines.append(f"Post-promote:\n  {post}")
+        lines.append("\nOnly approve hooks from projects and teammates you trust.")
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Approve Promotion Shell Hooks")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("\n".join(lines))
+        trust_btn = box.addButton("Trust && Run for This Project", QMessageBox.AcceptRole)
+        once_btn = box.addButton("Run Once", QMessageBox.ActionRole)
+        cancel_btn = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(cancel_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == trust_btn:
+            self._trust_hook_commands(pre, post)
+            return True
+        return clicked == once_btn
+
     def _open_project_settings(self):
         if not self.config:
             QMessageBox.information(self, "No Project", "Open or create a project first.")
@@ -1058,6 +1169,8 @@ class MainWindow(QMainWindow):
         dlg = ProjectSettingsDialog(self.config, selected_source=self._current_source, parent=self)
         if dlg.exec() == QDialog.Accepted:
             dlg.apply_to_config(self.config)
+            # Hooks explicitly saved by the user in Settings are trusted automatically
+            self._trust_hook_commands(self.config.pre_promote_cmd, self.config.post_promote_cmd)
             self._mark_dirty()
             self._notifier.set_level(self.config.auto_promote_notifications)
             if self.watcher.is_running:
@@ -1345,10 +1458,13 @@ class MainWindow(QMainWindow):
             idx = selected_indices[0]
             source = self.config.watched_sources[idx]
             promoter = self._promoters.get(source.name)
-            can_undo = bool(promoter and len(promoter.get_history()) >= 2)
+            try:
+                can_undo = bool(promoter and len(promoter.get_history()) >= 2)
+            except OSError:
+                can_undo = False
             undo_action = menu.addAction("Undo Last Promote", lambda: self._undo_source(idx))
             undo_action.setShortcut(QKeySequence.Undo)
-            undo_action.setEnabled(can_undo)
+            undo_action.setEnabled(can_undo and not self._is_promotion_active)
 
         # Reveal in file browser
         menu.addSeparator()
@@ -1396,7 +1512,10 @@ class MainWindow(QMainWindow):
         version: VersionInfo = items[0].data(0, Qt.UserRole)
         source = self._current_source
         promoter = self._promoters.get(source.name) if source else None
-        current = promoter.get_current_version() if promoter else None
+        try:
+            current = promoter.get_current_version() if promoter else None
+        except OSError:
+            current = None
         is_promoted = current and version_strings_match(version.version_string, current.version, version.version_number)
 
         menu = QMenu(self)
@@ -1418,6 +1537,7 @@ class MainWindow(QMainWindow):
             promote_action = menu.addAction("Keep This Version", self._promote_selected)
         else:
             promote_action = menu.addAction("Promote This Version", self._promote_selected)
+        promote_action.setEnabled(not self._is_promotion_active)
 
         # Copy actions
         menu.addSeparator()
@@ -1604,7 +1724,7 @@ class MainWindow(QMainWindow):
         Hold Shift while clicking to force-promote every source, including
         those already on the highest version.
         """
-        if not self.config:
+        if not self.config or self._is_promotion_active:
             return
 
         # Detect Shift modifier → force mode
@@ -1833,6 +1953,7 @@ class MainWindow(QMainWindow):
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
         self.statusBar().showMessage(f"Discover & Promote: scanning {root_dir}…")
 
+        gen = self._project_generation
         worker = DiscoveryWorker(
             root_dir=root_dir,
             max_depth=4,
@@ -1842,20 +1963,25 @@ class MainWindow(QMainWindow):
             skip_resolve=self.config.skip_resolve,
             parent=self,
         )
-        worker.finished.connect(self._on_discover_promote_complete)
-        worker.error.connect(self._on_discover_promote_error)
+        worker.completed.connect(lambda res, g=gen: self._on_discover_promote_complete(res, g))
+        worker.error.connect(lambda msg, g=gen: self._on_discover_promote_error(msg, g))
+        worker.finished.connect(worker.deleteLater)
         self._discover_promote_worker = worker
         self._update_discover_promote_button()
         worker.start()
 
-    def _on_discover_promote_error(self, msg: str):
+    def _on_discover_promote_error(self, msg: str, generation: int = None):
+        if generation is not None and generation != self._project_generation:
+            return
         self._discover_promote_worker = None
         self._scan_indicator.setText("")
         self.statusBar().showMessage(f"Discover & Promote failed: {msg}")
         logger.error("Discover & Promote: %s", msg)
         self._update_discover_promote_button()
 
-    def _on_discover_promote_complete(self, results: list):
+    def _on_discover_promote_complete(self, results: list, generation: int = None):
+        if generation is not None and generation != self._project_generation:
+            return
         self._discover_promote_worker = None
         self._scan_indicator.setText("")
 
@@ -2076,20 +2202,27 @@ class MainWindow(QMainWindow):
             self._start_status_worker(dict(cached_versions))
         else:
             # Phase 1: scan in background
-            self._scan_worker = ScanWorker(self.config, parent=self)
-            self._scan_worker.progress.connect(self._on_refresh_progress)
-            self._scan_worker.finished.connect(self._on_reload_scan_complete)
-            self._scan_worker.error.connect(self._on_reload_error)
-            self._scan_worker.start()
+            gen = self._project_generation
+            w = ScanWorker(self.config, parent=self)
+            self._scan_worker = w
+            w.progress.connect(self._on_refresh_progress)
+            w.completed.connect(lambda res, g=gen: self._on_reload_scan_complete(res, g))
+            w.error.connect(lambda msg, g=gen: self._on_reload_error(msg, g))
+            w.finished.connect(w.deleteLater)
+            w.start()
 
-    def _on_reload_scan_complete(self, scan_results: dict):
+    def _on_reload_scan_complete(self, scan_results: dict, generation: int = None):
         """Phase 1 done — scan results ready, start status computation."""
+        if generation is not None and generation != self._project_generation:
+            return
         self._scan_worker = None
         self._versions_cache = dict(scan_results)
         self._start_status_worker(scan_results)
 
-    def _on_reload_error(self, msg: str):
+    def _on_reload_error(self, msg: str, generation: int = None):
         """Handle errors during reload scan phase."""
+        if generation is not None and generation != self._project_generation:
+            return
         self._scan_worker = None
         self.btn_refresh.setEnabled(True)
         self._scan_indicator.setText("")
@@ -2099,13 +2232,20 @@ class MainWindow(QMainWindow):
 
     def _start_status_worker(self, versions_cache: dict):
         """Phase 2: compute statuses in background thread."""
-        self._status_worker = StatusWorker(self.config, versions_cache, parent=self)
-        self._status_worker.finished.connect(self._on_reload_status_complete)
-        self._status_worker.start()
+        gen = self._project_generation
+        w = StatusWorker(self.config, versions_cache, parent=self)
+        self._status_worker = w
+        w.completed.connect(
+            lambda st, cf, pr, sc, g=gen: self._on_reload_status_complete(st, cf, pr, sc, g)
+        )
+        w.finished.connect(w.deleteLater)
+        w.start()
 
     def _on_reload_status_complete(self, source_status: dict, target_conflicts: dict,
-                                   promoters: dict, scanners: dict):
+                                   promoters: dict, scanners: dict, generation: int = None):
         """Phase 2 done — populate caches and rebuild UI."""
+        if generation is not None and generation != self._project_generation:
+            return
         self._status_worker = None
         self._source_status = source_status
         self._target_conflicts = target_conflicts
@@ -2174,11 +2314,14 @@ class MainWindow(QMainWindow):
             return
         self._scan_indicator.setText("Updating...")
         self._scan_indicator.setStyleSheet("color: #d4a849; font-size: 11pt; margin-right: 8px;")
-        self._scan_worker = ScanWorker(self.config, previous_cache=dict(self._versions_cache), parent=self)
-        self._scan_worker.progress.connect(self._on_refresh_progress)
-        self._scan_worker.finished.connect(self._on_refresh_complete)
-        self._scan_worker.error.connect(self._on_refresh_error)
-        self._scan_worker.start()
+        gen = self._project_generation
+        w = ScanWorker(self.config, previous_cache=dict(self._versions_cache), parent=self)
+        self._scan_worker = w
+        w.progress.connect(self._on_refresh_progress)
+        w.completed.connect(lambda res, g=gen: self._on_refresh_complete(res, g))
+        w.error.connect(lambda msg, g=gen: self._on_refresh_error(msg, g))
+        w.finished.connect(w.deleteLater)
+        w.start()
 
     def _save_scan_cache(self):
         """Save current _versions_cache to disk (background I/O)."""
@@ -2533,16 +2676,24 @@ class MainWindow(QMainWindow):
             {s.name: self._versions_cache.get(s.name, []) for s in sources}
             if background else {}
         )
-        self._scan_worker = ScanWorker(self.config, sources=sources,
-                                       previous_cache=previous, parent=self)
-        self._scan_worker.progress.connect(self._on_refresh_progress)
-        self._scan_worker.finished.connect(self._on_partial_refresh_complete)
-        self._scan_worker.error.connect(self._on_refresh_error)
-        self._scan_worker.start()
+        gen = self._project_generation
+        w = ScanWorker(self.config, sources=sources,
+                       previous_cache=previous, parent=self)
+        self._scan_worker = w
+        w.progress.connect(self._on_refresh_progress)
+        w.completed.connect(lambda res, g=gen: self._on_partial_refresh_complete(res, g))
+        w.error.connect(lambda msg, g=gen: self._on_refresh_error(msg, g))
+        w.finished.connect(w.deleteLater)
+        w.start()
 
-    def _on_partial_refresh_complete(self, scan_results: dict):
+    def _on_partial_refresh_complete(self, scan_results: dict, generation: int = None):
         """Called when a partial (selected sources) scan finishes. Delegate to StatusWorker."""
+        if generation is not None and generation != self._project_generation:
+            return
         self._scan_worker = None
+        if self._is_promotion_active:
+            self._pending_refresh_names.update(scan_results.keys())
+            return
         self._partial_scan_count = len(scan_results)
 
         # Merge new scan results into the existing versions cache
@@ -2553,16 +2704,28 @@ class MainWindow(QMainWindow):
         changed_sources = [
             s for s in self.config.watched_sources if s.name in scan_results
         ]
-        self._status_worker = StatusWorker(
+        if not changed_sources:
+            self._scan_indicator.setText("")
+            self.btn_refresh.setEnabled(True)
+            self._check_reload_pending()
+            return
+        gen = self._project_generation
+        w = StatusWorker(
             self.config, dict(self._versions_cache),
             sources=changed_sources, parent=self,
         )
-        self._status_worker.finished.connect(self._on_partial_status_complete)
-        self._status_worker.start()
+        self._status_worker = w
+        w.completed.connect(
+            lambda st, cf, pr, sc, g=gen: self._on_partial_status_complete(st, cf, pr, sc, g)
+        )
+        w.finished.connect(w.deleteLater)
+        w.start()
 
     def _on_partial_status_complete(self, source_status: dict, target_conflicts: dict,
-                                    promoters: dict, scanners: dict):
+                                    promoters: dict, scanners: dict, generation: int = None):
         """Status computation done after partial refresh — rebuild UI."""
+        if generation is not None and generation != self._project_generation:
+            return
         self._status_worker = None
         # Merge partial results into existing caches (not replace)
         self._source_status.update(source_status)
@@ -2707,32 +2870,36 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Scanning sources...")
 
         previous = {} if full else dict(self._versions_cache)
-        self._scan_worker = ScanWorker(self.config, previous_cache=previous, parent=self)
-        self._scan_worker.progress.connect(self._on_refresh_progress)
-        self._scan_worker.finished.connect(self._on_refresh_complete)
-        self._scan_worker.error.connect(self._on_refresh_error)
-        self._scan_worker.start()
+        gen = self._project_generation
+        w = ScanWorker(self.config, previous_cache=previous, parent=self)
+        self._scan_worker = w
+        w.progress.connect(self._on_refresh_progress)
+        w.completed.connect(lambda res, g=gen: self._on_refresh_complete(res, g))
+        w.error.connect(lambda msg, g=gen: self._on_refresh_error(msg, g))
+        w.finished.connect(w.deleteLater)
+        w.start()
 
     def _on_refresh_progress(self, current: int, total: int, source_name: str):
         self.statusBar().showMessage(f"Scanning source {current}/{total}: {source_name}")
 
-    def _on_refresh_error(self, msg: str):
+    def _on_refresh_error(self, msg: str, generation: int = None):
+        if generation is not None and generation != self._project_generation:
+            return
         self._scan_worker = None
         self.btn_refresh.setEnabled(True)
+        self.btn_refresh_versions.setEnabled(self._current_source is not None)
+        self._on_version_selected()
+        self._on_source_selection_changed()
         self._scan_indicator.setText("")
         self.statusBar().showMessage(f"Scan error: {msg}")
         logger.error(f"Scan error: {msg}")
 
         self._check_reload_pending()
 
-    def _on_refresh_complete(self, scan_results: dict):
-        """Called when background scan finishes. Delegate to StatusWorker.
-
-        If a promotion is currently running, defer processing these results
-        until the promotion completes.  Clearing _promoters/_scanners/
-        _current_source while a PromoteWorker is active would corrupt the
-        promotion state and silently break subsequent promotions.
-        """
+    def _on_refresh_complete(self, scan_results: dict, generation: int = None):
+        """Called when background scan finishes. Delegate to StatusWorker."""
+        if generation is not None and generation != self._project_generation:
+            return
         self._scan_worker = None
 
         if self._is_promotion_active:
@@ -2744,21 +2911,26 @@ class MainWindow(QMainWindow):
 
     def _apply_refresh_results(self, scan_results: dict):
         """Apply full refresh scan results: update caches and start StatusWorker."""
-        # Store scanned versions and clear stale caches
         self._versions_cache = dict(scan_results)
         self._scanners.clear()
         self._promoters.clear()
         self._current_source = None
         self._source_status = {}
 
-        # Phase 2: compute statuses in background
-        self._status_worker = StatusWorker(self.config, scan_results, parent=self)
-        self._status_worker.finished.connect(self._on_refresh_status_complete)
-        self._status_worker.start()
+        gen = self._project_generation
+        w = StatusWorker(self.config, scan_results, parent=self)
+        self._status_worker = w
+        w.completed.connect(
+            lambda st, cf, pr, sc, g=gen: self._on_refresh_status_complete(st, cf, pr, sc, g)
+        )
+        w.finished.connect(w.deleteLater)
+        w.start()
 
     def _on_refresh_status_complete(self, source_status: dict, target_conflicts: dict,
-                                    promoters: dict, scanners: dict):
+                                    promoters: dict, scanners: dict, generation: int = None):
         """Status computation done after _refresh_all — rebuild UI."""
+        if generation is not None and generation != self._project_generation:
+            return
         self._status_worker = None
         self._source_status = source_status
         self._target_conflicts = target_conflicts
@@ -3240,8 +3412,16 @@ class MainWindow(QMainWindow):
 
         # Use cached status from StatusWorker to avoid redundant I/O
         status_info = self._source_status.get(source.name, {})
-        current = status_info.get("current") if status_info else (
-            promoter.get_current_version() if promoter else None)
+        if status_info:
+            current = status_info.get("current")
+        elif promoter:
+            try:
+                current = promoter.get_current_version()
+            except OSError as e:
+                logger.warning("Could not read history for '%s': %s", source.name, e)
+                current = None
+        else:
+            current = None
         current_ver = current.version if current else None
 
         # Update banner
@@ -3278,7 +3458,10 @@ class MainWindow(QMainWindow):
             # Use cached integrity from StatusWorker; fallback to live call if not yet computed
             integrity = status_info.get("integrity") if status_info else None
             if integrity is None and promoter:
-                integrity = promoter.verify()
+                try:
+                    integrity = promoter.verify()
+                except OSError as e:
+                    integrity = {"valid": False, "message": f"History unreadable: {e}"}
             if not integrity:
                 integrity = {"valid": True, "message": ""}
             if integrity["valid"]:
@@ -3396,7 +3579,11 @@ class MainWindow(QMainWindow):
 
         # Populate history
         if promoter:
-            history = promoter.get_history()
+            try:
+                history = promoter.get_history()
+            except OSError as e:
+                logger.warning("Could not read history for '%s': %s", source.name, e)
+                history = []
             for i, h in enumerate(history):
                 item = QTreeWidgetItem([
                     h.set_at,
@@ -3434,7 +3621,10 @@ class MainWindow(QMainWindow):
             version: VersionInfo = items[0].data(0, Qt.UserRole)
             source = self._current_source
             promoter = self._promoters.get(source.name) if source else None
-            current = promoter.get_current_version() if promoter else None
+            try:
+                current = promoter.get_current_version() if promoter else None
+            except OSError:
+                current = None
 
             if current and version_strings_match(version.version_string, current.version, version.version_number):
                 self.btn_promote.setText("Keep This Version")
@@ -3624,6 +3814,8 @@ class MainWindow(QMainWindow):
         return bool(source.latest_target)
 
     def _promote_selected(self):
+        if self._is_promotion_active:
+            return
         items = self.version_tree.selectedItems()
         if not items or not self._current_source:
             return
@@ -3711,6 +3903,8 @@ class MainWindow(QMainWindow):
 
     def _revert_selected(self):
         """Revert to a version from history by re-scanning and promoting."""
+        if self._is_promotion_active:
+            return
         items = self.history_tree.selectedItems()
         if not items or not self._current_source:
             return
@@ -3767,6 +3961,8 @@ class MainWindow(QMainWindow):
 
         When *skip_confirm* is True, undo one step immediately without a dialog.
         """
+        if not self.config or self._is_promotion_active:
+            return
         if index < 0 or index >= len(self.config.watched_sources):
             return
         source = self.config.watched_sources[index]
@@ -3776,7 +3972,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Undo Unavailable",
                                 f"No scanner/promoter loaded for {source.name}.")
             return
-        if len(promoter.get_history()) < 2:
+        try:
+            history_len = len(promoter.get_history())
+        except OSError as e:
+            QMessageBox.warning(self, "Undo Unavailable",
+                                f"Could not read history for {source.name}:\n{e}")
+            return
+        if history_len < 2:
             QMessageBox.information(self, "Nothing to Undo",
                                     f"{source.name} has fewer than two history entries.")
             return
@@ -3815,8 +4017,13 @@ class MainWindow(QMainWindow):
 
     def _start_promotion(self, promoter: Promoter, version: VersionInfo,
                           keep_layers: set[str] | None = None,
-                          *, force: bool = False, pinned: bool = False):
-        """Start the promotion in a background thread, checking link mode availability first."""
+                          *, force: bool = False, pinned: bool = False,
+                          is_auto: bool = False):
+        """Start the promotion in a background thread, checking hooks and link mode first."""
+        if not self._confirm_hooks_trusted(promoter.source, is_auto=is_auto):
+            self._restore_fallback_link_mode()
+            self._auto_promoting_name = None
+            return
         self._promoting_source_name = promoter.source.name
         self._promoting_version = version
         self._promoting_force = force
@@ -3833,7 +4040,7 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.Yes:
                 if restart_elevated():
-                    QApplication.quit()
+                    self.close()
                     return
                 else:
                     QMessageBox.warning(self, "Elevation Failed",
@@ -3853,13 +4060,15 @@ class MainWindow(QMainWindow):
         self.btn_cancel_promote.setEnabled(True)
         self.btn_cancel_promote.setText("Cancel")
 
-        self._worker = PromoteWorker(promoter, version, self, force=force,
-                                     pinned=pinned, keep_layers=keep_layers)
-        self._worker.progress.connect(self._on_promote_progress)
-        self._worker.byte_progress.connect(self._on_promote_byte_progress)
-        self._worker.finished.connect(self._on_promote_finished)
-        self._worker.error.connect(self._on_promote_error)
-        self._worker.start()
+        w = PromoteWorker(promoter, version, self, force=force,
+                          pinned=pinned, keep_layers=keep_layers)
+        self._worker = w
+        w.progress.connect(self._on_promote_progress)
+        w.byte_progress.connect(self._on_promote_byte_progress)
+        w.completed.connect(self._on_promote_finished)
+        w.error.connect(self._on_promote_error)
+        w.finished.connect(w.deleteLater)
+        w.start()
 
     def _on_promote_progress(self, current, total, filename):
         if total == 1 and current == 0:
@@ -4137,12 +4346,13 @@ class MainWindow(QMainWindow):
         if source is None:
             return
 
+        gen = self._project_generation
         worker = AutoPromoteCheckWorker(
             self.config, source, waiting_on_render, RENDER_SETTLE_SECONDS,
             previous_settle=self._auto_settle.get(source_name), parent=self,
         )
         self._auto_check_workers[source_name] = worker
-        worker.decided.connect(self._on_auto_promote_decided)
+        worker.decided.connect(lambda d, g=gen: self._on_auto_promote_decided(d, g))
         worker.finished.connect(lambda: self._on_auto_check_thread_done(source_name, worker))
         worker.start()
 
@@ -4155,8 +4365,10 @@ class MainWindow(QMainWindow):
         logger.info(msg)
         self.statusBar().showMessage(msg)
 
-    def _on_auto_promote_decided(self, decision):
+    def _on_auto_promote_decided(self, decision, generation: int = None):
         """Main-thread half of auto-promote: act on a worker's decision."""
+        if generation is not None and generation != self._project_generation:
+            return
         from src.lvm import auto_promote as ap
 
         name = decision.source_name
@@ -4216,6 +4428,8 @@ class MainWindow(QMainWindow):
             promoter = self._promoters.get(name)
             if promoter is None:
                 return  # latest target removed while the check ran
+            if not self._confirm_hooks_trusted(promoter.source, is_auto=True):
+                return
             self._auto_settle.pop(name, None)
             logger.info(f"Auto-promoting {name}: {version.version_string}")
             self.statusBar().showMessage(
@@ -4365,14 +4579,28 @@ class MainWindow(QMainWindow):
         if not cache_dir:
             return
 
-        self._thumb_worker = ThumbnailWorker(
+        self._thumb_request_id += 1
+        req_id = self._thumb_request_id
+        w = ThumbnailWorker(
             version.source_path, version.version_string,
-            self._current_source.file_extensions, cache_dir, self
+            self._current_source.file_extensions, cache_dir,
+            request_id=req_id, parent=self,
         )
-        self._thumb_worker.finished.connect(self._on_thumbnail_ready)
-        self._thumb_worker.start()
+        self._thumb_worker = w
+        self._active_thumb_workers.add(w)
+        w.completed.connect(self._on_thumbnail_ready)
+        w.finished.connect(lambda worker=w: self._on_thumb_worker_done(worker))
+        w.start()
 
-    def _on_thumbnail_ready(self, thumb_path):
+    def _on_thumb_worker_done(self, worker):
+        self._active_thumb_workers.discard(worker)
+        if self._thumb_worker is worker:
+            self._thumb_worker = None
+        worker.deleteLater()
+
+    def _on_thumbnail_ready(self, req_id: int, thumb_path: str):
+        if req_id != self._thumb_request_id:
+            return
         if thumb_path:
             pixmap = QPixmap(thumb_path)
             if not pixmap.isNull():
@@ -4507,23 +4735,40 @@ class MainWindow(QMainWindow):
 
         # Disconnect signals and stop all background workers to avoid
         # callbacks firing into a half-destroyed window.
-        for worker in (self._scan_worker, self._status_worker,
-                        *self._auto_check_workers.values(),
-                        self._worker, self._thumb_worker,
-                        self._thumb_queue_worker,
-                        self._project_load_worker):
-            if worker is not None:
-                try:
-                    worker.disconnect()
-                except RuntimeError:
-                    pass
-                if worker.isRunning():
-                    worker.quit()
-                    worker.wait(2000)
+        workers_to_stop = [
+            self._scan_worker,
+            self._status_worker,
+            *self._auto_check_workers.values(),
+            self._worker,
+            self._thumb_worker,
+            *list(self._active_thumb_workers),
+            self._thumb_queue_worker,
+            self._project_load_worker,
+            getattr(self, "_sync_names_worker", None),
+            getattr(self, "_discover_promote_worker", None),
+        ]
+        seen_ids = set()
+        for worker in workers_to_stop:
+            if worker is None or id(worker) in seen_ids:
+                continue
+            seen_ids.add(id(worker))
+            try:
+                worker.disconnect()
+            except RuntimeError:
+                pass
+            if worker.isRunning():
+                worker.quit()
+                worker.wait(3000)
 
-        self._io_executor.shutdown(wait=False)
+        # Flush in-flight project config / scan cache writes before exiting
+        self._io_executor.shutdown(wait=True)
         self.watcher.stop()
         self._notifier.set_level("off")  # remove the tray icon
+        # Detach QtLogHandler from root logger so post-close log records
+        # never emit onto a destroyed MainWindow.
+        if hasattr(self, "_log_handler") and self._log_handler is not None:
+            logging.getLogger().removeHandler(self._log_handler)
+            self._log_handler.close()
         event.accept()
 
 

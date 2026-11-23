@@ -1,5 +1,7 @@
 """batch_promote dialog module."""
 
+import html
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -49,7 +51,10 @@ class BatchPromoteReviewDialog(QDialog):
 
         for source, version in promote_list:
             promoter = promoters.get(source.name)
-            current = promoter.get_current_version() if promoter else None
+            try:
+                current = promoter.get_current_version() if promoter else None
+            except OSError:
+                current = None
             current_ver = current.version if current else "---"
 
             row_status = "normal"
@@ -84,6 +89,37 @@ class BatchPromoteReviewDialog(QDialog):
             self.tree.addTopLevelItem(item)
 
         layout.addWidget(self.tree)
+
+        # Show configured shell hooks if any source in the batch defines them
+        from src.lvm.hook_trust import collect_source_hooks
+        batch_hooks = collect_source_hooks([s for s, _ in promote_list])
+        if batch_hooks:
+            hook_frame = QFrame()
+            hook_frame.setStyleSheet(
+                "QFrame { background-color: #222a35; border: 1px solid #446688; "
+                "border-radius: 4px; padding: 6px; }"
+            )
+            hook_layout = QVBoxLayout(hook_frame)
+            hook_layout.setContentsMargins(8, 4, 8, 4)
+            unique_cmds = []
+            seen_cmds = set()
+            for _sname, pre_c, post_c in batch_hooks:
+                for kind, cmd in (("Pre", pre_c), ("Post", post_c)):
+                    if cmd and (kind, cmd) not in seen_cmds:
+                        seen_cmds.add((kind, cmd))
+                        unique_cmds.append((kind, cmd))
+            title = QLabel(
+                f"<b>Shell hooks will run for {len(batch_hooks)} source(s):</b>"
+            )
+            title.setStyleSheet("color: #8cc4ff; font-size: 11pt;")
+            hook_layout.addWidget(title)
+            for kind, cmd in unique_cmds[:4]:
+                lbl = QLabel(f"{kind}-promote: {cmd}")
+                lbl.setTextFormat(Qt.PlainText)
+                lbl.setWordWrap(True)
+                lbl.setStyleSheet("color: #d0d8e0; font-family: monospace; font-size: 10pt;")
+                hook_layout.addWidget(lbl)
+            layout.addWidget(hook_frame)
 
         if already_current or skipped:
             info_parts = []
@@ -173,7 +209,7 @@ class DiscoverPromotePreviewDialog(QDialog):
         intro.setStyleSheet("font-size: 12pt; padding: 4px;")
         layout.addWidget(intro)
 
-        root_label = QLabel(f"<b>Discovery directory:</b> {root_dir}")
+        root_label = QLabel(f"<b>Discovery directory:</b> {html.escape(root_dir)}")
         root_label.setStyleSheet("padding: 2px 4px;")
         root_label.setWordWrap(True)
         layout.addWidget(root_label)
@@ -270,12 +306,15 @@ class UndoPromoteDialog(QDialog):
         self._promoter = promoter
         self._scanner = scanner
         self._versions = scanner.scan()
-        self._history = promoter.get_history()
+        try:
+            self._history = promoter.get_history()
+        except OSError:
+            self._history = []
         self._target_version = None  # VersionInfo for accepted undo
 
         layout = QVBoxLayout(self)
 
-        header = QLabel(f"<b>{source.name}</b>")
+        header = QLabel(f"<b>{html.escape(source.name)}</b>")
         header.setStyleSheet("font-size: 13pt; padding: 4px;")
         layout.addWidget(header)
 

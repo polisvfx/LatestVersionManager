@@ -61,9 +61,9 @@ class TestStatusWorkerErrors(unittest.TestCase):
 
     def _run(self, worker):
         results = []
-        worker.finished.connect(lambda *a: results.append(a))
+        worker.completed.connect(lambda *a: results.append(a))
         worker.run()  # synchronous: emits on this thread
-        self.assertEqual(len(results), 1, "finished must be emitted exactly once")
+        self.assertEqual(len(results), 1, "completed must be emitted exactly once")
         return results[0]
 
     def test_unreadable_history_reports_error_status(self):
@@ -864,12 +864,17 @@ class TestP0GuiRegressions(_MainWindowTestBase):
                 captured_force.append(force)
                 self_.progress = type("S", (), {"connect": lambda *a: None})()
                 self_.byte_progress = type("S", (), {"connect": lambda *a: None})()
+                self_.completed = type("S", (), {"connect": lambda *a: None})()
                 self_.finished = type("S", (), {"connect": lambda *a: None})()
                 self_.error = type("S", (), {"connect": lambda *a: None})()
             def start(self_):
                 pass
             def isRunning(self_):
                 return False
+            def deleteLater(self_):
+                pass
+            def disconnect(self_):
+                pass
 
         with patch("app.main_window.check_link_mode_available", return_value=(True, "")), \
              patch("app.main_window.PromoteWorker", FakeWorker):

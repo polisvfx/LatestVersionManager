@@ -5,6 +5,8 @@ per source. Each bar spans from a promote's `set_at` to the next promote (or
 "now"), so the user can scrub their project's promote history visually.
 """
 
+import html
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -39,7 +41,7 @@ from PySide6.QtCore import QDate, QRectF, QPointF, QSize
 
 class HistoryLoadWorker(QThread):
     """Loads every source's .latest_history.json off the UI thread."""
-    finished = Signal(list)   # list of (source, history_entries_newest_first)
+    completed = Signal(list)  # list of (source, history_entries_newest_first)
     error = Signal(str)
 
     def __init__(self, sources: list, parent=None):
@@ -72,7 +74,7 @@ class HistoryLoadWorker(QThread):
             else:
                 for s in self._sources:
                     results.append(_load_one(s))
-            self.finished.emit(results)
+            self.completed.emit(results)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -406,10 +408,30 @@ class HistoryTimelineDialog(QDialog):
         if not sources:
             self.status_label.setText("No sources configured.")
             return
-        self._worker = HistoryLoadWorker(sources, self)
-        self._worker.finished.connect(self._on_loaded)
-        self._worker.error.connect(self._on_load_error)
-        self._worker.start()
+        w = HistoryLoadWorker(sources, self)
+        self._worker = w
+        w.completed.connect(self._on_loaded)
+        w.error.connect(self._on_load_error)
+        w.finished.connect(w.deleteLater)
+        w.start()
+
+    def _stop_worker(self):
+        if getattr(self, "_worker", None) is not None:
+            try:
+                self._worker.disconnect()
+            except RuntimeError:
+                pass
+            if self._worker.isRunning():
+                self._worker.wait(3000)
+            self._worker = None
+
+    def reject(self):
+        self._stop_worker()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._stop_worker()
+        super().closeEvent(event)
 
     def _on_loaded(self, loaded: list):
         self._loaded = loaded
@@ -686,12 +708,12 @@ class HistoryTimelineDialog(QDialog):
         else:
             dur_str = f"{duration.total_seconds() / 3600.0:.1f} hours"
         frames = entry.frame_range or "—"
-        return (f"<b>{source.name}</b><br>"
-                f"Version: <b>{entry.version}</b><br>"
-                f"Promoted: {start}<br>"
-                f"Until: {end} ({dur_str})<br>"
-                f"By: {entry.set_by or 'unknown'}<br>"
-                f"Frames: {frames}")
+        return (f"<b>{html.escape(source.name)}</b><br>"
+                f"Version: <b>{html.escape(str(entry.version))}</b><br>"
+                f"Promoted: {html.escape(start)}<br>"
+                f"Until: {html.escape(end)} ({html.escape(dur_str)})<br>"
+                f"By: {html.escape(entry.set_by or 'unknown')}<br>"
+                f"Frames: {html.escape(frames)}")
 
     # --- Interactions -------------------------------------------------------
 

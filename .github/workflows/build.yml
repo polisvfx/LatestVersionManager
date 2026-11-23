@@ -113,6 +113,7 @@ jobs:
           python -m unittest tests.test_nle_bridge -v
           python -m unittest tests.test_bench_tool -v
           python -m unittest tests.test_p0_regressions -v
+          python -m unittest tests.test_p1_security -v
 
       # ── Inject release version into package ─────────────────────────────
       # When triggered by a published release (tag e.g. v1.2.3), patch
@@ -268,14 +269,13 @@ jobs:
           zip -r ${{ matrix.artifact_name }}.zip LatestVersionManager/
 
       # ── macOS: Create auto-updater ZIP ──────────────────────────────────
-      # The DMG is for manual downloads (preserves code signature).
-      # The ZIP of the internal LatestVersionManager/ folder is for the
-      # in-app auto-updater which replaces files inside the .app bundle.
+      # Package the signed .app bundle with ditto so Info.plist, Frameworks,
+      # symlinks, and any Developer ID signature stay intact during in-app updates.
       - name: Create macOS auto-updater ZIP
         if: runner.os == 'macOS'
         run: |
           cd dist
-          zip -r ${{ matrix.artifact_name }}.zip LatestVersionManager/
+          ditto -c -k --keepParent LatestVersionManager.app ${{ matrix.artifact_name }}.zip
 
       # ── Upload artifact (for every build — kept 7 days) ─────────────────
       # Artifact uploads are skipped on direct pushes to main/dev — those runs
@@ -374,8 +374,18 @@ jobs:
             mv "$f" "$dir/$newbase"
           done
 
+      - name: Generate SHA256SUMS.txt
+        run: |
+          (
+            cd dist
+            find . -type f \( -name "*.zip" -o -name "*.dmg" \) | sort | while read -r f; do
+              sha256sum "$f" | awk -v base="$(basename "$f")" '{print $1 "  " base}'
+            done
+          ) > dist/SHA256SUMS.txt
+          cat dist/SHA256SUMS.txt
+
       - name: Upload all artifacts to GitHub Release
-        run: gh release upload "${{ github.ref_name }}" dist/**/*.zip dist/**/*.dmg --clobber
+        run: gh release upload "${{ github.ref_name }}" dist/**/*.zip dist/**/*.dmg dist/SHA256SUMS.txt --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

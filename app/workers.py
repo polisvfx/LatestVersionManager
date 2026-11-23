@@ -1,5 +1,6 @@
 """Background QThread workers used by the GUI."""
 
+import copy
 import threading
 
 from app._common import *  # noqa: F401,F403
@@ -29,7 +30,7 @@ class PromoteWorker(QThread):
     # bytes copied, total bytes, filename — floats, as Qt's int is 32-bit
     # and a single MOV/MXF can be far larger than 2 GB.
     byte_progress = Signal(float, float, str)
-    finished = Signal(object)          # HistoryEntry on success
+    completed = Signal(object)         # HistoryEntry on success
     error = Signal(str)                # error message
 
     def __init__(self, promoter: Promoter, version: VersionInfo, parent=None,
@@ -55,7 +56,7 @@ class PromoteWorker(QThread):
                 keep_layers=self.keep_layers,
                 byte_progress_callback=self._on_byte_progress,
             )
-            self.finished.emit(entry)
+            self.completed.emit(entry)
         except PromotionError as e:
             self.error.emit(str(e))
         except Exception as e:
@@ -74,30 +75,28 @@ class PromoteWorker(QThread):
 
 
 class ThumbnailWorker(QThread):
-    finished = Signal(str)  # path to thumbnail or empty string
+    completed = Signal(int, str)  # request_id, path to thumbnail or empty string
 
-    def __init__(self, source_path, version_string, extensions, cache_dir, parent=None):
+    def __init__(self, source_path, version_string, extensions, cache_dir,
+                 request_id: int = 0, parent=None):
         super().__init__(parent)
         self.source_path = source_path
         self.version_string = version_string
-        self.extensions = extensions
+        self.extensions = list(extensions)
         self.cache_dir = cache_dir
+        self.request_id = request_id
 
     def run(self):
         from src.lvm.thumbnail import get_thumbnail
-        result = get_thumbnail(self.source_path, self.version_string, self.extensions, self.cache_dir)
-        self.finished.emit(result or "")
+        try:
+            result = get_thumbnail(self.source_path, self.version_string, self.extensions, self.cache_dir)
+        except Exception:
+            result = ""
+        self.completed.emit(self.request_id, result or "")
 
 
 class ThumbnailQueueWorker(QThread):
-    """Drains a queue of thumbnail requests for the version-tree icons.
-
-    One long-lived thread, so at most one ffmpeg/oiiotool subprocess runs
-    at a time. Requests are LIFO (newest first) and deduped by key, so
-    re-requesting the selected version bumps it to the front of the queue.
-    Disk-cache hits in get_thumbnail return instantly, which makes
-    re-queues cheap.
-    """
+    """Drains a queue of thumbnail requests for the version-tree icons."""
 
     ready = Signal(str, str)  # key (= version source_path), thumb path or ""
 
@@ -145,13 +144,13 @@ class ThumbnailQueueWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
-# Worker threads for update checking / downloading
+# Worker threads for update checking / downloading / extracting
 # ---------------------------------------------------------------------------
 
 
 class UpdateCheckWorker(QThread):
     """Checks GitHub for a newer release in a background thread."""
-    finished = Signal(object)  # ReleaseInfo or None
+    completed = Signal(object)  # ReleaseInfo or None
     error = Signal(str)
 
     def __init__(self, current_version: str, parent=None):
@@ -162,22 +161,25 @@ class UpdateCheckWorker(QThread):
         try:
             from src.lvm.updater import check_for_update
             release = check_for_update(self.current_version)
-            self.finished.emit(release)
+            self.completed.emit(release)
         except Exception as e:
             self.error.emit(str(e))
 
 
-
 class UpdateDownloadWorker(QThread):
-    """Downloads the update ZIP in a background thread."""
+    """Downloads and SHA-256 verifies the update ZIP in a background thread."""
     progress = Signal(int, int)    # bytes_downloaded, total_bytes
-    finished = Signal(str)         # path to downloaded ZIP
+    completed = Signal(str)        # path to downloaded ZIP
     error = Signal(str)
 
     def __init__(self, release_info, dest_dir: str, parent=None):
         super().__init__(parent)
         self.release_info = release_info
         self.dest_dir = dest_dir
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
 
     def run(self):
         try:
@@ -186,29 +188,51 @@ class UpdateDownloadWorker(QThread):
                 self.release_info,
                 self.dest_dir,
                 progress_callback=lambda current, total: self.progress.emit(current, total),
+                cancel_event=self._cancel_event,
             )
-            self.finished.emit(str(zip_path))
+            self.completed.emit(str(zip_path))
         except Exception as e:
             self.error.emit(str(e))
 
+
+class UpdateExtractWorker(QThread):
+    """Extracts the verified update ZIP off the GUI thread."""
+    completed = Signal(str)  # extracted app dir path
+    error = Signal(str)
+
+    def __init__(self, zip_path: str, extract_dir: str, parent=None):
+        super().__init__(parent)
+        self._zip_path = Path(zip_path)
+        self._extract_dir = Path(extract_dir)
+
+    def run(self):
+        try:
+            from src.lvm.updater import extract_update
+            extracted = extract_update(self._zip_path, self._extract_dir)
+            self.completed.emit(str(extracted))
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class ScanWorker(QThread):
     """Scans project sources in a background thread.
 
-    With *previous_cache* ({source name: earlier versions}) the scan is
-    incremental: unchanged version folders are reused instead of listed
-    again (see ``VersionScanner.scan``). Pass none for a full rescan.
+    Takes immutable snapshots of *config* / *sources* on construction so
+    GUI-thread edits cannot race with background scanning.
     """
     progress = Signal(int, int, str)  # current_index, total, source_name
-    finished = Signal(dict)           # {source_name: (versions, status_info)}
+    completed = Signal(dict)          # {source_name: list[VersionInfo]}
     error = Signal(str)
 
     def __init__(self, config: ProjectConfig, sources=None, previous_cache: dict[str, list] = None, parent=None):
         super().__init__(parent)
-        self.config = config
-        self._sources = sources or config.watched_sources
-        self.previous_cache = previous_cache or {}
+        self._task_tokens = list(config.task_tokens)
+        self._tc_mode = config.timecode_mode
+        raw_sources = config.watched_sources if sources is None else sources
+        self._sources = [copy.deepcopy(s) for s in raw_sources]
+        self.previous_cache = {
+            k: list(v) for k, v in (previous_cache or {}).items()
+        }
 
     def run(self):
         try:
@@ -216,17 +240,20 @@ class ScanWorker(QThread):
             started = _time.monotonic()
             results = {}
             total = len(self._sources)
-            tc_mode = self.config.timecode_mode
             counts = {"reused": 0, "scanned": 0}
             counts_lock = threading.Lock()
 
             def _scan_one(source):
-                scanner = VersionScanner(source, self.config.task_tokens)
-                versions = scanner.scan(previous=self.previous_cache.get(source.name))
-                with counts_lock:
-                    counts["reused"] += scanner.last_reused
-                    counts["scanned"] += scanner.last_scanned
-                return source.name, versions
+                try:
+                    scanner = VersionScanner(source, self._task_tokens)
+                    versions = scanner.scan(previous=self.previous_cache.get(source.name))
+                    with counts_lock:
+                        counts["reused"] += scanner.last_reused
+                        counts["scanned"] += scanner.last_scanned
+                    return source.name, versions
+                except Exception as e:
+                    logger.warning("Scan failed for '%s': %s", source.name, e)
+                    return source.name, []
 
             worker_count = min(8, total)
             if worker_count > 1:
@@ -247,11 +274,7 @@ class ScanWorker(QThread):
                     name, versions = _scan_one(source)
                     results[name] = versions
 
-            # Phase 2: populate timecodes in one flat parallel pool over
-            # all (source, version) pairs. Avoids the nested-pool trap of
-            # 8 outer × 8 inner = 64 ffprobes saturating the box, and lets
-            # one slow source not stall others.
-            if tc_mode == "always":
+            if self._tc_mode == "always":
                 all_versions = [v for versions in results.values() for v in versions]
                 populate_timecodes_parallel(all_versions, max_workers=8)
 
@@ -260,33 +283,28 @@ class ScanWorker(QThread):
                 "Scanned %d source(s) in %.2fs — %d of %d version folder(s) unchanged and reused",
                 total, _time.monotonic() - started, counts["reused"], folders,
             )
-            self.finished.emit(results)
+            self.completed.emit(results)
         except Exception as e:
             self.error.emit(str(e))
-
 
 
 class StatusWorker(QThread):
     """Computes source statuses (verify, conflicts) in a background thread.
 
-    Runs Promoter.verify() and conflict detection off the main thread so the
-    UI stays responsive after scanning completes.  Per-source work is
-    parallelised with a ThreadPoolExecutor for I/O-bound speedup.
-
-    ``finished`` is emitted on every exit path, including failures: the GUI
-    only clears its ``_status_worker`` guard in the finished handlers, so a
-    worker that died silently would block every later refresh. A source
-    whose status cannot be computed (unreadable history sidecar, SMB drop,
-    permission denied) is reported with status ``"error"`` instead.
+    ``completed`` is emitted on every exit path, including failures: the GUI
+    only clears its ``_status_worker`` guard in the completion handlers.
     """
-    finished = Signal(dict, dict, dict, dict)  # source_status, target_conflicts, promoters, scanners
+    completed = Signal(dict, dict, dict, dict)  # source_status, target_conflicts, promoters, scanners
 
     def __init__(self, config: ProjectConfig, versions_cache: dict,
                  sources=None, parent=None):
         super().__init__(parent)
-        self._config = config
-        self._versions_cache = versions_cache
-        self._sources = sources or config.watched_sources
+        self._config = copy.deepcopy(config)
+        self._versions_cache = {k: list(v) for k, v in (versions_cache or {}).items()}
+        if sources is None:
+            self._sources = list(self._config.watched_sources)
+        else:
+            self._sources = [copy.deepcopy(s) for s in sources]
 
     def run(self):
         source_status: dict = {}
@@ -298,7 +316,7 @@ class StatusWorker(QThread):
         except Exception as e:
             logger.exception("Status computation failed: %s", e)
         finally:
-            self.finished.emit(source_status, target_conflicts, promoters, scanners)
+            self.completed.emit(source_status, target_conflicts, promoters, scanners)
 
     def _compute_all(self, source_status: dict, promoters: dict,
                      scanners: dict, target_conflicts: dict) -> None:
@@ -389,6 +407,7 @@ class StatusWorker(QThread):
 
         status_info = {
             "current": current,
+            "highest": highest_ver,
             "status": status,
             "has_overrides": source.has_overrides,
             "integrity": integrity,
@@ -396,57 +415,41 @@ class StatusWorker(QThread):
         return source.name, status_info, promoter, scanner
 
 
-
 class AutoPromoteCheckWorker(QThread):
-    """Runs the auto-promote checks for one source off the GUI thread.
-
-    Every check touches the filesystem — rescan, history sidecar, obsolete-
-    layer listing, container render check, link-mode probe — which froze the
-    window for seconds on a share. The worker builds its own Promoter and
-    VersionScanner so it never shares mutable state with the GUI thread or a
-    running PromoteWorker. ``decided`` always fires exactly once; the built-in
-    ``QThread.finished`` fires after ``run()`` has returned.
-    """
+    """Runs the auto-promote checks for one source off the GUI thread."""
     decided = Signal(object)  # AutoPromoteDecision
 
     def __init__(self, config: ProjectConfig, source: WatchedSource,
                  waiting_on_render: bool, settle_seconds: float,
                  previous_settle=None, parent=None):
         super().__init__(parent)
-        self._config = config
-        self._source = source
+        self._task_tokens = list(config.task_tokens)
+        self._project_name = config.project_name
+        self._nle_opts = config.nle_rename_options()
+        self._source = copy.deepcopy(source)
         self._waiting_on_render = waiting_on_render
         self._settle_seconds = settle_seconds
-        self._previous_settle = previous_settle  # SettleState from the last check
+        self._previous_settle = previous_settle
 
     def run(self):
         from src.lvm.auto_promote import AutoPromoteDecision, evaluate_auto_promote, ERROR
         try:
             promoter = Promoter(
-                self._source, self._config.task_tokens, self._config.project_name,
-                nle_rename_options=self._config.nle_rename_options(),
+                self._source, self._task_tokens, self._project_name,
+                nle_rename_options=self._nle_opts,
             )
-            scanner = VersionScanner(self._source, self._config.task_tokens)
+            scanner = VersionScanner(self._source, self._task_tokens)
             decision = evaluate_auto_promote(promoter, scanner, self._settle_seconds,
                                              previous=self._previous_settle)
-        except Exception as e:  # e.g. PromotionError: latest target removed meanwhile
+        except Exception as e:
             decision = AutoPromoteDecision(self._source.name, ERROR, reason=f"check failed: {e}",
                                            log_level=logging.WARNING)
         decision.waiting_on_render = self._waiting_on_render
         self.decided.emit(decision)
 
 
-
 class SyncNamesWorker(QThread):
-    """Runs the Resolve rename in-process on a worker thread.
-
-    The previous design spawned ``[sys.executable, companion_script]`` as a
-    subprocess. That breaks in PyInstaller frozen builds where
-    ``sys.executable`` is the LVM ``.exe`` itself (not a Python interpreter)
-    — the .exe ignores the script argument and just opens a second copy of
-    LVM. Calling ``DaVinciResolveScript`` straight from this Python via
-    ctypes works in both source and frozen builds and is faster too.
-    """
+    """Runs the Resolve rename in-process on a worker thread."""
     line = Signal(str, str)   # level ("info"|"warning"|"error"), text
     done = Signal(bool, str)  # ok, error
 
@@ -464,17 +467,9 @@ class SyncNamesWorker(QThread):
         self.done.emit(ok, "")
 
 
-
 class ProjectLoadWorker(QThread):
-    """Loads a project config + scan cache off the UI thread.
-
-    ``load_config`` does N × ``Path.resolve()`` syscalls (one per source for
-    source_dir / latest_target / manual_versions / group root_dir). On SMB
-    each is ~10-30ms, so a 50-source project freezes the UI for 1-3s if loaded
-    synchronously. ``load_cache`` then deserialises VersionInfo entries — also
-    pure I/O. Both run here so file open feels instant.
-    """
-    finished = Signal(object, object, str)  # config, cached_versions_or_None, path
+    """Loads a project config + scan cache off the UI thread."""
+    completed = Signal(object, object, str)  # config, cached_versions_or_None, path
     error = Signal(str, str)                 # message, path
 
     def __init__(self, path: str, parent=None):
@@ -486,12 +481,6 @@ class ProjectLoadWorker(QThread):
             config = load_config(self._path)
             from src.lvm.scan_cache import load_cache
             cached = load_cache(self._path, config.watched_sources) or None
-            self.finished.emit(config, cached, self._path)
+            self.completed.emit(config, cached, self._path)
         except Exception as e:
             self.error.emit(str(e), self._path)
-
-
-# ---------------------------------------------------------------------------
-# Version tree with drag-and-drop support for manual version import
-# ---------------------------------------------------------------------------
-

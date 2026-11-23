@@ -1,5 +1,7 @@
 """settings dialog module."""
 
+import html
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -982,7 +984,7 @@ class ProjectSettingsDialog(QDialog):
                 f'<span style="color:#8c8c8c; font-size:11px;">Source name comes from the {level_desc} of the version folder</span>'
             )
         else:
-            text = f'<span style="color:#c0c0c0;">{rule}</span>'
+            text = f'<span style="color:#c0c0c0;">{html.escape(rule)}</span>'
 
         self.naming_label.setText(text)
         self.naming_label.setTextFormat(Qt.RichText)

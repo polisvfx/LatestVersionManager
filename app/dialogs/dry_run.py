@@ -1,5 +1,7 @@
 """dry_run dialog module."""
 
+import html
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -36,16 +38,45 @@ class DryRunDialog(QDialog):
 
         # Summary header
         header = QLabel(
-            f"<b>{source.name}</b> → <b>{version.version_string}</b> &nbsp; "
+            f"<b>{html.escape(source.name)}</b> → <b>{html.escape(version.version_string)}</b> &nbsp; "
             f"({dry_run_data['total_files']} files, "
-            f"{version.total_size_human}, {dry_run_data['link_mode']} mode)"
+            f"{html.escape(version.total_size_human)}, {html.escape(str(dry_run_data['link_mode']))} mode)"
         )
         header.setStyleSheet("font-size: 13pt; padding: 4px;")
         layout.addWidget(header)
 
         target_label = QLabel(f"Target: {dry_run_data['target_dir']}")
+        target_label.setTextFormat(Qt.PlainText)
         target_label.setStyleSheet("color: #8c8c8c; font-size: 11pt; padding: 0 4px 4px;")
         layout.addWidget(target_label)
+
+        # Active promotion hooks banner (visibility before executing shell commands)
+        pre_cmd = (getattr(source, "pre_promote_cmd", "") or "").strip()
+        post_cmd = (getattr(source, "post_promote_cmd", "") or "").strip()
+        if pre_cmd or post_cmd:
+            hook_frame = QFrame()
+            hook_frame.setStyleSheet(
+                "QFrame { background-color: #222a35; border: 1px solid #446688; "
+                "border-radius: 4px; padding: 6px; }"
+            )
+            hook_layout = QVBoxLayout(hook_frame)
+            hook_layout.setContentsMargins(8, 4, 8, 4)
+            hook_title = QLabel("<b>Shell hooks configured for this promotion:</b>")
+            hook_title.setStyleSheet("color: #8cc4ff; font-size: 11pt;")
+            hook_layout.addWidget(hook_title)
+            if pre_cmd:
+                lbl = QLabel(f"Pre-promote: {pre_cmd}")
+                lbl.setTextFormat(Qt.PlainText)
+                lbl.setWordWrap(True)
+                lbl.setStyleSheet("color: #d0d8e0; font-family: monospace; font-size: 10pt;")
+                hook_layout.addWidget(lbl)
+            if post_cmd:
+                lbl = QLabel(f"Post-promote: {post_cmd}")
+                lbl.setTextFormat(Qt.PlainText)
+                lbl.setWordWrap(True)
+                lbl.setStyleSheet("color: #d0d8e0; font-family: monospace; font-size: 10pt;")
+                hook_layout.addWidget(lbl)
+            layout.addWidget(hook_frame)
 
         # Frame range mismatch warning
         self._warnings = []
