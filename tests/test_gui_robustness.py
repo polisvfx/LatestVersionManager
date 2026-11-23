@@ -598,5 +598,25 @@ class TestPromoteAllShortcuts(_MainWindowTestBase):
         self.assertEqual(dlg.result(), 0)
 
 
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestResolveMetadataSetting(unittest.TestCase):
+    """Settings -> NLE -> Resolve metadata combo round-trips the option."""
+
+    def test_combo_reads_and_writes_option(self):
+        _app()
+        from app.dialogs.settings import ProjectSettingsDialog
+        from src.lvm.models import ProjectConfig
+        cfg = ProjectConfig(project_name="P", nle_resolve_metadata_field="Description")
+        dlg = ProjectSettingsDialog(cfg)
+        self.addCleanup(dlg.deleteLater)
+        self.assertEqual(dlg.nle_metadata_combo.currentData(), "Description")
+        dlg.nle_metadata_combo.setCurrentIndex(dlg.nle_metadata_combo.findData(""))
+        dlg.apply_to_config(cfg)
+        self.assertEqual(cfg.nle_resolve_metadata_field, "")
+        dlg.nle_metadata_combo.setCurrentIndex(dlg.nle_metadata_combo.findData("Comments"))
+        dlg.apply_to_config(cfg)
+        self.assertEqual(cfg.nle_resolve_metadata_field, "Comments")
+
+
 if __name__ == "__main__":
     unittest.main()

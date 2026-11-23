@@ -729,10 +729,12 @@ class TestIsPremierePanelInstalled(unittest.TestCase):
 class _FakeClip:
     """Minimal stand-in for a Resolve MediaPoolItem."""
 
-    def __init__(self, path, name, flags=None, metadata=None):
+    def __init__(self, path, name, flags=None, metadata=None, visible=None):
         self.props = {"File Path": path, "Clip Name": name}
         self.flags = list(flags or [])
         self.metadata = dict(metadata or {})
+        self.visible = dict(visible or {})  # Metadata panel fields
+        self.set_metadata_calls = 0
 
     def GetClipProperty(self, key):
         return self.props.get(key, "")
@@ -759,6 +761,14 @@ class _FakeClip:
     def SetThirdPartyMetadata(self, metadata):
         # Resolve 21's signature: a single dict.
         self.metadata.update(metadata)
+        return True
+
+    def GetMetadata(self, key=None):
+        return self.visible.get(key, "") if key else dict(self.visible)
+
+    def SetMetadata(self, key, value):
+        self.set_metadata_calls += 1
+        self.visible[key] = value
         return True
 
 
@@ -912,6 +922,140 @@ class TestCompanionStatusFlags(unittest.TestCase):
         with mock.patch.object(self.m, "FLAG_CLIPS", False):
             self._run([clip])
         self.assertEqual(clip.flags, [])
+
+
+class TestCompanionVisibleMetadata(unittest.TestCase):
+    """Settings -> NLE -> Resolve metadata: the promotion shown in a visible
+    clip field, without overwriting text editors typed there."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = nle_bridge.resolve_script_path()
+        spec = importlib.util.spec_from_file_location("lvm_companion_meta", str(path))
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def setUp(self):
+        import json
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.target_dir = self.tmp / "online"
+        self.target_dir.mkdir()
+        self.clip_file = self.target_dir / "hero_comp_latest.mov"
+        self.clip_file.write_bytes(b"latest")
+        self.current = {
+            "version": "v005",
+            "source": str(self.tmp / "renders" / "hero_comp_v005"),
+            "set_by": "mp",
+            "set_at": "2026-11-20T10:00:00",
+            "latest_basename": "hero_comp_latest",
+            "nle_display_stem": "hero_comp_v005",
+            "nle_metadata_field": "Comments",
+        }
+        self._json = json
+        self._write_sidecar()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_sidecar(self):
+        with open(self.target_dir / ".latest_history.json", "w", encoding="utf-8") as f:
+            self._json.dump({"current": self.current, "history": []}, f)
+
+    def _run(self, clips):
+        folder = mock.MagicMock()
+        folder.GetClipList.return_value = clips
+        folder.GetSubFolderList.return_value = []
+        resolve = mock.MagicMock()
+        (resolve.GetProjectManager.return_value.GetCurrentProject.return_value
+         .GetMediaPool.return_value.GetRootFolder.return_value) = folder
+        return self.m.rename_clips(resolve, log=lambda *_: None)
+
+    def _clip(self, **kw):
+        return _FakeClip(str(self.clip_file), "hero_comp_latest.mov", **kw)
+
+    def test_writes_version_date_user(self):
+        clip = self._clip()
+        stats = self._run([clip])
+        self.assertEqual(clip.visible["Comments"], "LVM v005 | 2026-11-20 | mp")
+        self.assertEqual(stats["metadata_written"], 1)
+
+    def test_up_to_date_field_is_not_rewritten(self):
+        clip = self._clip()
+        self._run([clip])
+        stats = self._run([clip])
+        self.assertEqual(clip.set_metadata_calls, 1)
+        self.assertEqual(stats["metadata_written"], 0)
+
+    def test_earlier_lvm_value_is_replaced(self):
+        clip = self._clip(visible={"Comments": "LVM v004 | 2026-11-19 | mp"})
+        self._run([clip])
+        self.assertEqual(clip.visible["Comments"], "LVM v005 | 2026-11-20 | mp")
+
+    def test_editor_text_is_kept(self):
+        clip = self._clip(visible={"Comments": "grade looks off in the sky"})
+        stats = self._run([clip])
+        self.assertEqual(clip.visible["Comments"], "grade looks off in the sky")
+        self.assertEqual(stats["metadata_kept"], 1)
+        self.assertEqual(clip.set_metadata_calls, 0)
+
+    def test_off_when_sidecar_has_no_field(self):
+        del self.current["nle_metadata_field"]
+        self._write_sidecar()
+        clip = self._clip()
+        self._run([clip])
+        self.assertEqual(clip.visible, {})
+
+    def test_description_field(self):
+        self.current["nle_metadata_field"] = "Description"
+        self._write_sidecar()
+        clip = self._clip()
+        self._run([clip])
+        self.assertEqual(clip.visible, {"Description": "LVM v005 | 2026-11-20 | mp"})
+
+    def test_metadata_error_does_not_stop_rename(self):
+        clip = self._clip()
+        clip.SetMetadata = mock.MagicMock(side_effect=RuntimeError("no"))
+        stats = self._run([clip])
+        self.assertEqual(clip.props["Clip Name"], "hero_comp_v005")
+        self.assertEqual(stats["renamed"], 1)
+
+
+class TestMetadataFieldOption(unittest.TestCase):
+    """The project option reaches the sidecar entry through the promoter."""
+
+    def test_config_round_trip_and_validation(self):
+        from src.lvm.models import ProjectConfig
+        cfg = ProjectConfig(project_name="P", nle_resolve_metadata_field="Comments")
+        d = cfg.to_dict()
+        self.assertEqual(d["nle_resolve_metadata_field"], "Comments")
+        self.assertEqual(ProjectConfig.from_dict(d).nle_resolve_metadata_field, "Comments")
+        self.assertNotIn("nle_resolve_metadata_field",
+                         ProjectConfig(project_name="P").to_dict())
+        d["nle_resolve_metadata_field"] = "Reel Name"  # not offered -> off
+        self.assertEqual(ProjectConfig.from_dict(d).nle_resolve_metadata_field, "")
+
+    def test_promote_records_field_in_history(self):
+        import tempfile
+        from src.lvm.models import ProjectConfig, VersionInfo, WatchedSource
+        from src.lvm.promoter import Promoter
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            vdir = tmp / "renders" / "shot_v001"
+            vdir.mkdir(parents=True)
+            (vdir / "shot_v001.mov").write_bytes(b"x" * 16)
+            src = WatchedSource(name="shot", source_dir=str(tmp / "renders"),
+                                latest_target=str(tmp / "online"),
+                                file_extensions=[".mov"])
+            cfg = ProjectConfig(project_name="P", nle_resolve_metadata_field="Comments")
+            promoter = Promoter(src, nle_rename_options=cfg.nle_rename_options())
+            entry = promoter.promote(VersionInfo("v001", 1, str(vdir), file_count=1),
+                                     user="mp")
+            self.assertEqual(entry.nle_metadata_field, "Comments")
+            self.assertEqual(promoter.get_current_version().nle_metadata_field, "Comments")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

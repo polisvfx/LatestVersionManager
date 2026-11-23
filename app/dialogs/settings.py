@@ -528,6 +528,26 @@ class ProjectSettingsDialog(QDialog):
         )
         nle.addRow("Preview:", self._nle_rename_preview)
 
+        # Visible Resolve metadata: the hidden promotion marker is always
+        # written; this also puts "LVM v005 | 2026-11-20 | user" into a
+        # field editors can see in the Metadata panel.
+        from src.lvm.models import NLE_METADATA_FIELDS
+        self.nle_metadata_combo = QComboBox()
+        self.nle_metadata_combo.addItem("Off", "")
+        for fld in NLE_METADATA_FIELDS:
+            self.nle_metadata_combo.addItem(fld, fld)
+        idx = self.nle_metadata_combo.findData(
+            getattr(config, "nle_resolve_metadata_field", "") or "")
+        self.nle_metadata_combo.setCurrentIndex(max(idx, 0))
+        self.nle_metadata_combo.setToolTip(
+            "Resolve sync writes the promoted version, date and user into this\n"
+            "clip metadata field, e.g. \"LVM v005 | 2026-11-20 | mp\".\n"
+            "Only a field that is empty or was written by LVM (starts with\n"
+            "\"LVM \") is changed, so notes editors typed there are kept.\n"
+            "Takes effect for promotions made after the change."
+        )
+        nle.addRow("Resolve metadata:", self.nle_metadata_combo)
+
         # Wire every input that affects the preview.
         self.nle_rename_custom_cb.toggled.connect(
             self.nle_rename_custom_edit.setEnabled)
@@ -1160,6 +1180,7 @@ class ProjectSettingsDialog(QDialog):
         config.nle_rename_custom_template = (
             self.nle_rename_custom_edit.text().strip() or "{source_name}"
         )
+        config.nle_resolve_metadata_field = self.nle_metadata_combo.currentData() or ""
 
         # Discover & Promote one-click button
         was_enabled = config.discover_and_promote_enabled

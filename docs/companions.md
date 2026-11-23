@@ -106,6 +106,18 @@ promotion on the next sync. Clips synced by an older helper have no stored
 promotion yet; for those a promotion is detected from the clip being named
 after an older version.
 
+### Visible metadata (optional)
+
+Settings → NLE → **Resolve metadata** picks a clip field (`Comments` or
+`Description`) that each sync fills with the promotion, for example
+`LVM v005 | 2026-11-20 | mp`, so editors see it in the Metadata panel.
+The setting travels in the sidecar, so it applies to promotions made after
+you change it, from LVM or from Workspace → Scripts alike.
+
+LVM only writes the field while it is empty or still holds an earlier LVM
+value (text starting with `LVM `). Notes editors typed there are kept, and
+the sync log counts those clips under "Metadata kept".
+
 ### Troubleshooting: "DaVinciResolveScript module not found"
 
 Resolve gates the scripting module behind a preference. If the script
