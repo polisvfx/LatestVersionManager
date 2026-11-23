@@ -61,7 +61,10 @@ def resolve_modules_path() -> Optional[Path]:
         path = Path("/opt/resolve/Developer/Scripting/Modules")
     else:
         return None
-    return path if path.is_dir() else None
+    try:
+        return path if path.is_dir() else None
+    except OSError:
+        return None
 
 
 def resolve_script_lib_path() -> Optional[Path]:
@@ -89,8 +92,11 @@ def resolve_script_lib_path() -> Optional[Path]:
     else:
         return None
     for c in candidates:
-        if c.is_file():
-            return c
+        try:
+            if c.is_file():
+                return c
+        except OSError:
+            continue
     return None
 
 
@@ -681,7 +687,10 @@ def is_premiere_panel_installed() -> bool:
     if install_dir is None:
         return False
     manifest = install_dir / "CSXS" / "manifest.xml"
-    return manifest.is_file()
+    try:
+        return manifest.is_file()
+    except OSError:
+        return False
 
 
 def is_premiere_debug_mode_enabled() -> bool:

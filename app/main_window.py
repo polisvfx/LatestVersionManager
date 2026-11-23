@@ -67,12 +67,14 @@ class MainWindow(QMainWindow):
         self._worker: PromoteWorker = None
         self._promoting_source_name: str = None
         self._promoting_version: VersionInfo = None
+        self._promoting_force: bool = False
+        self._promoting_keep_layers: set[str] | None = None
+        self._promoting_pinned: bool = False
         self._fallback_original_mode: str = None  # original link_mode before copy fallback
         self._fallback_source: WatchedSource = None  # source whose link_mode was swapped
         self._batch_promote_list: list = []
         self._batch_promote_index: int = 0
         self._batch_keep_layers: dict = {}
-        self._force_promote: bool = False
         # Sources whose auto-promote is waiting for a container render to finish
         self._render_wait_sources: set[str] = set()
         # Auto-promote checks running off the GUI thread, by source name, and
@@ -857,18 +859,19 @@ class MainWindow(QMainWindow):
                 name_blacklist=info["name_blacklist"],
                 task_tokens=info.get("task_tokens", []),
             )
-            self._load_project(output_path)
 
-            # Apply template if selected (Feature #17)
+            # Apply template to the newly created project on disk BEFORE
+            # loading asynchronously, so an already-open project is never
+            # mutated or overwritten while ProjectLoadWorker is in flight.
             template_path = info.get("template_path", "")
-            if template_path and self.config:
+            if template_path:
                 from src.lvm.templates import load_template, apply_template
                 template_data = load_template(template_path)
-                apply_template(self.config, template_data)
-                if self.config_path:
-                    self._save_project()
-                self._reload_ui()
+                new_cfg = load_config(output_path)
+                apply_template(new_cfg, template_data)
+                save_config(new_cfg, output_path)
 
+            self._load_project(output_path)
             self.statusBar().showMessage(f"Created project: {output_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to create project:\n{e}")
@@ -1618,9 +1621,9 @@ class MainWindow(QMainWindow):
             self.config.default_file_rename_template = dlg.get_rename_template()
             self._mark_dirty()
             apply_project_defaults(self.config)
+            self._rebuild_promoters_in_place()
             if self.config_path:
                 self._save_project()
-            self._reload_ui()
 
         selected_items = self.source_list.selectedItems()
         if len(selected_items) >= 1:
@@ -2125,7 +2128,7 @@ class MainWindow(QMainWindow):
                     break
             self._reload_select_source = None
         if not restored and self.source_list.topLevelItemCount() > 0:
-            self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
+            self._select_first_source_item()
 
         self._save_scan_cache()
         self._scan_indicator.setText("")
@@ -2374,8 +2377,18 @@ class MainWindow(QMainWindow):
 
         # Apply column visibility — setSortingEnabled must come first; on Linux/Qt6
         # enabling sort triggers a QHeaderView section re-init that resets hidden states.
-        self.source_list.setSortingEnabled(True)
+        # Keep sorting disabled while "Group by groups" is active so flat group
+        # header rows stay anchored above their member sources.
+        self.source_list.setSortingEnabled(not (group_by and bool(self.config.groups)))
         self._apply_source_column_visibility()
+
+    def _select_first_source_item(self) -> None:
+        """Select the first real source row in source_list, skipping group headers."""
+        for i in range(self.source_list.topLevelItemCount()):
+            item = self.source_list.topLevelItem(i)
+            if item is not None and item.data(0, Qt.UserRole):
+                self.source_list.setCurrentItem(item)
+                return
 
     def _apply_source_column_visibility(self):
         """Show/hide source list columns based on config."""
@@ -2435,7 +2448,7 @@ class MainWindow(QMainWindow):
                     self.source_list.setCurrentItem(self.source_list.topLevelItem(i))
                     return
         if self.source_list.topLevelItemCount() > 0:
-            self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
+            self._select_first_source_item()
 
     def _refresh_sources_by_name(self, source_names: list[str], select_source: str = None,
                                  background: bool = False):
@@ -2584,7 +2597,7 @@ class MainWindow(QMainWindow):
         elif current in refreshed:
             self._rerender_current_source()
         elif current is None and self.source_list.topLevelItemCount() > 0:
-            self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
+            self._select_first_source_item()
 
         # Re-derive button states from the (unchanged or restored) selection.
         self.btn_refresh_versions.setEnabled(self._current_source is not None)
@@ -2780,7 +2793,7 @@ class MainWindow(QMainWindow):
                     break
             self._refresh_select_source = None
         if not restored and self.source_list.topLevelItemCount() > 0:
-            self.source_list.setCurrentItem(self.source_list.topLevelItem(0))
+            self._select_first_source_item()
 
         # Save scan results to cache and clear indicator
         self._save_scan_cache()
@@ -3570,6 +3583,21 @@ class MainWindow(QMainWindow):
 
     # --- Promotion ---
 
+    def _rebuild_promoters_in_place(self) -> None:
+        """Rebuild Promoter/VersionScanner instances in place without clearing
+        the UI or cached version scans (used when setting latest_path_template
+        mid-promote so the active promote flow can continue immediately)."""
+        if not self.config:
+            return
+        nle_opts = self.config.nle_rename_options()
+        for src in self.config.watched_sources:
+            self._promoters[src.name] = Promoter(
+                src, self.config.task_tokens, self.config.project_name,
+                nle_rename_options=nle_opts,
+            )
+            if src.name not in self._scanners:
+                self._scanners[src.name] = VersionScanner(src, self.config.task_tokens)
+
     def _ensure_latest_path(self, source: WatchedSource) -> bool:
         """Ensure the source has a latest_target. Shows dialog if not set.
 
@@ -3589,18 +3617,18 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         apply_project_defaults(self.config)
 
-        # Save and rebuild promoters
+        # Rebuild promoters in place so the caller's promote can proceed immediately
+        self._rebuild_promoters_in_place()
         if self.config_path:
             self._save_project()
-        self._reload_ui()
-        return True
+        return bool(source.latest_target)
 
     def _promote_selected(self):
         items = self.version_tree.selectedItems()
         if not items or not self._current_source:
             return
 
-        self._force_promote = False
+        force_promote = False
         version: VersionInfo = items[0].data(0, Qt.UserRole)
         source = self._current_source
 
@@ -3608,7 +3636,7 @@ class MainWindow(QMainWindow):
         if not self._ensure_latest_path(source):
             return
 
-        # Re-fetch promoter after possible reload
+        # Re-fetch promoter after possible template setup
         promoter = self._promoters.get(source.name)
         if not promoter:
             return
@@ -3624,7 +3652,7 @@ class MainWindow(QMainWindow):
             )
             if reply != QMessageBox.Yes:
                 return
-            self._force_promote = True
+            force_promote = True
 
         # Container files (MOV/MXF/...) that are still being rendered
         unfinished = promoter.find_unfinished_renders(version)
@@ -3638,7 +3666,7 @@ class MainWindow(QMainWindow):
             )
             if reply != QMessageBox.Yes:
                 return
-            self._force_promote = True
+            force_promote = True
 
         # Detect "keep" vs normal promote
         current = promoter.get_current_version()
@@ -3676,8 +3704,10 @@ class MainWindow(QMainWindow):
                 if dlg.choice == ObsoleteLayerDialog.KEEP:
                     keep_layers = {layer["prefix"] for layer in obsolete}
 
-        self._pinned_promote = is_keep
-        self._start_promotion(promoter, version, keep_layers=keep_layers)
+        self._start_promotion(
+            promoter, version, keep_layers=keep_layers,
+            force=force_promote, pinned=bool(is_keep),
+        )
 
     def _revert_selected(self):
         """Revert to a version from history by re-scanning and promoting."""
@@ -3784,13 +3814,18 @@ class MainWindow(QMainWindow):
         self._start_promotion(promoter, target_version)
 
     def _start_promotion(self, promoter: Promoter, version: VersionInfo,
-                          keep_layers: set[str] | None = None):
+                          keep_layers: set[str] | None = None,
+                          *, force: bool = False, pinned: bool = False):
         """Start the promotion in a background thread, checking link mode availability first."""
         self._promoting_source_name = promoter.source.name
         self._promoting_version = version
+        self._promoting_force = force
+        self._promoting_keep_layers = keep_layers
+        self._promoting_pinned = pinned
         mode = promoter.source.link_mode
         available, reason = check_link_mode_available(mode)
         if not available and mode == "symlink":
+            self._restore_fallback_link_mode()
             reply = QMessageBox.question(
                 self, "Elevation Required",
                 f"{reason}\n\nRestart with Administrator privileges?",
@@ -3806,6 +3841,7 @@ class MainWindow(QMainWindow):
                                         "The UAC prompt may have been declined.")
             return
         elif not available:
+            self._restore_fallback_link_mode()
             QMessageBox.warning(self, "Link Mode Unavailable", reason)
             return
 
@@ -3817,10 +3853,7 @@ class MainWindow(QMainWindow):
         self.btn_cancel_promote.setEnabled(True)
         self.btn_cancel_promote.setText("Cancel")
 
-        pinned = getattr(self, '_pinned_promote', False)
-        self._pinned_promote = False
-
-        self._worker = PromoteWorker(promoter, version, self, force=self._force_promote,
+        self._worker = PromoteWorker(promoter, version, self, force=force,
                                      pinned=pinned, keep_layers=keep_layers)
         self._worker.progress.connect(self._on_promote_progress)
         self._worker.byte_progress.connect(self._on_promote_byte_progress)
@@ -3972,7 +4005,12 @@ class MainWindow(QMainWindow):
                         self._fallback_original_mode = source.link_mode
                         self._fallback_source = source
                         source.link_mode = fallback_mode
-                        self._start_promotion(promoter, version)
+                        self._start_promotion(
+                            promoter, version,
+                            keep_layers=self._promoting_keep_layers,
+                            force=self._promoting_force,
+                            pinned=self._promoting_pinned,
+                        )
                         return
 
         # If batch promotion, ask whether to continue

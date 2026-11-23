@@ -31,8 +31,9 @@ class ManageGroupsDialog(QDialog):
         self.setMinimumWidth(450)
         self.setMinimumHeight(350)
         self._config = config
-        # Work on a copy so we can cancel
+        # Work on copies so Cancel never mutates live config or sources
         self._groups: dict[str, dict] = {k: dict(v) for k, v in config.groups.items()}
+        self._source_groups: list[str] = [s.group for s in config.watched_sources]
 
         layout = QVBoxLayout(self)
 
@@ -104,7 +105,7 @@ class ManageGroupsDialog(QDialog):
         for name, props in sorted(self._groups.items()):
             color = props.get("color", "#8c8c8c")
             root = props.get("root_dir", "")
-            count = sum(1 for s in self._config.watched_sources if s.group == name)
+            count = sum(1 for g in self._source_groups if g == name)
             root_label = f"  \u2502 root: {root}" if root else ""
             item = QListWidgetItem(f"  {name}  ({count} sources){root_label}")
             item.setData(Qt.UserRole, name)
@@ -138,10 +139,10 @@ class ManageGroupsDialog(QDialog):
             QMessageBox.warning(self, "Duplicate", f"Group '{new_name}' already exists.")
             return
         self._groups[new_name] = self._groups.pop(old_name)
-        # Update sources referencing old name
-        for source in self._config.watched_sources:
-            if source.group == old_name:
-                source.group = new_name
+        # Update local source-group snapshot (applied only on OK)
+        self._source_groups = [
+            new_name if g == old_name else g for g in self._source_groups
+        ]
         self._rebuild_list()
 
     def _change_color(self):
@@ -181,7 +182,7 @@ class ManageGroupsDialog(QDialog):
         if not item:
             return
         name = item.data(Qt.UserRole)
-        count = sum(1 for s in self._config.watched_sources if s.group == name)
+        count = sum(1 for g in self._source_groups if g == name)
         if count > 0:
             reply = QMessageBox.question(
                 self, "Delete Group",
@@ -190,14 +191,16 @@ class ManageGroupsDialog(QDialog):
             )
             if reply != QMessageBox.Yes:
                 return
-            for source in self._config.watched_sources:
-                if source.group == name:
-                    source.group = ""
+            self._source_groups = [
+                "" if g == name else g for g in self._source_groups
+            ]
         del self._groups[name]
         self._rebuild_list()
 
     def apply_to_config(self, config: ProjectConfig):
         config.groups = dict(self._groups)
+        for source, grp in zip(config.watched_sources, self._source_groups):
+            source.group = grp
 
 
 # ---------------------------------------------------------------------------

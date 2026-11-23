@@ -227,6 +227,28 @@ def reveal_in_file_browser(path: str) -> None:
 
 
 
+def normalize_extensions(raw: str, fallback: Optional[list[str]] = None) -> list[str]:
+    """Parse space/comma-separated file extensions into lowercase '.ext' strings.
+
+    Accepts forms with or without leading dots (e.g. 'exr .DPX, mov' ->
+    ['.exr', '.dpx', '.mov']). Returns *fallback* (or DEFAULT_FILE_EXTENSIONS)
+    when empty.
+    """
+    tokens = [tok.strip().lstrip(".") for tok in re.split(r"[\s,]+", raw or "") if tok.strip()]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        if not tok:
+            continue
+        ext = f".{tok.lower()}"
+        if ext not in seen:
+            seen.add(ext)
+            normalized.append(ext)
+    if normalized:
+        return normalized
+    return list(fallback if fallback is not None else DEFAULT_FILE_EXTENSIONS)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

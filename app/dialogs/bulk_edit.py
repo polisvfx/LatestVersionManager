@@ -170,8 +170,7 @@ class BulkEditSourcesDialog(QDialog):
         if field == "link_mode":
             return widget.currentText()
         if field == "file_extensions":
-            text = widget.text().strip()
-            return text.split() if text else list(DEFAULT_FILE_EXTENSIONS)
+            return normalize_extensions(widget.text(), DEFAULT_FILE_EXTENSIONS)
         if field == "date_format":
             return ",".join(
                 fmt for fmt, cb in self.date_format_checks.items() if cb.isChecked()
