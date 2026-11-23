@@ -109,6 +109,9 @@ jobs:
           python -m unittest tests.test_watch_backends -v
           python -m unittest tests.test_incremental_scan -v
           python -m unittest tests.test_promote_io -v
+          python -m unittest tests.test_render_check -v
+          python -m unittest tests.test_nle_bridge -v
+          python -m unittest tests.test_bench_tool -v
 
       # ── Inject release version into package ─────────────────────────────
       # When triggered by a published release (tag e.g. v1.2.3), patch
