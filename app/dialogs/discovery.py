@@ -26,7 +26,7 @@ from app.dialogs.naming_rule import NamingRuleDialog
 
 class DiscoveryWorker(QThread):
     """Runs directory discovery scan in background."""
-    finished = Signal(list)   # list of DiscoveryResult
+    completed = Signal(list)  # list of DiscoveryResult
     error = Signal(str)
     progress = Signal(str, int, int)  # current_path, dirs_scanned, estimated_total
 
@@ -54,7 +54,7 @@ class DiscoveryWorker(QThread):
                 progress_callback=self._on_progress,
                 skip_resolve=self.skip_resolve,
             )
-            self.finished.emit(results)
+            self.completed.emit(results)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -250,7 +250,8 @@ class DiscoveryDialog(QDialog):
             skip_resolve=skip_resolve,
             parent=self,
         )
-        self._worker.finished.connect(self._on_results)
+        self._worker.completed.connect(self._on_results)
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.error.connect(self._on_error)
         self._worker.progress.connect(self._on_scan_progress)
         self._worker.start()
@@ -478,7 +479,7 @@ class DiscoveryDialog(QDialog):
         self.progress_bar.setVisible(False)
         self.status_label.setText(f"Error: {msg}")
 
-    def reject(self):
+    def _stop_worker(self):
         """Clean up any running discovery worker before closing."""
         if self._worker is not None:
             try:
@@ -486,10 +487,20 @@ class DiscoveryDialog(QDialog):
             except RuntimeError:
                 pass
             if self._worker.isRunning():
-                self._worker.quit()
-                self._worker.wait(2000)
+                self._worker.wait(3000)
             self._worker = None
+
+    def accept(self):
+        self._stop_worker()
+        super().accept()
+
+    def reject(self):
+        self._stop_worker()
         super().reject()
+
+    def closeEvent(self, event):
+        self._stop_worker()
+        super().closeEvent(event)
 
     # --- Ignore / context menu ---
 

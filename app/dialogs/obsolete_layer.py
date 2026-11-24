@@ -1,5 +1,7 @@
 """obsolete_layer dialog module."""
 
+import html
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -59,7 +61,7 @@ class ObsoleteLayerDialog(QDialog):
             layout.addWidget(count_label)
 
         header = QLabel(
-            f"<b>{source_name}</b> — promoting to <b>{version_string}</b>"
+            f"<b>{html.escape(source_name)}</b> — promoting to <b>{html.escape(version_string)}</b>"
         )
         header.setWordWrap(True)
         layout.addWidget(header)

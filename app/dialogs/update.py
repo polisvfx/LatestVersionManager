@@ -1,5 +1,8 @@
 """update dialog module."""
 
+import html
+import shutil
+
 from app._common import *  # noqa: F401,F403
 from app._common import (
     _STATUS_MARKERS,
@@ -19,7 +22,7 @@ from app._common import (
     _expand_group_token,
     _resolve_group_root,
 )
-from app.workers import UpdateCheckWorker, UpdateDownloadWorker
+from app.workers import UpdateCheckWorker, UpdateDownloadWorker, UpdateExtractWorker
 
 
 class UpdateDialog(QDialog):
@@ -34,15 +37,19 @@ class UpdateDialog(QDialog):
         self._release_info = None
         self._check_worker: Optional[UpdateCheckWorker] = None
         self._download_worker: Optional[UpdateDownloadWorker] = None
+        self._extract_worker: Optional[UpdateExtractWorker] = None
         self._downloaded_zip: Optional[str] = None
         self._temp_dir: Optional[str] = None
+        self._installed: bool = False
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         layout.setContentsMargins(20, 20, 20, 20)
 
         # Header
-        self._header = QLabel(f"<b>{APP_NAME}</b> &mdash; v{APP_VERSION}")
+        self._header = QLabel(
+            f"<b>{html.escape(APP_NAME)}</b> &mdash; v{html.escape(APP_VERSION)}"
+        )
         self._header.setStyleSheet("font-size: 14pt; padding: 4px;")
         layout.addWidget(self._header)
 
@@ -93,17 +100,19 @@ class UpdateDialog(QDialog):
     # -- Check phase --
 
     def _start_check(self):
-        self._check_worker = UpdateCheckWorker(APP_VERSION, self)
-        self._check_worker.finished.connect(self._on_check_finished)
-        self._check_worker.error.connect(self._on_check_error)
-        self._check_worker.start()
+        w = UpdateCheckWorker(APP_VERSION, self)
+        self._check_worker = w
+        w.completed.connect(self._on_check_finished)
+        w.error.connect(self._on_check_error)
+        w.finished.connect(w.deleteLater)
+        w.start()
 
     def _on_check_finished(self, release_info):
         self._check_worker = None
         if release_info is None:
             self._status_label.setText(
                 f"<span style='color:#4caf50;'>&#10004;</span> "
-                f"You are running the latest version (v{APP_VERSION})."
+                f"You are running the latest version (v{html.escape(APP_VERSION)})."
             )
             self._close_btn.setText("OK")
             self._close_btn.setFocus()
@@ -111,7 +120,7 @@ class UpdateDialog(QDialog):
 
         self._release_info = release_info
         self._status_label.setText(
-            f"<b>A new version is available: v{release_info.version}</b>"
+            f"<b>A new version is available: v{html.escape(str(release_info.version))}</b>"
         )
 
         # Show release notes
@@ -134,7 +143,7 @@ class UpdateDialog(QDialog):
 
     def _on_check_error(self, msg):
         self._check_worker = None
-        self._status_label.setText(f"<span style='color:#e55;'>{msg}</span>")
+        self._status_label.setText(f"<span style='color:#e55;'>{html.escape(str(msg))}</span>")
         self._action_btn.setText("Retry")
         self._action_btn.setVisible(True)
 
@@ -149,9 +158,11 @@ class UpdateDialog(QDialog):
             self._start_check()
 
         elif btn_text == "View on GitHub":
-            if self._release_info:
-                from PySide6.QtGui import QDesktopServices
-                QDesktopServices.openUrl(QUrl(self._release_info.html_url))
+            if self._release_info and self._release_info.html_url:
+                url = QUrl(self._release_info.html_url)
+                if url.scheme().lower() == "https":
+                    from PySide6.QtGui import QDesktopServices
+                    QDesktopServices.openUrl(url)
 
         elif btn_text.startswith("Download"):
             self._start_download()
@@ -165,19 +176,21 @@ class UpdateDialog(QDialog):
         if not self._release_info:
             return
 
+        if self._temp_dir:
+            shutil.rmtree(self._temp_dir, ignore_errors=True)
         self._temp_dir = tempfile.mkdtemp(prefix="lvm_update_")
         self._action_btn.setEnabled(False)
         self._action_btn.setText("Downloading...")
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
 
-        self._download_worker = UpdateDownloadWorker(
-            self._release_info, self._temp_dir, self
-        )
-        self._download_worker.progress.connect(self._on_download_progress)
-        self._download_worker.finished.connect(self._on_download_finished)
-        self._download_worker.error.connect(self._on_download_error)
-        self._download_worker.start()
+        w = UpdateDownloadWorker(self._release_info, self._temp_dir, self)
+        self._download_worker = w
+        w.progress.connect(self._on_download_progress)
+        w.completed.connect(self._on_download_finished)
+        w.error.connect(self._on_download_error)
+        w.finished.connect(w.deleteLater)
+        w.start()
 
     def _on_download_progress(self, current, total):
         if total > 0:
@@ -195,7 +208,7 @@ class UpdateDialog(QDialog):
         self._downloaded_zip = zip_path
         self._progress_bar.setVisible(False)
         self._status_label.setText(
-            "Update downloaded. Click <b>Install &amp; Restart</b> to apply.\n\n"
+            "Update downloaded and verified. Click <b>Install &amp; Restart</b> to apply.\n\n"
             "The application will close, update, and relaunch automatically."
         )
         self._size_label.setVisible(False)
@@ -206,7 +219,7 @@ class UpdateDialog(QDialog):
         self._download_worker = None
         self._progress_bar.setVisible(False)
         self._status_label.setText(
-            f"<span style='color:#e55;'>Download failed: {msg}</span>"
+            f"<span style='color:#e55;'>Download failed: {html.escape(str(msg))}</span>"
         )
         self._action_btn.setText("Download && Install")
         self._action_btn.setEnabled(True)
@@ -217,9 +230,7 @@ class UpdateDialog(QDialog):
         if not self._downloaded_zip or not self._temp_dir:
             return
 
-        from src.lvm.updater import (
-            extract_update, create_updater_script, launch_updater, get_install_dir,
-        )
+        from src.lvm.updater import get_install_dir
 
         install_dir = get_install_dir()
         if not install_dir:
@@ -229,54 +240,95 @@ class UpdateDialog(QDialog):
             )
             return
 
-        try:
-            self._status_label.setText("Extracting update...")
-            self._action_btn.setEnabled(False)
-            QApplication.processEvents()
+        self._status_label.setText("Extracting update...")
+        self._action_btn.setEnabled(False)
+        self._close_btn.setEnabled(False)
+        self._progress_bar.setMaximum(0)
+        self._progress_bar.setVisible(True)
 
-            extract_dir = Path(self._temp_dir) / "extracted"
-            extracted = extract_update(Path(self._downloaded_zip), extract_dir)
+        extract_dir = str(Path(self._temp_dir) / "extracted")
+        w = UpdateExtractWorker(self._downloaded_zip, extract_dir, self)
+        self._extract_worker = w
+        w.completed.connect(self._on_extract_finished)
+        w.error.connect(self._on_extract_error)
+        w.finished.connect(w.deleteLater)
+        w.start()
+
+    def _on_extract_finished(self, extracted_path: str):
+        self._extract_worker = None
+        self._progress_bar.setVisible(False)
+        try:
+            from src.lvm.updater import (
+                create_updater_script, launch_updater, get_install_dir,
+            )
+            install_dir = get_install_dir()
+            if not install_dir:
+                raise RuntimeError("Cannot determine the installation directory.")
 
             script = create_updater_script(
-                extracted_dir=extracted,
+                extracted_dir=Path(extracted_path),
                 install_dir=install_dir,
                 executable_path=Path(sys.executable),
                 pid=os.getpid(),
+                cleanup_dir=Path(self._temp_dir) if self._temp_dir else None,
             )
-
+            self._installed = True
             launch_updater(script)
 
-            # Quit the application so the updater can replace files
-            QApplication.quit()
-
+            # Close parent MainWindow cleanly so closeEvent saves state and
+            # stops workers/watcher rather than abrupt QApplication.quit().
+            parent_win = self.parent()
+            self.accept()
+            if parent_win is not None and hasattr(parent_win, "close"):
+                parent_win.close()
+            else:
+                QApplication.quit()
         except Exception as e:
-            self._status_label.setText(
-                f"<span style='color:#e55;'>Install failed: {e}</span>"
-            )
-            self._action_btn.setText("Download && Install")
-            self._action_btn.setEnabled(True)
+            self._on_extract_error(str(e))
+
+    def _on_extract_error(self, msg: str):
+        self._extract_worker = None
+        self._progress_bar.setVisible(False)
+        self._close_btn.setEnabled(True)
+        self._status_label.setText(
+            f"<span style='color:#e55;'>Install failed: {html.escape(str(msg))}</span>"
+        )
+        self._action_btn.setText("Download && Install")
+        self._action_btn.setEnabled(True)
 
     # -- Cleanup on close --
 
-    def reject(self):
-        # Stop any running workers
-        if self._download_worker and self._download_worker.isRunning():
-            self._download_worker.terminate()
-            self._download_worker.wait(2000)
-        if self._check_worker and self._check_worker.isRunning():
-            self._check_worker.terminate()
-            self._check_worker.wait(2000)
-        # Clean up temp dir if download wasn't installed
-        if self._temp_dir and not self._downloaded_zip:
-            import shutil
+    def _stop_workers(self):
+        if self._download_worker is not None:
+            self._download_worker.cancel()
             try:
-                shutil.rmtree(self._temp_dir, ignore_errors=True)
-            except Exception:
+                self._download_worker.disconnect()
+            except RuntimeError:
                 pass
+            if self._download_worker.isRunning():
+                self._download_worker.wait(3000)
+            self._download_worker = None
+
+        for attr in ("_check_worker", "_extract_worker"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    w.disconnect()
+                except RuntimeError:
+                    pass
+                if w.isRunning():
+                    w.wait(3000)
+                setattr(self, attr, None)
+
+        # Clean up temp dir whenever the update was NOT handed off to the updater script
+        if self._temp_dir and not self._installed:
+            shutil.rmtree(self._temp_dir, ignore_errors=True)
+            self._temp_dir = None
+
+    def reject(self):
+        self._stop_workers()
         super().reject()
 
-
-# ---------------------------------------------------------------------------
-# About Dialog
-# ---------------------------------------------------------------------------
-
+    def closeEvent(self, event):
+        self._stop_workers()
+        super().closeEvent(event)

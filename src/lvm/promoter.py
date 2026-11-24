@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import logging
 import platform
 import threading
@@ -53,6 +54,102 @@ _SWAP_PARALLEL_MIN = 5
 # New files are fully written into the staging dir, then swapped into the
 # target with same-volume renames; old files are parked in the backup dir
 # until the swap succeeds. Both live inside the target directory so the
+_SWAP_COMMITTED_MARKER = ".lvm_committed"
+
+
+def _rmtree_force(path: Path, *, ignore_errors: bool = False) -> None:
+    """``shutil.rmtree`` that clears read-only attributes on Windows before retry."""
+    def _on_exc(func, p, exc):
+        if isinstance(exc, PermissionError):
+            try:
+                os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+                func(p)
+                return
+            except OSError:
+                pass
+        if not ignore_errors:
+            raise exc
+
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        shutil.rmtree(path, onexc=_on_exc)
+    except OSError:
+        if not ignore_errors:
+            raise
+
+
+def _unlink_force(path: Path) -> None:
+    """Remove a single file or symlink, clearing Windows read-only bit if needed."""
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        try:
+            if not path.is_symlink():
+                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def _is_file_locked_win32(path_str: str, *, is_symlink: bool = False) -> bool:
+    """Return True if *path_str* is held open by another process blocking rename/write.
+
+    Uses Win32 ``CreateFileW`` with ``DELETE`` access + ``FILE_SHARE_READ |
+    FILE_SHARE_DELETE`` so read-only files (which ``open(f, 'a')`` falsely
+    flags) and non-writing readers do not produce false positives, and broken
+    symlinks are never touched.
+    """
+    if is_symlink:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        DELETE = 0x00010000
+        FILE_SHARE_READ = 0x00000001
+        FILE_SHARE_DELETE = 0x00000004
+        OPEN_EXISTING = 3
+        FILE_ATTRIBUTE_NORMAL = 0x80
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+        ERROR_SHARING_VIOLATION = 32
+        ERROR_LOCK_VIOLATION = 33
+
+        s = str(path_str)
+        if len(s) >= 260 and not s.startswith("\\\\?\\"):
+            s = os.path.abspath(s)
+            if s.startswith("\\\\"):
+                s = "\\\\?\\UNC\\" + s[2:]
+            else:
+                s = "\\\\?\\" + s
+
+        handle = kernel32.CreateFileW(
+            s,
+            DELETE,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        if handle == INVALID_HANDLE_VALUE:
+            err = ctypes.get_last_error()
+            return err in (ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION)
+        kernel32.CloseHandle(handle)
+        return False
+    except Exception:
+        return False
 # renames never cross a volume boundary.
 STAGING_DIRNAME = ".lvm_staging"
 BACKUP_DIRNAME = ".lvm_backup"
@@ -448,11 +545,12 @@ class Promoter:
                 except Exception:
                     pass
             self.history.record_promotion(entry)
-
-            # Run post-promote hook
-            run_post_promote_hook(self.source, version, user, self.project_name)
         finally:
             lock.release()
+
+        # Run post-promote hook AFTER releasing PromoteLock so slow hooks
+        # don't block sibling promotions or deadlock if they invoke LVM CLI.
+        run_post_promote_hook(self.source, version, user, self.project_name)
 
         elapsed = time.monotonic() - started
         size = getattr(version, "total_size_bytes", 0) or 0
@@ -683,7 +781,7 @@ class Promoter:
                 )
             self._verify_staged(staging_dir, expected)
         except BaseException:
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            _rmtree_force(staging_dir, ignore_errors=True)
             raise
 
         # Staging is complete — retire the old files (only matching
@@ -762,7 +860,7 @@ class Promoter:
                 )
             self._verify_staged(staging_dir, {target_name: source_size})
         except BaseException:
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            _rmtree_force(staging_dir, ignore_errors=True)
             raise
 
         existing = target_dir / target_name
@@ -911,7 +1009,7 @@ class Promoter:
                 stem = strip_date(p.stem, date_fmt)
                 result = stem + p.suffix if p.suffix else stem
             result = _DOUBLE_DIVIDER_RE.sub(r"\1", result)
-            return result
+            return self._validate_target_filename(result)
 
         # Parse the original filename into components
         frame_match = _FRAME_EXT_RE.search(filename)
@@ -955,9 +1053,30 @@ class Promoter:
 
         # Reconstruct filename: base + frame + ext
         if frame_num:
-            return f"{base}{frame_sep}{frame_num}.{ext}"
+            result = f"{base}{frame_sep}{frame_num}.{ext}"
+        elif ext:
+            result = f"{base}.{ext}"
         else:
-            return f"{base}.{ext}"
+            result = base
+        return self._validate_target_filename(result)
+
+    @staticmethod
+    def _validate_target_filename(name: str) -> str:
+        """Reject filenames that could escape the staging/target directory."""
+        if (
+            not name
+            or name in (".", "..")
+            or "/" in name
+            or "\\" in name
+            or "\x00" in name
+            or Path(name).name != name
+            or (len(name) >= 2 and name[1] == ":")
+        ):
+            raise PromotionError(
+                f"Invalid remapped target filename {name!r} "
+                f"(must be a single filename without path separators or '..')."
+            )
+        return name
 
     @staticmethod
     def _set_hidden_attribute(path: Path) -> None:
@@ -975,10 +1094,13 @@ class Promoter:
     def _prepare_staging_dir(self, target_dir: Path) -> Path:
         """Create an empty staging directory inside the target."""
         staging_dir = target_dir / STAGING_DIRNAME
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir, ignore_errors=True)
+        if staging_dir.exists() or staging_dir.is_symlink():
+            _rmtree_force(staging_dir, ignore_errors=False)
         try:
             staging_dir.mkdir(parents=True, exist_ok=True)
+            with os.scandir(staging_dir) as it:
+                if any(True for _ in it):
+                    raise OSError("staging directory is not empty after cleanup")
         except OSError as e:
             raise PromotionError(
                 f"Cannot create staging directory {staging_dir}: {e}"
@@ -1215,7 +1337,7 @@ class Promoter:
             with os.scandir(target_dir) as it:
                 existing = {e.name for e in it} - {STAGING_DIRNAME, BACKUP_DIRNAME}
         except OSError as e:
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            _rmtree_force(staging_dir, ignore_errors=True)
             raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
 
         # Key by casefolded filename so case-only renames (e.g. Shot.exr -> shot.exr)
@@ -1264,19 +1386,16 @@ class Promoter:
         try:
             if backup_keys:
                 if backup_dir.exists():
-                    shutil.rmtree(backup_dir, ignore_errors=True)
+                    _rmtree_force(backup_dir, ignore_errors=True)
                 backup_dir.mkdir(parents=True, exist_ok=True)
                 self._set_hidden_attribute(backup_dir)
             self._run_renames(swap_one, staged)
             self._run_renames(retire_one, leftovers)
-        except Exception as e:
+        except BaseException as e:
             # Roll back: drop whatever was already placed, then return the
             # old files from the backup dir.
             for name in placed:
-                try:
-                    (target_dir / name).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                _unlink_force(target_dir / name)
             restore_failed = False
             for name in moved:
                 try:
@@ -1285,17 +1404,21 @@ class Promoter:
                     restore_failed = True
                     logger.critical("Could not restore %s from backup: %s",
                                     target_dir / name, r)
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            _rmtree_force(staging_dir, ignore_errors=True)
             if restore_failed:
+                if isinstance(e, Exception):
+                    raise PromotionError(
+                        f"Failed to activate new version: {e}. Some previous files "
+                        f"could not be restored and remain in {BACKUP_DIRNAME}; "
+                        f"they will be recovered automatically on the next promotion."
+                    ) from e
+                raise
+            _rmtree_force(backup_dir, ignore_errors=True)
+            if isinstance(e, Exception):
                 raise PromotionError(
-                    f"Failed to activate new version: {e}. Some previous files "
-                    f"could not be restored and remain in {BACKUP_DIRNAME}; "
-                    f"they will be recovered automatically on the next promotion."
+                    f"Failed to activate new version; previous version restored: {e}"
                 ) from e
-            shutil.rmtree(backup_dir, ignore_errors=True)
-            raise PromotionError(
-                f"Failed to activate new version; previous version restored: {e}"
-            ) from e
+            raise
 
         self.last_swap_seconds = time.monotonic() - started
         logger.info(
@@ -1303,10 +1426,16 @@ class Promoter:
             len(staged), target_dir, self.last_swap_seconds,
             replaced_count, len(leftovers),
         )
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        _rmtree_force(staging_dir, ignore_errors=True)
         if backup_keys:
+            # Mark backup_dir as committed BEFORE deleting so a failed rmtree
+            # can never resurrect retired files on the next promotion.
             try:
-                shutil.rmtree(backup_dir)
+                (backup_dir / _SWAP_COMMITTED_MARKER).write_text("ok", encoding="utf-8")
+            except OSError:
+                pass
+            try:
+                _rmtree_force(backup_dir, ignore_errors=False)
             except OSError as e:
                 logger.warning(
                     "Could not remove backup dir %s (cleaned on next promote): %s",
@@ -1316,38 +1445,48 @@ class Promoter:
     def _cleanup_orphaned_promotion_dirs(self, target_dir: Path) -> None:
         """Recover from a previous crashed promotion. Only runs under the lock.
 
-        A crash mid-swap leaves old files in the backup dir — move them
-        back unless the target already has a file with that name. Leftover
-        staging is always discarded (it was never activated).
+        If ``.lvm_backup/.lvm_committed`` is present, the previous swap already
+        completed and the backup dir is just leftover trash — delete it without
+        moving retired files back. Otherwise a crash occurred mid-swap, so
+        every backed-up file is restored to *target_dir* (overwriting any
+        half-placed new files). Leftover staging is always discarded.
         """
         backup_dir = target_dir / BACKUP_DIRNAME
         if backup_dir.is_dir():
-            restored = 0
-            try:
-                for f in list(backup_dir.iterdir()):
-                    dest = target_dir / f.name
-                    if not (dest.exists() or dest.is_symlink()):
+            committed = (backup_dir / _SWAP_COMMITTED_MARKER).exists()
+            if committed:
+                logger.info(
+                    "Discarding already-committed backup dir from prior promotion: %s",
+                    backup_dir,
+                )
+            else:
+                restored = 0
+                try:
+                    for f in list(backup_dir.iterdir()):
+                        if f.name == _SWAP_COMMITTED_MARKER:
+                            continue
+                        dest = target_dir / f.name
                         try:
                             os.replace(f, dest)
                             restored += 1
                         except OSError as e:
                             logger.warning("Could not restore %s from backup: %s", f.name, e)
-            except OSError as e:
-                logger.warning("Could not read backup dir %s: %s", backup_dir, e)
-            if restored:
-                logger.warning(
-                    "Recovered %d file(s) from an interrupted promotion in %s",
-                    restored, target_dir,
-                )
-            shutil.rmtree(backup_dir, ignore_errors=True)
+                except OSError as e:
+                    logger.warning("Could not read backup dir %s: %s", backup_dir, e)
+                if restored:
+                    logger.warning(
+                        "Recovered %d file(s) from an interrupted promotion in %s",
+                        restored, target_dir,
+                    )
+            _rmtree_force(backup_dir, ignore_errors=True)
 
         staging_dir = target_dir / STAGING_DIRNAME
-        if staging_dir.exists():
+        if staging_dir.exists() or staging_dir.is_symlink():
             logger.info(
                 "Discarding leftover staging dir from interrupted promotion: %s",
                 staging_dir,
             )
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            _rmtree_force(staging_dir, ignore_errors=True)
 
     def _preflight_disk_space(self, version: VersionInfo, target_dir: Path) -> None:
         """Refuse to start a copy-mode promotion that cannot fit on the
@@ -1430,21 +1569,25 @@ class Promoter:
         """
         locked = []
 
-        if cached_entries is not None:
-            files = [Path(e.path) for e in cached_entries]
-        else:
-            try:
-                files = self._list_media(target_dir)
-            except OSError as e:
-                raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
+        if os.name != "nt":
+            # POSIX allows atomic rename/unlink over open files and open('a')
+            # does not detect file locks; skip unnecessary per-file opens.
+            return []
 
-        for f in files:
-            try:
-                # Try to open for writing - if it fails, the file is locked
-                with open(f, "a"):
-                    pass
-            except (PermissionError, OSError):
-                locked.append(f.name)
+        if cached_entries is not None:
+            for e in cached_entries:
+                if _is_file_locked_win32(e.path, is_symlink=e.is_symlink()):
+                    locked.append(e.name)
+            return locked
+
+        try:
+            entries = self._media_entries(target_dir)
+        except OSError as e:
+            raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
+
+        for e in entries:
+            if _is_file_locked_win32(e.path, is_symlink=e.is_symlink()):
+                locked.append(e.name)
 
         return locked
 
