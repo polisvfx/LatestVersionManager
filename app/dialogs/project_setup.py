@@ -41,7 +41,7 @@ class ProjectSetupDialog(QDialog):
         self.template_combo = QComboBox()
         self.template_combo.addItem("(none)", "")
         try:
-            from src.lvm.templates import list_templates
+            from lvm.templates import list_templates
             for t in list_templates():
                 self.template_combo.addItem(f"{t['name']} [{t['location']}]", t["path"])
         except Exception:

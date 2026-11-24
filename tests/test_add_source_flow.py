@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QApplication
 _app = QApplication.instance() or QApplication(sys.argv)
 
 from app.main_window import MainWindow
-from src.lvm.models import ProjectConfig, WatchedSource
+from lvm.models import ProjectConfig, WatchedSource
 
 
 class _FakeWindow:

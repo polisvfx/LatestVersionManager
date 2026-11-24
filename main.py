@@ -22,16 +22,21 @@ import json
 import logging
 import argparse
 
-# Add project root to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add repo root and src/ to path so `import lvm` resolves cleanly from source
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_SRC_DIR = os.path.join(_REPO_ROOT, "src")
+if os.path.isdir(_SRC_DIR) and _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-from src.lvm.config import load_config, create_example_config, create_project
-from src.lvm.scanner import VersionScanner
-from src.lvm.promoter import Promoter, PromotionError, generate_report
-from src.lvm.models import WatchedSource, version_strings_match
-from src.lvm.discovery import discover, format_discovery_report
-from src.lvm.timecode import populate_timecodes
-from src.lvm.conflicts import detect_target_conflicts
+from lvm.config import load_config, create_example_config, create_project
+from lvm.scanner import VersionScanner
+from lvm.promoter import Promoter, PromotionError, generate_report
+from lvm.models import WatchedSource, version_strings_match
+from lvm.discovery import discover, format_discovery_report
+from lvm.timecode import populate_timecodes
+from lvm.conflicts import detect_target_conflicts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,8 +100,8 @@ def cmd_setup(args):
 
     # Apply template if specified
     if args.template:
-        from src.lvm.templates import list_templates, load_template, apply_template
-        from src.lvm.config import save_config
+        from lvm.templates import list_templates, load_template, apply_template
+        from lvm.config import save_config
         templates = list_templates()
         match = next((t for t in templates if t["name"] == args.template), None)
         if not match:
@@ -361,7 +366,7 @@ def cmd_promote_all(args):
 
         # Skip pinned ("Keep") sources unless pin has expired or --force
         if not args.force and current and getattr(current, 'pinned', False):
-            from src.lvm.history import has_newer_versions_since
+            from lvm.history import has_newer_versions_since
             if not has_newer_versions_since(current, versions):
                 already_current.append(f"{source.name} (pinned on {current.version})")
                 continue
@@ -684,7 +689,7 @@ def cmd_validate(args):
 def cmd_save_template(args):
     """Save current config as a reusable template."""
     config = load_config(args.config)
-    from src.lvm.templates import save_template
+    from lvm.templates import save_template
     path = save_template(config, args.name, location=args.location,
                          project_dir=config.project_dir)
     print(f"Template saved: {path}")
@@ -692,7 +697,7 @@ def cmd_save_template(args):
 
 def cmd_list_templates(args):
     """List available configuration templates."""
-    from src.lvm.templates import list_templates
+    from lvm.templates import list_templates
     project_dir = getattr(args, 'project_dir', None)
     templates = list_templates(project_dir)
     if not templates:

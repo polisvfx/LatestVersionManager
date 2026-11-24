@@ -91,7 +91,7 @@ class BatchPromoteReviewDialog(QDialog):
         layout.addWidget(self.tree)
 
         # Show configured shell hooks if any source in the batch defines them
-        from src.lvm.hook_trust import collect_source_hooks
+        from lvm.hook_trust import collect_source_hooks
         batch_hooks = collect_source_hooks([s for s, _ in promote_list])
         if batch_hooks:
             hook_frame = QFrame()
@@ -384,7 +384,7 @@ class UndoPromoteDialog(QDialog):
         self._refresh()
 
     def _refresh(self):
-        from src.lvm.models import version_strings_match
+        from lvm.models import version_strings_match
         self.tree.clear()
         self.warn_label.setVisible(False)
         self._target_version = None

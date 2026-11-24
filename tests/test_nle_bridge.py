@@ -1,4 +1,4 @@
-"""Unit tests for src.lvm.nle_bridge.
+"""Unit tests for lvm.nle_bridge.
 
 These tests don't require DaVinci Resolve to be installed — they mock
 the path probes and the subprocess call so the logic is exercised
@@ -16,7 +16,7 @@ from unittest import mock
 # Make the package importable without installing
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.lvm import nle_bridge  # noqa: E402
+from lvm import nle_bridge  # noqa: E402
 
 
 class TestPathProbes(unittest.TestCase):
@@ -1033,7 +1033,7 @@ class TestMetadataFieldOption(unittest.TestCase):
     """The project option reaches the sidecar entry through the promoter."""
 
     def test_config_round_trip_and_validation(self):
-        from src.lvm.models import ProjectConfig
+        from lvm.models import ProjectConfig
         cfg = ProjectConfig(project_name="P", nle_resolve_metadata_field="Comments")
         d = cfg.to_dict()
         self.assertEqual(d["nle_resolve_metadata_field"], "Comments")
@@ -1045,8 +1045,8 @@ class TestMetadataFieldOption(unittest.TestCase):
 
     def test_promote_records_field_in_history(self):
         import tempfile
-        from src.lvm.models import ProjectConfig, VersionInfo, WatchedSource
-        from src.lvm.promoter import Promoter
+        from lvm.models import ProjectConfig, VersionInfo, WatchedSource
+        from lvm.promoter import Promoter
         tmp = Path(tempfile.mkdtemp())
         try:
             vdir = tmp / "renders" / "shot_v001"

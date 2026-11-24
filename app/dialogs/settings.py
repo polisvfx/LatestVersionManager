@@ -22,6 +22,10 @@ from app._common import (
     _resolve_group_root,
 )
 from app.widgets import CollapsibleSection, TagInputWidget, TokenChipBar
+from app.dialogs._template_preview import (
+    unknown_tokens as _unknown_tokens,
+    wrap_path_for_qt as _wrap_path_for_qt,
+)
 
 
 # Tokens accepted by the Latest Path Template (path-shaped output).
@@ -48,7 +52,7 @@ _RENAME_TOKENS: dict[str, str] = {
     "group":           "Group name (omitted with its divider when empty)",
 }
 
-# Tokens accepted by Promotion Hook commands. Mirror src.lvm.hooks._build_hook_tokens.
+# Tokens accepted by Promotion Hook commands. Mirror lvm.hooks._build_hook_tokens.
 _HOOK_TOKENS: dict[str, str] = {
     "source_name":  "Name of the source being promoted",
     "version":      "Version string being promoted (e.g. v003)",
@@ -86,13 +90,10 @@ def _stack_with_chips(edit: QLineEdit, tokens: dict[str, str]) -> QWidget:
     return container
 
 
-def _unknown_tokens(text: str, allowed: set[str]) -> list[str]:
-    """Return any {token} names referenced in *text* that are not in *allowed*."""
-    return [m for m in re.findall(r"\{(\w+)\}", text or "") if m not in allowed]
-
-
 class ProjectSettingsDialog(QDialog):
     """Dialog for editing project-wide settings."""
+
+    nle_state_changed = Signal()  # emitted when Premiere panel is installed/uninstalled
 
     _last_geometry = None  # remember size/position within session
     _collapsed_states: dict = {}  # title -> bool, remembered within session
@@ -283,7 +284,7 @@ class ProjectSettingsDialog(QDialog):
         detection.addRow("File Extensions:", self.extensions_edit)
 
         # --- Date format (multi-select; 0 boxes checked == "(none)") ---
-        from src.lvm.task_tokens import parse_date_formats as _parse_dfmts_proj
+        from lvm.task_tokens import parse_date_formats as _parse_dfmts_proj
         self.date_format_checks: dict[str, QCheckBox] = {}
         _date_tooltips = {
             "DDMMYY":   "Day-month-year, two digits each — matches 210526",
@@ -476,7 +477,7 @@ class ProjectSettingsDialog(QDialog):
         nle_section = self._make_section("NLE Companion Scripts")
         nle = nle_section.content_layout()
 
-        from src.lvm.nle_bridge import (
+        from lvm.nle_bridge import (
             is_resolve_external_available,
             is_resolve_running,
             invalidate_resolve_running_cache,
@@ -553,7 +554,7 @@ class ProjectSettingsDialog(QDialog):
         # Visible Resolve metadata: the hidden promotion marker is always
         # written; this also puts "LVM v005 | 2026-11-20 | user" into a
         # field editors can see in the Metadata panel.
-        from src.lvm.models import NLE_METADATA_FIELDS
+        from lvm.models import NLE_METADATA_FIELDS
         self.nle_metadata_combo = QComboBox()
         self.nle_metadata_combo.addItem("Off", "")
         for fld in NLE_METADATA_FIELDS:
@@ -789,7 +790,7 @@ class ProjectSettingsDialog(QDialog):
         without needing a real promote first.
         """
         try:
-            from src.lvm.task_tokens import (
+            from lvm.task_tokens import (
                 compose_nle_display_stem, derive_source_tokens,
             )
         except ImportError:
@@ -937,12 +938,7 @@ class ProjectSettingsDialog(QDialog):
             sample_file = f"{rename_resolved}.####.exr"
             previews.append(str(Path(dir_str) / sample_file))
 
-        def _path_wrappable(p: str) -> str:
-            # Insert zero-width spaces after path separators so Qt can wrap long paths.
-            # Qt's rich text engine doesn't support <wbr>; \u200b works natively.
-            return p.replace("/", "/\u200b").replace("\\", "\\\u200b")
-
-        self.path_preview_label.setText("\n".join(_path_wrappable(p) for p in previews))
+        self.path_preview_label.setText("\n".join(_wrap_path_for_qt(p) for p in previews))
         self.path_preview_label.setStyleSheet("color: #3aaa88; font-size: 11pt;")
 
     def _browse_root(self):
@@ -1011,7 +1007,7 @@ class ProjectSettingsDialog(QDialog):
 
     def _install_premiere_panel(self):
         """One-click install: copy panel + enable PlayerDebugMode."""
-        from src.lvm.nle_bridge import install_premiere_panel
+        from lvm.nle_bridge import install_premiere_panel
 
         log_lines = []
         result = install_premiere_panel(
@@ -1036,15 +1032,13 @@ class ProjectSettingsDialog(QDialog):
                      "panel via Window → Extensions → LVM Sync Versions.")
         QMessageBox.information(self, "Premiere panel installed", body)
 
-        # Refresh the dialog's local labels and the main window's
-        # status-bar buttons so state is immediately accurate.
+        # Refresh the dialog's local labels and notify the parent window
+        # (avoids a circular import of MainWindow).
         self._refresh_premiere_install_row()
-        from app.main_window import MainWindow as _MW
-        if isinstance(self.parent(), _MW):
-            self.parent()._refresh_sync_names_state()
+        self.nle_state_changed.emit()
 
     def _uninstall_premiere_panel(self):
-        from src.lvm.nle_bridge import uninstall_premiere_panel
+        from lvm.nle_bridge import uninstall_premiere_panel
 
         reply = QMessageBox.question(
             self, "Uninstall Premiere panel",
@@ -1074,13 +1068,11 @@ class ProjectSettingsDialog(QDialog):
              else "Panel was not installed; nothing to remove.")
         )
         self._refresh_premiere_install_row()
-        from app.main_window import MainWindow as _MW
-        if isinstance(self.parent(), _MW):
-            self.parent()._refresh_sync_names_state()
+        self.nle_state_changed.emit()
 
     def _refresh_premiere_install_row(self):
         """Re-read installer state and update the dialog's Premiere widgets."""
-        from src.lvm.nle_bridge import (
+        from lvm.nle_bridge import (
             is_premiere_panel_installed,
             is_premiere_panel_alive,
             premiere_panel_install_dir,
@@ -1134,15 +1126,9 @@ class ProjectSettingsDialog(QDialog):
         """Accordion: expand only the section matching the selected nav row."""
         if row < 0 or row >= len(self._sections):
             return
-        target_title, target_section = self._sections[row]
-        for title, section in self._sections:
-            should_expand = (section is target_section)
-            if section._collapsed == (not should_expand):
-                continue  # already in desired state
-            section._collapsed = not should_expand
-            section._toggle_btn.setChecked(should_expand)
-            section._toggle_btn.setArrowType(Qt.DownArrow if should_expand else Qt.RightArrow)
-            section._content.setVisible(should_expand)
+        _target_title, target_section = self._sections[row]
+        for _title, section in self._sections:
+            section.set_collapsed(section is not target_section)
         # Scroll target into view (deferred so the layout has time to settle).
         QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(target_section, 0, 12))
 
@@ -1233,13 +1219,13 @@ class ProjectSettingsDialog(QDialog):
     def done(self, result):
         ProjectSettingsDialog._last_geometry = self.saveGeometry()
         for title, section in self._sections:
-            ProjectSettingsDialog._collapsed_states[title] = section._collapsed
+            ProjectSettingsDialog._collapsed_states[title] = section.is_collapsed()
         super().done(result)
 
     def _save_as_template(self):
         """Save the current dialog settings as a reusable template (Feature #17)."""
         import copy
-        from src.lvm.templates import save_template
+        from lvm.templates import save_template
         name, ok = QInputDialog.getText(self, "Save Template", "Template name:")
         if ok and name.strip():
             # Apply in-progress dialog edits onto a snapshot so unsaved tweaks

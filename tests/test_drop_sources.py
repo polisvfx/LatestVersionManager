@@ -1,5 +1,5 @@
 """
-Tests for the drag-and-drop "add source" helpers in ``src.lvm.discovery``:
+Tests for the drag-and-drop "add source" helpers in ``lvm.discovery``:
 ``resolve_drop_dir`` and ``source_drafts_for_path``.
 
 Portable (no Qt) — part of the CI suite.
@@ -14,8 +14,8 @@ _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 sys.path.insert(0, str(_project_root / "src"))
 
-from src.lvm.discovery import resolve_drop_dir, source_drafts_for_path
-from src.lvm.models import ProjectConfig
+from lvm.discovery import resolve_drop_dir, source_drafts_for_path
+from lvm.models import ProjectConfig
 
 
 def _touch(p: Path):
@@ -144,9 +144,9 @@ class TestAddedSourceGetsOwnHistory(unittest.TestCase):
     and be flagged as a target conflict)."""
 
     def test_new_source_is_namespaced_existing_keeps_file(self):
-        from src.lvm.config import _migrate_shared_history_filenames
-        from src.lvm.conflicts import detect_target_conflicts
-        from src.lvm.models import WatchedSource
+        from lvm.config import _migrate_shared_history_filenames
+        from lvm.conflicts import detect_target_conflicts
+        from lvm.models import WatchedSource
 
         with tempfile.TemporaryDirectory() as tmp:
             latest = str(Path(tmp) / "COMP_LATEST")

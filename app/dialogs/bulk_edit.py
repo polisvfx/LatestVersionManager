@@ -93,7 +93,7 @@ class BulkEditSourcesDialog(QDialog):
             date_row.addWidget(cb)
         date_row.addStretch(1)
         if first and first.date_format:
-            from src.lvm.task_tokens import parse_date_formats as _parse_dfmts
+            from lvm.task_tokens import parse_date_formats as _parse_dfmts
             for fmt in _parse_dfmts(first.date_format):
                 if fmt in self.date_format_checks:
                     self.date_format_checks[fmt].setChecked(True)

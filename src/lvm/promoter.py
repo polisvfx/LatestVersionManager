@@ -32,14 +32,13 @@ from .fast_copy import smart_copy, CopyCancelled
 from .lockfile import PromoteLock, LockHeldError, LOCK_FILENAME
 from .scanner import _group_files_by_sequence
 from .render_check import find_unfinished_renders, is_container_file, is_open_for_writing
+from .patterns import (
+    VERSION_STRIP_RE as _VERSION_RE,
+    DOUBLE_DIVIDER_RE as _DOUBLE_DIVIDER_RE,
+    FRAME_EXT_SPLIT_RE as _FRAME_EXT_RE,
+)
 
 logger = logging.getLogger(__name__)
-
-# Pre-compiled module-level regex patterns (avoid re-compiling per call)
-_VERSION_RE = re.compile(r"[._\-]v\d+", re.IGNORECASE)
-_DATE_RE = re.compile(r"(?:^|(?<=[._\-]))(\d{6}|\d{8})(?=[._\-]|$)")
-_DOUBLE_DIVIDER_RE = re.compile(r"([_.\-]){2,}")
-_FRAME_EXT_RE = re.compile(r"([._])(\d+)\.(\w+)$")
 
 # Number of threads for parallel file copy operations — adapts to CPU count
 _COPY_WORKERS = min(os.cpu_count() or 4, 8)

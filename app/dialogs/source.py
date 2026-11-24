@@ -140,7 +140,7 @@ class SourceDialog(QDialog):
             self.extensions_edit.setText(" ".join(source.file_extensions))
 
             self.override_date_format_check.setChecked(source.override_date_format)
-            from src.lvm.task_tokens import parse_date_formats as _parse_dfmts
+            from lvm.task_tokens import parse_date_formats as _parse_dfmts
             for fmt in _parse_dfmts(source.date_format):
                 if fmt in self.date_format_checks:
                     self.date_format_checks[fmt].setChecked(True)

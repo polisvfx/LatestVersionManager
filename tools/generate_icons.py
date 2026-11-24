@@ -112,13 +112,7 @@ def _image_to_bmp_dib(image: QImage) -> bytes:
     size = image.width()
     image = image.convertToFormat(QImage.Format.Format_RGBA8888)
 
-    # Build pixel rows bottom-up, converting RGBA → BGRA for Windows BMP
-    pixel_data = bytearray()
-    for row in range(size - 1, -1, -1):
-        for col in range(size):
-            c = image.pixel(col, row)
-        # QImage.pixel returns ARGB as 0xAARRGGBB
-    # Redo properly using scanLine
+    # Build pixel rows bottom-up using scanLine, converting RGBA -> BGRA for Windows BMP
     pixel_data = bytearray()
     for row in range(size - 1, -1, -1):
         ptr = image.scanLine(row)

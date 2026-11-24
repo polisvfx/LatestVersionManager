@@ -484,91 +484,24 @@ class CollapsibleSection(QWidget):
         """Return the QFormLayout inside the collapsible content area."""
         return self._content_layout
 
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        if self._collapsed == collapsed:
+            return
+        expanded = not collapsed
+        self._collapsed = collapsed
+        self._toggle_btn.setChecked(expanded)
+        self._toggle_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self._content.setVisible(expanded)
+
     def _on_toggle(self, checked: bool = None):
         if checked is None:
             checked = self._toggle_btn.isChecked()
         self._collapsed = not checked
         self._toggle_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
         self._content.setVisible(checked)
-
-
-# ---------------------------------------------------------------------------
-# Project Settings Dialog
-# ---------------------------------------------------------------------------
-
-
-class SourceItemDelegate(QStyledItemDelegate):
-    """Custom delegate that renders group tags as colored labels in the source list."""
-
-    # Role to store (group_name, group_color) tuple
-    GROUP_ROLE = Qt.UserRole + 1
-
-    def paint(self, painter: QPainter, option, index):
-        group_data = index.data(self.GROUP_ROLE)
-
-        # If no group data, just use default painting
-        if not group_data:
-            super().paint(painter, option, index)
-            return
-
-        # Draw everything except the text via the base style
-        opt = option.__class__(option)
-        self.initStyleOption(opt, index)
-
-        # Strip the bullet+group from the display text for base measurement
-        full_text = opt.text or ""
-        marker = "  \u2022"
-        if marker in full_text:
-            main_text = full_text[:full_text.index(marker)]
-        else:
-            main_text = full_text
-
-        # Let base class draw selection background + icon, but with truncated text
-        opt.text = main_text
-        style = opt.widget.style() if opt.widget else QApplication.style()
-        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
-
-        # Now draw the group pill on top
-        group_name, group_color_str = group_data
-        group_color = QColor(group_color_str)
-
-        painter.save()
-
-        font = opt.font
-        fm = QFontMetrics(font)
-        text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
-
-        tag_font = QFont(font)
-        base_size = font.pointSize()
-        if base_size <= 0:
-            base_size = font.pixelSize()
-            if base_size <= 0:
-                base_size = 9
-        tag_font.setPointSize(max(base_size - 1, 7))
-        tag_fm = QFontMetrics(tag_font)
-        tag_width = tag_fm.horizontalAdvance(f" {group_name} ") + 6
-        tag_height = tag_fm.height() + 2
-        tag_x = text_rect.right() - tag_width - 2
-        tag_y = text_rect.center().y() - tag_height // 2
-
-        # Draw rounded pill background
-        pill_color = QColor(group_color)
-        pill_color.setAlpha(60)
-        painter.setBrush(QBrush(pill_color))
-        painter.setPen(QPen(group_color, 1))
-        painter.setRenderHint(QPainter.Antialiasing)
-        from PySide6.QtCore import QRectF
-        painter.drawRoundedRect(QRectF(tag_x, tag_y, tag_width, tag_height), 4, 4)
-
-        # Draw tag text
-        painter.setFont(tag_font)
-        painter.setPen(QPen(group_color))
-        painter.drawText(
-            int(tag_x), int(tag_y), int(tag_width), int(tag_height),
-            Qt.AlignCenter, group_name,
-        )
-
-        painter.restore()
 
 
 # ---------------------------------------------------------------------------

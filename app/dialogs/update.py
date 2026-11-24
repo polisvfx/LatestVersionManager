@@ -134,7 +134,7 @@ class UpdateDialog(QDialog):
         self._size_label.setVisible(True)
 
         # Show the action button
-        from src.lvm.updater import is_frozen
+        from lvm.updater import is_frozen
         if is_frozen():
             self._action_btn.setText("Download && Install")
         else:
@@ -230,7 +230,7 @@ class UpdateDialog(QDialog):
         if not self._downloaded_zip or not self._temp_dir:
             return
 
-        from src.lvm.updater import get_install_dir
+        from lvm.updater import get_install_dir
 
         install_dir = get_install_dir()
         if not install_dir:
@@ -258,7 +258,7 @@ class UpdateDialog(QDialog):
         self._extract_worker = None
         self._progress_bar.setVisible(False)
         try:
-            from src.lvm.updater import (
+            from lvm.updater import (
                 create_updater_script, launch_updater, get_install_dir,
             )
             install_dir = get_install_dir()

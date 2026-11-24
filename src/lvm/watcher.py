@@ -17,6 +17,7 @@ Two backends, chosen per source (see :func:`fsinfo.choose_watch_backend`):
 __all__ = ["SourceWatcher"]
 
 import logging
+import os
 
 from PySide6.QtCore import QObject, Signal, QTimer, Slot, QMetaObject, Qt, Q_ARG
 from watchdog.observers import Observer
@@ -136,16 +137,22 @@ class SourceWatcher(QObject):
         self._emit_status()
 
     def _schedule_native(self, source: WatchedSource) -> bool:
+        path = str(source.source_dir)
+        # macOS FSEventsObserver.schedule() succeeds silently for nonexistent
+        # directories instead of raising FileNotFoundError like Windows/Linux.
+        if not os.path.isdir(path):
+            logger.warning(f"Source directory not found for {path}; polling instead")
+            return False
         handler = _FolderEventHandler(self._on_change, source)
         try:
-            watch = self._observer.schedule(handler, str(source.source_dir), recursive=False)
+            watch = self._observer.schedule(handler, path, recursive=False)
         except Exception as e:
             # Missing or unreachable directory — the poller retries it.
-            logger.warning(f"Native watch failed for {source.source_dir} ({e}); polling instead")
+            logger.warning(f"Native watch failed for {path} ({e}); polling instead")
             return False
         self._handlers[source.name] = handler
         self._native_watches[source.name] = watch
-        logger.info(f"Watching: {source.source_dir}")
+        logger.info(f"Watching: {path}")
         return True
 
     def stop(self):

@@ -2,7 +2,7 @@
 
 import unittest
 from pathlib import Path
-from src.lvm.models import DiscoveryResult, VersionInfo
+from lvm.models import DiscoveryResult, VersionInfo
 
 
 class TestBlacklistFiltering(unittest.TestCase):

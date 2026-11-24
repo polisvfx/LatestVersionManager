@@ -673,20 +673,6 @@ def _populate_date_on_vi(vi: VersionInfo, name: str):
     vi.date_sortable = parse_date_to_sortable(digits, fmt)
 
 
-def _collect_media_files(folder: Path, extensions: set) -> list[Path]:
-    """Collect media files in a folder (non-recursive) using os.scandir for speed."""
-    files = []
-    try:
-        with os.scandir(folder) as it:
-            for entry in it:
-                if entry.is_file(follow_symlinks=False) and has_media_extension(entry.name, extensions):
-                    files.append(Path(entry.path))
-    except PermissionError:
-        pass
-    files.sort()
-    return files
-
-
 def _collect_media_files_with_stats(
     folder: Path, extensions: set,
 ) -> tuple[list[Path], int, set[str]]:
