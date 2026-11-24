@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication
 _app = QApplication.instance() or QApplication(sys.argv)
 
 from app import SourceDialog
-from src.lvm.models import ProjectConfig, WatchedSource
+from lvm.models import ProjectConfig, WatchedSource
 
 
 def _make_full_source() -> WatchedSource:

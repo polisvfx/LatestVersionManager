@@ -26,21 +26,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from .patterns import DIVIDERS, DIVIDER_RE, VERSION_RE, FRAME_EXT_RE, DATE_RE
+
 logger = logging.getLogger(__name__)
-
-# Characters that act as word boundaries for task tokens
-DIVIDERS = "_.-"
-DIVIDER_RE = r"[_.\-]"
-
-# Version pattern: _v01, .v002, -v0051, _V004
-VERSION_RE = re.compile(r"[._\-]v(\d+)", re.IGNORECASE)
-
-# Frame number + extension at end of filename: name.1001.exr, name_1001.exr
-FRAME_EXT_RE = re.compile(r"[._](\d+)\.\w+$")
-
-# Date patterns in filenames: 6-digit (DDMMYY/YYMMDD) or 8-digit (DDMMYYYY/YYYYMMDD)
-# Bounded by dividers or string start/end to avoid matching frame numbers or reel IDs
-DATE_RE = re.compile(r"(?:^|(?<=[._\-]))(\d{6}|\d{8})(?=[._\-]|$)")
 
 # Valid date format identifiers
 VALID_DATE_FORMATS = ("DDMMYY", "YYMMDD", "DDMMYYYY", "YYYYMMDD")

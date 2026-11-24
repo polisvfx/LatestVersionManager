@@ -274,11 +274,8 @@ class TestRunHook(unittest.TestCase):
         self.assertEqual(rc, 1)
 
     def test_timeout_raises_hook_error(self):
-        # Use a long-running command that we timeout quickly
-        if sys.platform == "win32":
-            cmd = "ping -n 10 127.0.0.1"
-        else:
-            cmd = "sleep 10"
+        # Use a portable long-running Python command (works in network-restricted sandboxes)
+        cmd = f'"{sys.executable}" -c "import time; time.sleep(10)"'
         with self.assertRaises(HookError) as ctx:
             run_hook(cmd, os.environ.copy(), "slow-hook", timeout=1)
         self.assertIn("timed out", str(ctx.exception))

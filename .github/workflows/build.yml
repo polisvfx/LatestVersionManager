@@ -30,6 +30,23 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'release' }}
 
 jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Run ruff check
+        run: |
+          pip install ruff
+          ruff check .
+
   build:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -115,6 +132,22 @@ jobs:
           python -m unittest tests.test_p0_regressions -v
           python -m unittest tests.test_p1_security -v
           python -m unittest tests.test_p2_correctness -v
+          python -m unittest tests.test_cli -v
+          python -m unittest tests.test_updater -v
+          python -m unittest tests.test_templates -v
+          python -m unittest tests.test_thumbnail -v
+          python -m unittest tests.test_hook_trust -v
+
+      - name: Run offscreen GUI tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m unittest tests.test_tag_input -v
+          python -m unittest tests.test_source_dialog -v
+          python -m unittest tests.test_discovery_dialog -v
+          python -m unittest tests.test_add_source_flow -v
+          python -m unittest tests.test_history_timeline -v
+          python -m unittest tests.test_gui_robustness -v
 
       # ── Inject release version into package ─────────────────────────────
       # When triggered by a published release (tag e.g. v1.2.3), patch

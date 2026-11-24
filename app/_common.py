@@ -16,6 +16,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Ensure src/ is on sys.path when running from source so `import lvm` works
+# whether launched via app.py, `python -m unittest`, or direct imports.
+if not getattr(sys, "frozen", False):
+    _SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
+    if os.path.isdir(_SRC_DIR) and _SRC_DIR not in sys.path:
+        sys.path.insert(0, _SRC_DIR)
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem,
@@ -31,19 +38,19 @@ from PySide6.QtCore import Qt, QThread, Signal, QSize, QSettings, QUrl, QMimeDat
 from PySide6.QtGui import QAction, QFont, QColor, QIcon, QPalette, QPainter, QPen, QBrush, QFontMetrics, QPixmap, QKeySequence, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 
-from src.lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEntry, make_relative, DEFAULT_FILE_EXTENSIONS, version_strings_match, CONFIG_VERSION
-from src.lvm.config import load_config, save_config, create_example_config, create_project, apply_project_defaults, _expand_group_token, _resolve_group_root
-from src.lvm.scanner import VersionScanner, detect_sequence_from_file, scan_directory_as_version, create_manual_version
-from src.lvm.promoter import Promoter, PromotionError, generate_report
-from src.lvm.history import has_newer_versions_since
-from src.lvm.elevation import (
+from lvm.models import ProjectConfig, WatchedSource, VersionInfo, HistoryEntry, make_relative, DEFAULT_FILE_EXTENSIONS, version_strings_match, CONFIG_VERSION
+from lvm.config import load_config, save_config, create_example_config, create_project, apply_project_defaults, _expand_group_token, _resolve_group_root
+from lvm.scanner import VersionScanner, detect_sequence_from_file, scan_directory_as_version, create_manual_version
+from lvm.promoter import Promoter, PromotionError, generate_report
+from lvm.history import has_newer_versions_since
+from lvm.elevation import (
     is_admin, can_create_symlinks, can_create_hardlinks,
     restart_elevated, check_link_mode_available, LINK_MODES,
 )
-from src.lvm.watcher import SourceWatcher
-from src.lvm.discovery import discover, DiscoveryResult
-from src.lvm.timecode import populate_timecodes, populate_timecodes_parallel
-from src.lvm.task_tokens import (
+from lvm.watcher import SourceWatcher
+from lvm.discovery import discover, DiscoveryResult
+from lvm.timecode import populate_timecodes, populate_timecodes_parallel
+from lvm.task_tokens import (
     compute_source_name, derive_source_tokens, get_naming_options, strip_task_tokens
 )
 
@@ -105,7 +112,7 @@ def _group_qcolor(hex_str: str) -> QColor:
     return qc
 
 APP_NAME = "Latest Version Manager"
-from src.lvm import __version__ as APP_VERSION
+from lvm import __version__ as APP_VERSION
 
 # When frozen by PyInstaller, data files live under sys._MEIPASS.
 # When running from source, resources/ lives at the repository root (parent of app/).
@@ -181,7 +188,7 @@ def _preview_sample_suffix(source) -> str:
     source's *sample_filename* when available — a frame number in the sample
     indicates a sequence — and falls back to the first configured extension.
     """
-    from src.lvm.task_tokens import FRAME_EXT_RE
+    from lvm.task_tokens import FRAME_EXT_RE
 
     sample = getattr(source, "sample_filename", "") or ""
     if sample:

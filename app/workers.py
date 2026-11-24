@@ -87,7 +87,7 @@ class ThumbnailWorker(QThread):
         self.request_id = request_id
 
     def run(self):
-        from src.lvm.thumbnail import get_thumbnail
+        from lvm.thumbnail import get_thumbnail
         try:
             result = get_thumbnail(self.source_path, self.version_string, self.extensions, self.cache_dir)
         except Exception:
@@ -128,7 +128,7 @@ class ThumbnailQueueWorker(QThread):
             self._cond.notify_all()
 
     def run(self):
-        from src.lvm.thumbnail import get_thumbnail
+        from lvm.thumbnail import get_thumbnail
         while True:
             with self._cond:
                 while not self._pending and not self._stopped:
@@ -159,7 +159,7 @@ class UpdateCheckWorker(QThread):
 
     def run(self):
         try:
-            from src.lvm.updater import check_for_update
+            from lvm.updater import check_for_update
             release = check_for_update(self.current_version)
             self.completed.emit(release)
         except Exception as e:
@@ -183,7 +183,7 @@ class UpdateDownloadWorker(QThread):
 
     def run(self):
         try:
-            from src.lvm.updater import download_update
+            from lvm.updater import download_update
             zip_path = download_update(
                 self.release_info,
                 self.dest_dir,
@@ -207,7 +207,7 @@ class UpdateExtractWorker(QThread):
 
     def run(self):
         try:
-            from src.lvm.updater import extract_update
+            from lvm.updater import extract_update
             extracted = extract_update(self._zip_path, self._extract_dir)
             self.completed.emit(str(extracted))
         except Exception as e:
@@ -320,7 +320,7 @@ class StatusWorker(QThread):
 
     def _compute_all(self, source_status: dict, promoters: dict,
                      scanners: dict, target_conflicts: dict) -> None:
-        from src.lvm.conflicts import detect_target_conflicts
+        from lvm.conflicts import detect_target_conflicts
 
         sources = self._sources
         worker_count = min(8, len(sources))
@@ -432,7 +432,7 @@ class AutoPromoteCheckWorker(QThread):
         self._previous_settle = previous_settle
 
     def run(self):
-        from src.lvm.auto_promote import AutoPromoteDecision, evaluate_auto_promote, ERROR
+        from lvm.auto_promote import AutoPromoteDecision, evaluate_auto_promote, ERROR
         try:
             promoter = Promoter(
                 self._source, self._task_tokens, self._project_name,
@@ -457,7 +457,7 @@ class SyncNamesWorker(QThread):
         super().__init__(parent)
 
     def run(self):
-        from src.lvm.nle_bridge import run_resolve_in_process
+        from lvm.nle_bridge import run_resolve_in_process
         try:
             stats = run_resolve_in_process(self.line.emit)
         except Exception as e:
@@ -479,7 +479,7 @@ class ProjectLoadWorker(QThread):
     def run(self):
         try:
             config = load_config(self._path)
-            from src.lvm.scan_cache import load_cache
+            from lvm.scan_cache import load_cache
             cached = load_cache(self._path, config.watched_sources, task_tokens=config.task_tokens) or None
             self.completed.emit(config, cached, self._path)
         except Exception as e:

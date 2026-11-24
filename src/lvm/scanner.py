@@ -47,11 +47,6 @@ def source_scan_fingerprint(source: WatchedSource, task_tokens: Optional[list] =
 class VersionScanner:
     """Scans a watched source directory for available versions."""
 
-    # Common frame padding patterns: name.1001.exr, name.%04d.exr, name_1001.exr
-    FRAME_PATTERNS = [
-        re.compile(r"[._](\d+)\.\w+$"),        # name.1001.exr or name_1001.exr
-    ]
-
     def __init__(self, watched_source: WatchedSource, task_tokens: list[str] = None):
         self.source = watched_source
         self._date_format = getattr(watched_source, "date_format", "")
@@ -458,17 +453,6 @@ class VersionScanner:
 
 # Frame pattern for detecting sequence siblings
 _FRAME_RE = re.compile(r"[._](\d+)\.\w+$")
-
-
-def _detect_padding(digit_str: str) -> int:
-    """Return the padding width for a frame number string.
-
-    If the string has leading zeros, padding = len(digit_str).
-    Otherwise padding = 0 (unpadded).
-    """
-    if digit_str.startswith("0") and len(digit_str) > 1:
-        return len(digit_str)
-    return 0
 
 
 def _group_files_by_sequence(

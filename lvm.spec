@@ -27,18 +27,15 @@ _ffmpeg_binaries = collect_data_files('imageio_ffmpeg', subdir='binaries')
 # ── Analysis ──────────────────────────────────────────────────────────────────
 a = Analysis(
     ['app.py'],
-    pathex=['.'],
+    pathex=['.', 'src'],
     binaries=[],
     datas=[
         # Bundle the SVG resource
         ('resources/mp_logo.svg', 'resources'),
         # Bundle the pre-rendered PNG (used by the app on all platforms at runtime)
         ('resources/mp_logo_256.png', 'resources'),
-        # Bundle the src package explicitly (it's a namespace package)
-        ('src/lvm/*.py', 'src/lvm'),
         # Bundle the NLE companion scripts so the bridge can launch them
-        # in frozen builds. Path resolution uses parents[2] of nle_bridge.py,
-        # which lands on _MEIPASS at runtime — keep this layout in sync.
+        # in frozen builds (companions_dir() reads sys._MEIPASS / "companions").
         ('companions/resolve/*.py', 'companions/resolve'),
         ('companions/premiere/*.jsx', 'companions/premiere'),
         # CEP panel for Premiere — users install this from the bundled
@@ -60,22 +57,35 @@ a = Analysis(
         # PySide6 modules used via dynamic import
         'PySide6.QtSvg',
         'PySide6.QtXml',
-        # src package
-        'src',
-        'src.lvm',
-        'src.lvm.models',
-        'src.lvm.config',
-        'src.lvm.scanner',
-        'src.lvm.promoter',
-        'src.lvm.history',
-        'src.lvm.discovery',
-        'src.lvm.watcher',
-        'src.lvm.elevation',
-        'src.lvm.task_tokens',
-        'src.lvm.timecode',
-        'src.lvm.thumbnail',
-        'src.lvm.updater',
-        'src.lvm.nle_bridge',
+        # lvm core package (unified under src/lvm -> lvm.*)
+        'lvm',
+        'lvm.auto_promote',
+        'lvm.config',
+        'lvm.conflicts',
+        'lvm.dirpoll',
+        'lvm.discovery',
+        'lvm.elevation',
+        'lvm.fast_copy',
+        'lvm.fileutil',
+        'lvm.fsinfo',
+        'lvm.history',
+        'lvm.hook_trust',
+        'lvm.hooks',
+        'lvm.lockfile',
+        'lvm.log_handler',
+        'lvm.models',
+        'lvm.nle_bridge',
+        'lvm.patterns',
+        'lvm.promoter',
+        'lvm.render_check',
+        'lvm.scan_cache',
+        'lvm.scanner',
+        'lvm.task_tokens',
+        'lvm.templates',
+        'lvm.thumbnail',
+        'lvm.timecode',
+        'lvm.updater',
+        'lvm.watcher',
         # Stdlib modules used by the bundled NLE companion script
         # (companions/ is shipped as data, so PyInstaller can't see what
         # those scripts import — list anything they need here).
@@ -132,7 +142,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,          # Compress with UPX if available (reduces size ~30%)
+    upx=False,         # UPX breaks macOS notarization and triggers AV false positives
     console=False,     # No terminal window — GUI app
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -149,7 +159,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='LatestVersionManager',
 )

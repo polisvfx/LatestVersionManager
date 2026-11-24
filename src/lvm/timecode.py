@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .patterns import subprocess_kwargs as _subprocess_kwargs
+
 logger = logging.getLogger(__name__)
 
 # Cached ffprobe path
@@ -41,22 +43,6 @@ _TC_PREFERRED_EXTENSIONS = _NATIVE_TC_EXTENSIONS | {
 # than a few files of a folder only costs I/O (one SMB round-trip each) when
 # the frames have no timecode at all.
 MAX_TIMECODE_PROBES = 3
-
-
-def _subprocess_kwargs() -> dict:
-    """Return platform-specific kwargs to suppress console windows on Windows.
-
-    Without these flags, every subprocess.run() call to ffprobe flashes a cmd
-    window on top of the GUI — very visible once a project has many sources.
-    """
-    kwargs = {}
-    if sys.platform == "win32":
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        si.wShowWindow = subprocess.SW_HIDE
-        kwargs["startupinfo"] = si
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +305,6 @@ def _extract_timecode_ffprobe(file_path: Path) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Clip frame count extraction (for container formats)
 # ---------------------------------------------------------------------------
-
-_CONTAINER_EXTENSIONS_TC = {".mov", ".mxf", ".mp4", ".avi"}
 
 
 def extract_clip_frame_count(file_path: Path) -> int:

@@ -48,7 +48,7 @@ class TestStatusWorkerErrors(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _config(self):
-        from src.lvm.models import ProjectConfig, WatchedSource
+        from lvm.models import ProjectConfig, WatchedSource
         sources = []
         for name in ("good", "broken"):
             (self.tmp / name / "online").mkdir(parents=True)
@@ -68,7 +68,7 @@ class TestStatusWorkerErrors(unittest.TestCase):
 
     def test_unreadable_history_reports_error_status(self):
         from app.workers import StatusWorker
-        from src.lvm.history import HistoryManager
+        from lvm.history import HistoryManager
 
         real_load = HistoryManager.load
 
@@ -89,7 +89,7 @@ class TestStatusWorkerErrors(unittest.TestCase):
 
     def test_unexpected_failure_still_emits_finished(self):
         from app.workers import StatusWorker
-        with patch("src.lvm.conflicts.detect_target_conflicts",
+        with patch("lvm.conflicts.detect_target_conflicts",
                    side_effect=RuntimeError("boom")):
             status, conflicts, _, _ = self._run(StatusWorker(self._config(), {}))
         self.assertEqual(conflicts, {})
@@ -106,6 +106,9 @@ class _MainWindowTestBase(unittest.TestCase):
             patch("app.main_window.QSettings",
                   lambda *a, **k: QSettings(ini, QSettings.IniFormat)),
             patch("app.main_window.MainWindow._restore_state", lambda self: None),
+            patch("lvm.nle_bridge.is_resolve_external_available", return_value=False),
+            patch("lvm.nle_bridge.is_resolve_running", return_value=False),
+            patch("lvm.nle_bridge.is_premiere_panel_alive", return_value=False),
         ]
         for p in self._patches:
             p.start()
@@ -125,8 +128,8 @@ class _MainWindowTestBase(unittest.TestCase):
 class TestMainWindowWiring(_MainWindowTestBase):
 
     def test_selection_slots_connected_once(self):
-        from src.lvm.models import ProjectConfig, WatchedSource
-        from src.lvm.scanner import VersionScanner
+        from lvm.models import ProjectConfig, WatchedSource
+        from lvm.scanner import VersionScanner
         src = WatchedSource(name="S", source_dir=str(self.tmp))
         self.win.config = ProjectConfig(project_name="P", watched_sources=[src])
         self.win._scanners["S"] = VersionScanner(src)
@@ -142,11 +145,11 @@ class TestMainWindowWiring(_MainWindowTestBase):
         self.assertGreaterEqual(before_v, 1)
 
     def test_failed_save_keeps_project_dirty(self):
-        from src.lvm.models import ProjectConfig
+        from lvm.models import ProjectConfig
         self.win.config = ProjectConfig(project_name="P")
         self.win.config_path = str(self.tmp / "p.json")
         self.win._dirty = True
-        with patch("src.lvm.config.atomic_write_json", side_effect=OSError("disk full")), \
+        with patch("lvm.config.atomic_write_json", side_effect=OSError("disk full")), \
                 patch("app.main_window.QMessageBox.warning") as warn:
             ok = self.win._save_project(blocking=True)
         self.assertFalse(ok)
@@ -155,7 +158,7 @@ class TestMainWindowWiring(_MainWindowTestBase):
         self.assertFalse(Path(self.win.config_path).exists())
 
     def test_successful_blocking_save(self):
-        from src.lvm.models import ProjectConfig
+        from lvm.models import ProjectConfig
         self.win.config = ProjectConfig(project_name="P")
         self.win.config_path = str(self.tmp / "p.json")
         self.win._dirty = True
@@ -165,7 +168,7 @@ class TestMainWindowWiring(_MainWindowTestBase):
         self.assertEqual(Path(self.win.config.project_dir), self.tmp.resolve())
 
     def test_newer_config_version_warns(self):
-        from src.lvm.models import CONFIG_VERSION, ProjectConfig
+        from lvm.models import CONFIG_VERSION, ProjectConfig
         cfg = ProjectConfig(project_name="P")
         cfg.loaded_config_version = CONFIG_VERSION + 1
         with patch("app.main_window.QMessageBox.warning") as warn:
@@ -174,7 +177,7 @@ class TestMainWindowWiring(_MainWindowTestBase):
         self.assertIn("newer version", warn.call_args.args[2])
 
     def test_current_config_version_does_not_warn(self):
-        from src.lvm.models import ProjectConfig
+        from lvm.models import ProjectConfig
         for v in (0, None):
             cfg = ProjectConfig(project_name="P")
             if v is not None:
@@ -192,10 +195,10 @@ class TestAutoPromoteOffGuiThread(_MainWindowTestBase):
         super().setUp()
         import threading
         from unittest.mock import PropertyMock
-        from src.lvm.models import ProjectConfig, WatchedSource
-        from src.lvm.promoter import Promoter
-        from src.lvm.scanner import VersionScanner
-        from src.lvm.watcher import SourceWatcher
+        from lvm.models import ProjectConfig, WatchedSource
+        from lvm.promoter import Promoter
+        from lvm.scanner import VersionScanner
+        from lvm.watcher import SourceWatcher
 
         renders = self.tmp / "renders"
         self.src = WatchedSource(
@@ -304,8 +307,8 @@ class TestIncrementalRefreshUI(_MainWindowTestBase):
 
     def setUp(self):
         super().setUp()
-        from src.lvm.models import ProjectConfig, VersionInfo, WatchedSource
-        from src.lvm.scanner import VersionScanner
+        from lvm.models import ProjectConfig, VersionInfo, WatchedSource
+        from lvm.scanner import VersionScanner
         self.sources = []
         for name in ("alpha", "beta"):
             d = self.tmp / name
@@ -450,8 +453,8 @@ class TestWatcherEvents(unittest.TestCase):
         from watchdog.events import (
             DirCreatedEvent, DirMovedEvent, FileModifiedEvent, FileMovedEvent,
         )
-        from src.lvm.models import WatchedSource
-        from src.lvm.watcher import _FolderEventHandler
+        from lvm.models import WatchedSource
+        from lvm.watcher import _FolderEventHandler
         seen = []
         handler = _FolderEventHandler(seen.append, WatchedSource(name="S", source_dir="/r"))
         handler.dispatch(DirCreatedEvent("/r/shot_v002"))
@@ -466,8 +469,8 @@ class TestSourceWatcherBackends(unittest.TestCase):
 
     def setUp(self):
         _app()
-        from src.lvm.models import WatchedSource
-        from src.lvm.watcher import SourceWatcher
+        from lvm.models import WatchedSource
+        from lvm.watcher import SourceWatcher
         self.tmp = Path(tempfile.mkdtemp(prefix="lvm_watch_"))
         (self.tmp / "renders").mkdir()
         self.src = WatchedSource(name="shot", source_dir=str(self.tmp / "renders"))
@@ -503,7 +506,7 @@ class TestSourceWatcherBackends(unittest.TestCase):
         self.assertEqual(self.changed, ["shot"])
 
     def test_missing_folder_falls_back_to_polling(self):
-        from src.lvm.models import WatchedSource
+        from lvm.models import WatchedSource
         missing = WatchedSource(name="later", source_dir=str(self.tmp / "not_mounted"))
         self.watcher.start([self.src, missing], mode="native", poll_interval=0.05)
         self.assertEqual(self.watcher.backend_for("shot"), "native")
@@ -534,7 +537,7 @@ class TestPromoteAllShortcuts(_MainWindowTestBase):
 
     def _dialog(self):
         from app.dialogs.batch_promote import BatchPromoteReviewDialog
-        from src.lvm.models import VersionInfo, WatchedSource
+        from lvm.models import VersionInfo, WatchedSource
         src = WatchedSource(name="S", source_dir=str(self.tmp))
         ver = VersionInfo(version_string="v002", version_number=2,
                           source_path=str(self.tmp / "v002"))
@@ -605,7 +608,7 @@ class TestResolveMetadataSetting(unittest.TestCase):
     def test_combo_reads_and_writes_option(self):
         _app()
         from app.dialogs.settings import ProjectSettingsDialog
-        from src.lvm.models import ProjectConfig
+        from lvm.models import ProjectConfig
         cfg = ProjectConfig(project_name="P", nle_resolve_metadata_field="Description")
         dlg = ProjectSettingsDialog(cfg)
         self.addCleanup(dlg.deleteLater)
@@ -690,19 +693,19 @@ class TestAutoPromoteNotifications(_MainWindowTestBase):
         self.addCleanup(self._enabled.stop)
 
     def _decision(self, action, **kw):
-        from src.lvm.auto_promote import AutoPromoteDecision
+        from lvm.auto_promote import AutoPromoteDecision
         return AutoPromoteDecision(source_name="shot", action=action, **kw)
 
     def test_skip_and_error_notify(self):
-        from src.lvm import auto_promote as ap
+        from lvm import auto_promote as ap
         self.win._on_auto_promote_decided(self._decision(ap.SKIP, reason="frame range changed"))
         self.notify.assert_called_with("shot", "skipped", "shot: frame range changed")
         self.win._on_auto_promote_decided(self._decision(ap.ERROR, reason="scan failed"))
         self.notify.assert_called_with("shot", "failed", "shot: scan failed")
 
     def test_waiting_notifies_first_time_only(self):
-        from src.lvm import auto_promote as ap
-        from src.lvm.models import VersionInfo
+        from lvm import auto_promote as ap
+        from lvm.models import VersionInfo
         v = VersionInfo("v002", 2, str(self.tmp / "v002"))
         with patch.object(self.win, "_schedule_render_wait_retry"):
             self.win._on_auto_promote_decided(self._decision(ap.WAIT_RENDER, version=v,
@@ -714,7 +717,7 @@ class TestAutoPromoteNotifications(_MainWindowTestBase):
         self.assertEqual(self.notify.call_args.args[1], "waiting")
 
     def test_auto_promotion_finish_and_failure_notify(self):
-        from src.lvm.models import HistoryEntry
+        from lvm.models import HistoryEntry
         entry = HistoryEntry(version="v002", source="", set_by="t", set_at="")
         with patch.object(self.win, "_process_deferred_or_refresh"), \
              patch.object(self.win, "_maybe_auto_sync_nle"):
@@ -732,7 +735,7 @@ class TestAutoPromoteNotifications(_MainWindowTestBase):
         self.notify.assert_called_once_with("shot", "failed", "shot: Disk full")
 
     def test_manual_promotion_does_not_notify(self):
-        from src.lvm.models import HistoryEntry
+        from lvm.models import HistoryEntry
         entry = HistoryEntry(version="v002", source="", set_by="t", set_at="")
         with patch.object(self.win, "_process_deferred_or_refresh"), \
              patch.object(self.win, "_maybe_auto_sync_nle"):
@@ -741,7 +744,7 @@ class TestAutoPromoteNotifications(_MainWindowTestBase):
         self.notify.assert_not_called()
 
     def test_option_round_trip(self):
-        from src.lvm.models import ProjectConfig
+        from lvm.models import ProjectConfig
         cfg = ProjectConfig(project_name="P", auto_promote_notifications="problems")
         d = cfg.to_dict()
         self.assertEqual(ProjectConfig.from_dict(d).auto_promote_notifications, "problems")
@@ -762,7 +765,7 @@ class TestP0GuiRegressions(_MainWindowTestBase):
 
     def test_manage_groups_cancel_does_not_mutate_sources(self):
         from app.dialogs.manage_groups import ManageGroupsDialog
-        from src.lvm.models import ProjectConfig, WatchedSource
+        from lvm.models import ProjectConfig, WatchedSource
         cfg = ProjectConfig(
             project_name="G",
             groups={"Comp": {"color": "#ff0000"}},
@@ -790,7 +793,7 @@ class TestP0GuiRegressions(_MainWindowTestBase):
 
     def test_group_by_keeps_sorting_disabled_and_skips_header_selection(self):
         from PySide6.QtCore import Qt
-        from src.lvm.models import ProjectConfig, WatchedSource
+        from lvm.models import ProjectConfig, WatchedSource
         cfg = ProjectConfig(
             project_name="G",
             groups={"Alpha": {"color": "#ff0000"}, "Beta": {"color": "#00ff00"}},
@@ -812,9 +815,9 @@ class TestP0GuiRegressions(_MainWindowTestBase):
         self.assertEqual(cur.data(0, Qt.UserRole), "z_shot")
 
     def test_new_project_with_template_does_not_clobber_open_project(self):
-        from src.lvm.config import save_config, load_config
-        from src.lvm.models import ProjectConfig
-        from src.lvm.templates import save_template
+        from lvm.config import save_config, load_config
+        from lvm.models import ProjectConfig
+        from lvm.templates import save_template
 
         open_path = str(self.tmp / "open_proj.json")
         open_cfg = ProjectConfig(project_name="OpenProj", default_link_mode="copy")
@@ -852,8 +855,8 @@ class TestP0GuiRegressions(_MainWindowTestBase):
         self.assertEqual(load_config(created_path).default_link_mode, "hardlink")
 
     def test_force_promote_does_not_leak_to_next_promotion(self):
-        from src.lvm.models import VersionInfo, WatchedSource
-        from src.lvm.promoter import Promoter
+        from lvm.models import VersionInfo, WatchedSource
+        from lvm.promoter import Promoter
         src = WatchedSource(name="shot", source_dir=str(self.tmp), latest_target=str(self.tmp))
         p = Promoter(src)
         v = VersionInfo("v001", 1, str(self.tmp))

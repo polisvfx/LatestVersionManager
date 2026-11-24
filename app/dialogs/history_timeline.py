@@ -50,7 +50,7 @@ class HistoryLoadWorker(QThread):
 
     def run(self):
         try:
-            from src.lvm.history import HistoryManager
+            from lvm.history import HistoryManager
 
             def _load_one(source):
                 if not source.latest_target:

@@ -16,6 +16,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from .patterns import subprocess_kwargs as _subprocess_kwargs
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,18 +26,6 @@ def _app_dir() -> Optional[Path]:
     if getattr(sys, 'frozen', False):
         return Path(sys.executable).parent
     return None
-
-
-def _subprocess_kwargs() -> dict:
-    """Return platform-specific kwargs to suppress console windows on Windows."""
-    kwargs = {}
-    if sys.platform == "win32":
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        si.wShowWindow = subprocess.SW_HIDE
-        kwargs["startupinfo"] = si
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return kwargs
 
 
 _oiiotool_path: Optional[str] = None

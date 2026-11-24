@@ -189,6 +189,8 @@ def invalidate_resolve_running_cache() -> None:
 
 def companions_dir() -> Path:
     """Return the bundled companions/ folder path."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "companions"
     # src/lvm/nle_bridge.py -> repo root -> companions/
     return Path(__file__).resolve().parents[2] / "companions"
 

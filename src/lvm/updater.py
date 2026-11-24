@@ -427,6 +427,8 @@ def download_update(
     req = Request(release.asset_url, headers={"User-Agent": USER_AGENT})
 
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise UpdateCancelled("Download cancelled by user.")
         ctx = _get_ssl_context()
         with _open_github_url(req, timeout=60, context=ctx) as resp:
             total = int(resp.headers.get("Content-Length", release.asset_size) or 0)

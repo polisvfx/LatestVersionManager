@@ -17,17 +17,12 @@ from pathlib import Path
 from typing import Optional
 
 from .models import ProjectConfig
+from .patterns import VERSION_STRIP_RE as _VERSION_RE, DOUBLE_DIVIDER_RE as _DOUBLE_DIVIDER_RE
 from .render_check import is_container_file
 from .task_tokens import derive_source_tokens, FRAME_EXT_RE
 from .config import _expand_group_token
 
 logger = logging.getLogger(__name__)
-
-# Strip versioning when no rename template is set — mirrors the fallback
-# branch in promoter._remap_filename so conflict detection sees the same
-# output names that promotion would actually write.
-_VERSION_RE = re.compile(r"[._\-]v\d+", re.IGNORECASE)
-_DOUBLE_DIVIDER_RE = re.compile(r"([_.\-]){2,}")
 
 
 def _resolved(path: str) -> str:
