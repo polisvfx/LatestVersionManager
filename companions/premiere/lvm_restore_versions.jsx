@@ -158,23 +158,42 @@
         return sourceBase;
     }
 
-    function matchSidecarToClip(clipPath) {
-        var pieces = dirAndBaseFromPath(clipPath);
-        if (!pieces.dir || !pieces.base) return null;
-
-        var sidecars = listSidecars(pieces.dir);
+    function loadDirSidecars(dir, sidecarCache) {
+        if (sidecarCache && sidecarCache.hasOwnProperty(dir)) {
+            return sidecarCache[dir];
+        }
+        var sidecars = listSidecars(dir);
         sidecars.sort();
+        var parsed = [];
         for (var i = 0; i < sidecars.length; i++) {
             var data = readSidecar(sidecars[i]);
             if (!data) continue;
             var cur = data.current;
             if (!cur) continue;
             var stem = cur.latest_basename || deriveStemFromSource(cur.source || "");
-            if (stemMatchesClip(stem, pieces.base)) {
-                return { sidecar: data, path: sidecars[i] };
+            if (stem) {
+                parsed.push({ stem: stem, sidecar: data, path: sidecars[i] });
             }
         }
-        return null;
+        if (sidecarCache) sidecarCache[dir] = parsed;
+        return parsed;
+    }
+
+    function matchSidecarToClip(clipPath, sidecarCache) {
+        var pieces = dirAndBaseFromPath(clipPath);
+        if (!pieces.dir || !pieces.base) return null;
+
+        var parsed = loadDirSidecars(pieces.dir, sidecarCache);
+        var bestLen = -1;
+        var bestMatch = null;
+        for (var i = 0; i < parsed.length; i++) {
+            var entry = parsed[i];
+            if (stemMatchesClip(entry.stem, pieces.base) && entry.stem.length > bestLen) {
+                bestLen = entry.stem.length;
+                bestMatch = { sidecar: entry.sidecar, path: entry.path };
+            }
+        }
+        return bestMatch;
     }
 
     // ----- project tree walk -----
@@ -299,12 +318,13 @@
     var log = [];
     var renames = {};
 
+    var sidecarCache = {};
     walkProjectItems(app.project.rootItem, function (clip) {
         var clipPath = "";
         try { clipPath = clip.getMediaPath() || ""; } catch (e) { clipPath = ""; }
         if (!clipPath) { skippedMatch++; return; }
 
-        var match = matchSidecarToClip(clipPath);
+        var match = matchSidecarToClip(clipPath, sidecarCache);
         if (!match) { skippedMatch++; return; }
 
         var clipBase = dirAndBaseFromPath(clipPath).base;

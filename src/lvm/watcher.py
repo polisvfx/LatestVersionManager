@@ -96,28 +96,36 @@ class SourceWatcher(QObject):
         """
         self.stop()
 
-        self._observer = Observer()
+        self._observer = None
         self._poller = DirectoryPoller(self._on_change, interval=poll_interval)
-        # Start the observer *before* scheduling: on a running observer each
-        # schedule() opens its directory right away and raises on its own,
-        # whereas one missing directory makes Observer.start() fail for all.
-        self._observer.start()
 
+        native_sources = []
         for source in sources:
             if not source.source_dir:
                 continue
             path = str(source.source_dir)
             self._source_dirs[source.name] = path
             backend = choose_watch_backend(path, mode)
-            if backend == NATIVE and self._schedule_native(source):
-                continue
-            self._poller.add(source.name, path)
+            if backend == NATIVE:
+                native_sources.append(source)
+            else:
+                self._poller.add(source.name, path)
+
+        if native_sources:
+            self._observer = Observer()
+            # Start the observer *before* scheduling: on a running observer each
+            # schedule() opens its directory right away and raises on its own.
+            self._observer.start()
+            for source in native_sources:
+                if not self._schedule_native(source):
+                    self._poller.add(source.name, str(source.source_dir))
+            if not self._native_watches:
+                self._observer.stop()
+                self._observer.join(timeout=5)
+                self._observer = None
 
         native = len(self._native_watches)
         polled = len(self._poller.keys)
-        if not native:
-            self._observer.stop()
-            self._observer.join(timeout=5)
         if polled:
             self._poller.start()
         self._running = bool(native or polled)
@@ -144,6 +152,7 @@ class SourceWatcher(QObject):
         """Stop all watchers."""
         self._running = False
         self._health_timer.stop()
+        self._debounce_timer.stop()
         if self._observer and self._observer.is_alive():
             self._observer.stop()
             self._observer.join(timeout=5)
@@ -236,13 +245,18 @@ class SourceWatcher(QObject):
     @Slot(str)
     def _on_change_main_thread(self, source_name: str):
         """Runs on the main thread — debounces before emitting signal."""
+        if not self._running:
+            return
         self._pending_sources.add(source_name)
         # Restart the debounce timer
         self._debounce_timer.start()
 
     def _flush_pending(self):
         """Emit signals for all sources that changed during the debounce window."""
-        for name in self._pending_sources:
+        if not self._running:
+            self._pending_sources.clear()
+            return
+        for name in list(self._pending_sources):
             self.source_changed.emit(name)
         self._pending_sources.clear()
 

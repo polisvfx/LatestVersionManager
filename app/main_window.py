@@ -51,6 +51,9 @@ class MainWindow(QMainWindow):
     # Emitted from the _io_executor thread when a background project save
     # finishes: ok, config_path, project_dir (ok) or error message (failed).
     _save_finished = Signal(bool, str, str)
+    # Emitted from the _io_executor thread when NLE availability / running
+    # probes complete: resolve_available, resolve_alive, premiere_alive, premiere_install_dir.
+    _nle_probe_finished = Signal(bool, bool, bool, object)
 
     def __init__(self):
         super().__init__()
@@ -113,7 +116,11 @@ class MainWindow(QMainWindow):
         self._io_executor = ThreadPoolExecutor(max_workers=1)
         self._dirty = False  # True when config has unsaved changes
         self._log_autoshow_cooldown_until = 0.0  # error-burst cooldown
+        self._nle_probe_pending = False
+        self._closing = False
+        self._batch_saved_source_name: str = None
         self._save_finished.connect(self._on_save_finished)
+        self._nle_probe_finished.connect(self._apply_sync_names_state)
 
         # File watcher
         self.watcher = SourceWatcher(self)
@@ -215,6 +222,7 @@ class MainWindow(QMainWindow):
 
         # Main splitter: left (sources) | right (versions + history)
         splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter = splitter
 
         # --- Left: Source list ---
         left_panel = QWidget()
@@ -507,7 +515,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setTextVisible(True)
         self.btn_cancel_promote = QPushButton("Cancel")
         self.btn_cancel_promote.setVisible(False)
-        self.btn_cancel_promote.setFixedWidth(70)
+        self.btn_cancel_promote.setMinimumWidth(70)
         self.btn_cancel_promote.clicked.connect(self._cancel_promotion)
 
         progress_row = QHBoxLayout()
@@ -670,6 +678,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         recent_menu = file_menu.addMenu("Recent Projects")
+        self._recent_menu = recent_menu
         self._populate_recent_menu(recent_menu)
 
         file_menu.addSeparator()
@@ -731,7 +740,7 @@ class MainWindow(QMainWindow):
 
         refresh_action = QAction("&Refresh All", self)
         refresh_action.setShortcut(QKeySequence("Ctrl+R"))
-        refresh_action.triggered.connect(self._refresh_all)
+        refresh_action.triggered.connect(lambda _=False: self._refresh_all(full=True))
         source_menu.addAction(refresh_action)
 
         source_menu.addSeparator()
@@ -759,10 +768,10 @@ class MainWindow(QMainWindow):
 
     def _build_shortcuts(self):
         """Register keyboard shortcuts (Feature #10)."""
-        # F5: Refresh all
+        # F5: Refresh all (full rescan, matching toolbar Refresh All and Ctrl+R)
         f5 = QAction(self)
         f5.setShortcut(QKeySequence("F5"))
-        f5.triggered.connect(self._refresh_all)
+        f5.triggered.connect(lambda _=False: self._refresh_all(full=True))
         self.addAction(f5)
 
         # Ctrl+F: Focus search
@@ -777,11 +786,12 @@ class MainWindow(QMainWindow):
         esc.triggered.connect(self._cancel_promotion)
         self.addAction(esc)
 
-        # Delete: Remove selected sources (only when source_list focused)
-        delete_sc = QAction(self)
-        delete_sc.setShortcut(QKeySequence(Qt.Key_Delete))
-        delete_sc.triggered.connect(self._delete_selected_sources)
-        self.addAction(delete_sc)
+        # Delete: Remove selected sources — scoped to source_list so it never
+        # swallows Delete keystrokes inside source_search or other inputs.
+        delete_sc = QShortcut(QKeySequence(Qt.Key_Delete), self.source_list)
+        delete_sc.setContext(Qt.WidgetWithChildrenShortcut)
+        delete_sc.activated.connect(self._delete_selected_sources)
+        self._delete_shortcut = delete_sc
 
         # Ctrl+D: Deselect all sources
         deselect_sc = QAction(self)
@@ -813,6 +823,8 @@ class MainWindow(QMainWindow):
             return
         self.config.watched_sources = [s for s in self.config.watched_sources if s.name not in names]
         self._mark_dirty()
+        if getattr(self, "watcher", None) and self.watcher.is_running:
+            self._start_watcher()
         if self.config_path:
             self._save_project()
         self._reload_ui()
@@ -825,15 +837,25 @@ class MainWindow(QMainWindow):
         dlg = AboutDialog(self)
         dlg.exec()
 
-    def _populate_recent_menu(self, menu: QMenu):
+    def _get_recent_projects(self) -> list[str]:
+        """Read recent_projects from QSettings, handling 1-item str coercion."""
         recents = self._settings.value("recent_projects", [])
+        if isinstance(recents, str):
+            return [recents] if recents else []
+        if isinstance(recents, list):
+            return [str(p) for p in recents if p]
+        return []
+
+    def _populate_recent_menu(self, menu: QMenu):
+        menu.clear()
+        recents = self._get_recent_projects()
         if not recents:
             action = menu.addAction("(No recent projects)")
             action.setEnabled(False)
             return
         for path in recents[:10]:
             action = menu.addAction(path)
-            action.triggered.connect(lambda checked, p=path: self._load_project(p))
+            action.triggered.connect(lambda checked=False, p=path: self._load_project(p))
 
     # --- Project management ---
 
@@ -1093,13 +1115,13 @@ class MainWindow(QMainWindow):
             self._add_to_recent(path)
 
     def _add_to_recent(self, path: str):
-        recents = self._settings.value("recent_projects", [])
-        if not isinstance(recents, list):
-            recents = []
+        recents = self._get_recent_projects()
         if path in recents:
             recents.remove(path)
         recents.insert(0, path)
         self._settings.setValue("recent_projects", recents[:10])
+        if hasattr(self, "_recent_menu") and self._recent_menu is not None:
+            self._populate_recent_menu(self._recent_menu)
 
     # --- Hook trust management ---
 
@@ -1189,6 +1211,8 @@ class MainWindow(QMainWindow):
 
     def _on_sources_added_from_discover(self, count: int):
         """Called when DiscoveryDialog adds sources to the project."""
+        if self.watcher.is_running:
+            self._start_watcher()
         if self.config_path:
             self._save_project()
         self._reload_ui()
@@ -1242,6 +1266,8 @@ class MainWindow(QMainWindow):
         from src.lvm.config import _migrate_shared_history_filenames
         _migrate_shared_history_filenames(self.config)
         self._mark_dirty()
+        if getattr(self, "watcher", None) and self.watcher.is_running:
+            self._start_watcher()
         if self.config_path:
             self._save_project()
         self._reload_ui()
@@ -1320,7 +1346,14 @@ class MainWindow(QMainWindow):
         if original.added_at and not draft.added_at:
             draft.added_at = original.added_at
         self.config.watched_sources[index] = draft
+        apply_project_defaults(self.config)
+        from src.lvm.config import _migrate_shared_history_filenames
+        _migrate_shared_history_filenames(self.config)
+        # Trust hooks explicitly saved by the user on this source
+        self._trust_hook_commands(draft.pre_promote_cmd, draft.post_promote_cmd)
         self._mark_dirty()
+        if getattr(self, "watcher", None) and self.watcher.is_running:
+            self._start_watcher()
         if self.config_path:
             self._save_project()
         self._reload_ui()
@@ -1409,6 +1442,8 @@ class MainWindow(QMainWindow):
             for i in sorted(indices, reverse=True):
                 self.config.watched_sources.pop(i)
             self._mark_dirty()
+            if self.watcher.is_running:
+                self._start_watcher()
             if self.config_path:
                 self._save_project()
             self._reload_ui()
@@ -2100,16 +2135,22 @@ class MainWindow(QMainWindow):
 
     def _batch_promote_next(self):
         """Promote the next source in the batch list."""
+        if self._batch_promote_index == 0 and self._batch_promote_list:
+            self._batch_saved_source_name = (
+                self._current_source.name if self._current_source else None
+            )
         if self._batch_promote_index >= len(self._batch_promote_list):
             # All done — rescan only the sources that were promoted
             batch = self._batch_promote_list
             promoted_names = [s.name for s, _v in batch]
             count = len(batch)
+            saved_name = self._batch_saved_source_name
+            self._batch_saved_source_name = None
             self._batch_promote_list = []
             self._batch_keep_layers = {}
             for name in promoted_names:
                 self._versions_cache.pop(name, None)
-            self._process_deferred_or_refresh(promoted_names)
+            self._process_deferred_or_refresh(promoted_names, select_source=saved_name)
             self.statusBar().showMessage(f"Batch promotion complete: {count} source(s)")
             self._maybe_auto_sync_nle()
             return
@@ -2332,10 +2373,11 @@ class MainWindow(QMainWindow):
         config_path = self.config_path
         sources = list(self.config.watched_sources)
         cache = dict(self._versions_cache)
+        task_tokens = list(self.config.task_tokens)
 
         def _write():
             try:
-                save_cache(config_path, sources, cache)
+                save_cache(config_path, sources, cache, task_tokens=task_tokens)
             except Exception as e:
                 logging.getLogger(__name__).warning("Failed to save scan cache: %s", e)
 
@@ -2767,6 +2809,7 @@ class MainWindow(QMainWindow):
         self._on_version_selected()
         self._on_history_selected()
         self._on_source_selection_changed()
+        self._save_scan_cache()
 
         self._check_reload_pending()
 
@@ -3028,23 +3071,53 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Report exported to: {filepath}")
 
     def _refresh_sync_names_state(self):
-        """Refresh the sync menu and status-bar buttons based on what's installed."""
+        """Probe NLE availability off the GUI thread and update buttons on completion."""
+        if self._closing or self._nle_probe_pending:
+            return
+        self._nle_probe_pending = True
+
+        def _probe():
+            try:
+                from src.lvm.nle_bridge import (
+                    is_resolve_external_available,
+                    is_resolve_running,
+                    is_premiere_panel_alive,
+                    premiere_panel_install_dir,
+                )
+                resolve_available = is_resolve_external_available()
+                resolve_alive = resolve_available and is_resolve_running()
+                premiere_alive = is_premiere_panel_alive()
+                premiere_install_dir = premiere_panel_install_dir()
+            except Exception:
+                resolve_available = False
+                resolve_alive = False
+                premiere_alive = False
+                premiere_install_dir = None
+            if not self._closing:
+                try:
+                    self._nle_probe_finished.emit(
+                        resolve_available, resolve_alive,
+                        premiere_alive, premiere_install_dir,
+                    )
+                except RuntimeError:
+                    pass
+
         try:
-            from src.lvm.nle_bridge import (
-                is_resolve_external_available,
-                is_resolve_running,
-                is_premiere_panel_alive,
-                premiere_panel_install_dir,
-            )
-            resolve_available = is_resolve_external_available()
-            resolve_alive = resolve_available and is_resolve_running()
-            premiere_alive = is_premiere_panel_alive()
-            premiere_install_dir = premiere_panel_install_dir()
-        except ImportError:
-            resolve_available = False
-            resolve_alive = False
-            premiere_alive = False
-            premiere_install_dir = None
+            self._io_executor.submit(_probe)
+        except RuntimeError:
+            self._nle_probe_pending = False
+
+    def _apply_sync_names_state(
+        self,
+        resolve_available: bool,
+        resolve_alive: bool,
+        premiere_alive: bool,
+        premiere_install_dir,
+    ):
+        """Apply NLE probe results to the sync menu and status-bar buttons."""
+        self._nle_probe_pending = False
+        if self._closing:
+            return
 
         # ----- Resolve menu + button -----
         running_resolve = (getattr(self, "_sync_names_worker", None) is not None and
@@ -3916,8 +3989,11 @@ class MainWindow(QMainWindow):
         if not scanner or not promoter:
             return
 
-        # Find the version in current scan results
-        versions = self._versions_cache.get(source.name, scanner.scan())
+        # Find the version in current scan results (avoid eager scanner.scan()
+        # when the cache already holds this source's versions).
+        versions = self._versions_cache.get(source.name)
+        if versions is None:
+            versions = scanner.scan()
         target_version = None
         for v in versions:
             if version_strings_match(v.version_string, entry.version, v.version_number):
@@ -4258,9 +4334,17 @@ class MainWindow(QMainWindow):
         else:
             if self.config:
                 self._start_watcher()
-                self.watch_toggle.setText("Stop Watching")
-                self.watch_toggle.setChecked(True)
-                self.auto_promote_cb.setEnabled(True)
+                if self.watcher.is_running:
+                    self.watch_toggle.setText("Stop Watching")
+                    self.watch_toggle.setChecked(True)
+                    self.auto_promote_cb.setEnabled(True)
+                else:
+                    self.watch_toggle.setText("Start Watching")
+                    self.watch_toggle.setChecked(False)
+                    self.auto_promote_cb.setEnabled(False)
+                    self.statusBar().showMessage("No watched sources to watch")
+            else:
+                self.watch_toggle.setChecked(False)
 
     def _start_watcher(self):
         """(Re)start the watcher with the project's sources and watch settings."""
@@ -4668,6 +4752,21 @@ class MainWindow(QMainWindow):
     # --- State persistence ---
 
     def _restore_state(self):
+        geometry = self._settings.value("window_geometry", None)
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        main_sizes = self._settings.value("main_splitter_sizes", None)
+        if main_sizes and hasattr(self, "main_splitter"):
+            try:
+                self.main_splitter.setSizes([int(x) for x in main_sizes])
+            except (TypeError, ValueError):
+                pass
+        vh_sizes = self._settings.value("ver_hist_splitter_sizes", None)
+        if vh_sizes and hasattr(self, "ver_hist_splitter"):
+            try:
+                self.ver_hist_splitter.setSizes([int(x) for x in vh_sizes])
+            except (TypeError, ValueError):
+                pass
         last_project = self._settings.value("last_project", None)
         if last_project and os.path.exists(last_project):
             self._load_project(last_project)
@@ -4725,6 +4824,12 @@ class MainWindow(QMainWindow):
                     event.ignore()
                     return
 
+        self._closing = True
+        self._settings.setValue("window_geometry", self.saveGeometry())
+        if hasattr(self, "main_splitter"):
+            self._settings.setValue("main_splitter_sizes", self.main_splitter.sizes())
+        if hasattr(self, "ver_hist_splitter"):
+            self._settings.setValue("ver_hist_splitter_sizes", self.ver_hist_splitter.sizes())
         if self.config_path:
             self._settings.setValue("last_project", self.config_path)
 

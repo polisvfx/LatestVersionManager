@@ -251,31 +251,28 @@ def find_task_tokens(name: str, task_patterns: list[str]) -> list[dict]:
     """
     results = []
     for token in task_patterns:
+        if not token or not token.strip():
+            continue
         pattern = compile_task_pattern(token)
         for m in pattern.finditer(name):
+            if m.start() == m.end():
+                continue
             results.append({
                 "token": token,
                 "match": m.group(),
                 "start": m.start(),
                 "end": m.end(),
             })
-    # Sort by start position
-    results.sort(key=lambda r: r["start"])
+    # Sort by start position (longest span first at the same start)
+    results.sort(key=lambda r: (r["start"], -r["end"]))
     return results
 
 
 def strip_task_tokens(name: str, task_patterns: list[str]) -> str:
     """Remove all task token matches (and their adjacent dividers) from a name.
 
-    Example: 'hero_comp' with task 'comp' -> 'hero'
-    The divider between the preceding segment and the task token is also removed.
-
-    Args:
-        name: The string to strip from (should already have version removed).
-        task_patterns: List of task token patterns.
-
-    Returns:
-        Name with task tokens removed. Trailing/leading dividers cleaned up.
+    Overlapping or duplicate pattern matches are coalesced before slicing so
+    patterns like ``["comp", "comp_%%%"]`` never corrupt surrounding text.
     """
     if not task_patterns:
         return name
@@ -284,16 +281,22 @@ def strip_task_tokens(name: str, task_patterns: list[str]) -> str:
     if not matches:
         return name
 
+    # Coalesce overlapping / duplicate spans before slicing in reverse order
+    merged: list[list[int]] = []
+    for m in matches:
+        s, e = m["start"], m["end"]
+        if merged and s <= merged[-1][1]:
+            if e > merged[-1][1]:
+                merged[-1][1] = e
+        else:
+            merged.append([s, e])
+
     result = name
-    # Process matches in reverse order to preserve indices
-    for m in reversed(matches):
-        start = m["start"]
-        end = m["end"]
-        # Guard against indices beyond current result length after prior removals
+    for start, end in reversed(merged):
         start = min(start, len(result))
         end = min(end, len(result))
-        # Also consume the preceding divider if present
-        if start > 0 and start <= len(result) and result[start - 1] in DIVIDERS:
+        # Consume the preceding divider if present
+        if start > 0 and result[start - 1] in DIVIDERS:
             start -= 1
         # Or if no preceding divider, consume trailing divider
         elif end < len(result) and result[end] in DIVIDERS:
@@ -324,25 +327,23 @@ def strip_version(name: str) -> str:
     return result
 
 
+_REAL_EXT_RE = re.compile(r"^\.[A-Za-z][A-Za-z0-9]{1,4}$")
+
+
 def strip_frame_and_ext(filename: str) -> str:
-    """Remove frame number and extension from a filename.
+    """Remove frame number and file extension from a filename.
 
-    Example: 'hero_comp_v003.1001.exr' -> 'hero_comp_v003'
-    Example: 'hero_comp_v003.mov'      -> 'hero_comp_v003'
-
-    Args:
-        filename: Full filename including extension.
-
-    Returns:
-        Filename stem without frame numbers or extension.
+    Preserves dot-separated version directory names like ``ep01.sh010_comp_v002``
+    whose trailing dot-segment is not a real file extension.
     """
     match = FRAME_EXT_RE.search(filename)
     if match:
         return filename[:match.start()]
 
-    # No frame number — just strip extension
     p = Path(filename)
-    return p.stem
+    if p.suffix and _REAL_EXT_RE.match(p.suffix):
+        return p.stem
+    return filename
 
 
 def derive_source_tokens(
@@ -430,6 +431,8 @@ def compute_source_name(
             depth = int(naming_rule.split(":")[1])
         except (IndexError, ValueError):
             depth = 0
+        if depth < 0:
+            depth = 0
         parts = list(p.parts)
         if depth < len(parts):
             return parts[-(depth + 1)]
@@ -492,10 +495,19 @@ def compose_nle_display_stem(
     """
     base = custom_template if custom_enabled else "{source_name}"
 
-    base = base.replace("{source_title}",    tokens.get("source_title", ""))
-    base = base.replace("{source_name}",     tokens.get("source_name", ""))
-    base = base.replace("{source_basename}", tokens.get("source_basename", ""))
-    base = base.replace("{source_fullname}", tokens.get("source_fullname", ""))
+    # Single-pass replacement so a token value containing another literal
+    # token (e.g. "{source_name}" inside source_title) is never re-expanded.
+    _token_map = {
+        "{source_title}":    tokens.get("source_title", ""),
+        "{source_name}":     tokens.get("source_name", ""),
+        "{source_basename}": tokens.get("source_basename", ""),
+        "{source_fullname}": tokens.get("source_fullname", ""),
+    }
+    base = re.sub(
+        r"\{(?:source_title|source_name|source_basename|source_fullname)\}",
+        lambda m: _token_map[m.group(0)],
+        base,
+    )
     if group_token_expander is not None:
         base = group_token_expander(base, group)
 

@@ -131,7 +131,11 @@ class VersionScanner:
                     regex_str = regex_str.replace(r"\{date\}", r"(\d{6})")
             return re.compile(regex_str)
         else:
-            return re.compile(pattern)
+            try:
+                return re.compile(pattern)
+            except re.error as e:
+                logger.warning("Invalid version_pattern regex %r: %s", pattern, e)
+                return re.compile(r"(?!)")
 
     def scan(self, previous: Optional[Iterable[VersionInfo]] = None) -> list[VersionInfo]:
         """
@@ -198,7 +202,10 @@ class VersionScanner:
                 prev = reusable.get(os.path.normcase(os.path.normpath(entry.path)))
                 if (prev is not None and token and prev.scan_token == token
                         and entry.path != newest_dir):
-                    versions.append(dataclasses.replace(prev))
+                    versions.append(dataclasses.replace(
+                        prev,
+                        sub_sequences=[dict(s) for s in prev.sub_sequences],
+                    ))
                     self.last_reused += 1
                     continue
                 version_info = self._scan_version_folder(Path(entry.path))
@@ -332,8 +339,11 @@ class VersionScanner:
 
         else:
             # Version-only or raw regex (existing behavior)
-            raw = match.group(1)
-            version_num = int(raw)
+            try:
+                raw = match.group(1)
+                version_num = int(raw)
+            except (IndexError, ValueError):
+                return None
             version_string = f"v{version_num:0{len(raw)}d}"
             return version_string, version_num, None, 0
 
@@ -392,7 +402,7 @@ class VersionScanner:
                                     total_size += entry.stat(follow_symlinks=False).st_size
                                 except OSError:
                                     pass
-        except PermissionError:
+        except (PermissionError, OSError):
             pass
         files.sort()
         return files, total_size
@@ -479,12 +489,29 @@ def _group_files_by_sequence(
     for f in files:
         match = frame_re.search(f.name)
         if match:
-            # Include everything up to and including the separator before frame digits
+            # Include prefix + lowercase extension so mixed extensions in the
+            # same folder (e.g. .exr + .jpg) never mask missing frames.
             prefix = f.name[:match.start() + 1]
+            ext = f.suffix.lower()
+            key = f"{prefix}|{ext}" if ext else prefix
         else:
-            prefix = ""
-        groups.setdefault(prefix, []).append(f)
-    return groups
+            key = ""
+        groups.setdefault(key, []).append(f)
+    # Strip internal "|ext" suffix when all groups have distinct prefixes so
+    # callers reading layer prefix names keep the exact same clean prefix.
+    prefix_counts: dict[str, int] = {}
+    for k in groups:
+        p = k.rsplit("|", 1)[0] if "|" in k else k
+        prefix_counts[p] = prefix_counts.get(p, 0) + 1
+    cleaned: dict[str, list[Path]] = {}
+    for k, flist in groups.items():
+        if "|" in k:
+            p, ext = k.rsplit("|", 1)
+            out_key = p if prefix_counts[p] == 1 else f"{p} ({ext})"
+        else:
+            out_key = k
+        cleaned[out_key] = flist
+    return cleaned
 
 
 def _detect_frame_range_for_group(
@@ -522,26 +549,52 @@ def _detect_frame_range_for_group(
     # Determine padding: use max digit width if any frame has leading zeros
     padding = max_digit_width if has_leading_zeros else 0
 
-    frames.sort()
-    first, last = frames[0], frames[-1]
+    unique_frames = sorted(set(frames))
+    first, last = unique_frames[0], unique_frames[-1]
     expected = last - first + 1
-    actual = len(frames)
+    actual = len(unique_frames)
 
     if padding > 0:
         range_str = f"{str(first).zfill(padding)}-{str(last).zfill(padding)}"
     else:
         range_str = f"{first}-{last}"
     if actual != expected:
-        # Compute which frames are missing for diagnostic detail
-        frame_set = set(frames)
-        missing = sorted(set(range(first, last + 1)) - frame_set)
-        missing_str = _format_frame_gaps(missing, padding, max_items=10)
+        # O(N) pairwise gap calculation — avoids OOM on huge gaps like 0001..20260401
+        missing_str = _format_frame_gap_intervals(unique_frames, padding, max_items=10)
         range_str += f" ({actual}/{expected} frames, gaps detected"
         if missing_str:
             range_str += f"; missing: {missing_str}"
         range_str += ")"
 
     return range_str, actual
+
+
+def _format_frame_gap_intervals(
+    sorted_unique_frames: list[int], padding: int = 0, max_items: int = 10
+) -> str:
+    """Format missing intervals directly from sorted unique frame numbers in O(N)."""
+    def _fmt(n: int) -> str:
+        return str(n).zfill(padding) if padding > 0 else str(n)
+
+    gap_parts: list[str] = []
+    extra = 0
+    for i in range(len(sorted_unique_frames) - 1):
+        a = sorted_unique_frames[i]
+        b = sorted_unique_frames[i + 1]
+        if b > a + 1:
+            gap_start = a + 1
+            gap_end = b - 1
+            if len(gap_parts) < max_items:
+                if gap_start == gap_end:
+                    gap_parts.append(_fmt(gap_start))
+                else:
+                    gap_parts.append(f"{_fmt(gap_start)}-{_fmt(gap_end)}")
+            else:
+                extra += 1
+    result = ", ".join(gap_parts)
+    if extra > 0:
+        result += f", ... ({extra} more)"
+    return result
 
 
 def _format_frame_gaps(missing: list[int], padding: int = 0, max_items: int = 10) -> str:
@@ -610,9 +663,10 @@ def detect_sequence_from_file(
     base_prefix = filepath.name[:frame_start + 1]  # include separator
     ext = filepath.suffix.lower()
 
-    # Build a regex to match siblings: same prefix, frame digits, same extension
+    # Build a regex to match siblings: same prefix, frame digits (any width so
+    # unpadded sequences crossing 999 -> 1000 stay intact), same extension
     sibling_re = re.compile(
-        re.escape(base_prefix) + r"\d{" + str(len(match.group(1))) + r"}" + re.escape(ext) + "$",
+        re.escape(base_prefix) + r"\d+" + re.escape(ext) + "$",
         re.IGNORECASE,
     )
 

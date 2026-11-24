@@ -30,38 +30,38 @@ CONFIG_VERSION = 1
 DEFAULT_FILE_EXTENSIONS = [".exr", ".dpx", ".tiff", ".tif", ".png", ".jpg", ".mov", ".mxf", ".mp4"]
 
 
-_VERSION_DIGITS_RE = re.compile(r"\d+")
+_PURE_VERSION_RE = re.compile(r"^[vV]?(\d+)$")
+_DATE_AND_VERSION_RE = re.compile(r"^(.+?[\s_.\-])[vV](\d+)$")
 
 
 def version_strings_match(version_string: Optional[str], other: Optional[str],
                           version_number: Optional[int] = None) -> bool:
     """Compare two version display strings tolerantly across padding changes.
 
-    Two strings match when their leading numeric digit runs decode to the
-    same integer (so "v001", "v01", and "v1" are equivalent). When *other*
-    has no digits (e.g. a date-only version like "2024-02-26"), falls back
-    to exact string equality.
-
-    If *version_number* is provided, it is used in place of parsing
-    *version_string* — useful when matching a VersionInfo against a stored
-    history version recorded with different padding.
+    Pure version tokens (``v001``, ``v01``, ``1``) and date+version strings
+    with identical date prefixes (``2024-02-26 v001`` vs ``2024-02-26 v01``)
+    match numerically. Date-only strings (``2024-02-26`` vs ``2024-12-31``)
+    require exact equality so different dates in the same year never collide.
     """
     if version_string is None or other is None:
         return version_string == other
     if version_string == other:
         return True
-    a_match = _VERSION_DIGITS_RE.search(version_string) if version_number is None else None
-    b_match = _VERSION_DIGITS_RE.search(other)
-    if b_match is None:
-        # Date-only or non-numeric: require exact string equality.
+
+    ma = _PURE_VERSION_RE.match(version_string)
+    mb = _PURE_VERSION_RE.match(other)
+    if ma is not None and mb is not None:
+        a_num = version_number if version_number is not None else int(ma.group(1))
+        return a_num == int(mb.group(1))
+
+    da = _DATE_AND_VERSION_RE.match(version_string)
+    db = _DATE_AND_VERSION_RE.match(other)
+    if da is not None and db is not None:
+        if da.group(1) == db.group(1):
+            return int(da.group(2)) == int(db.group(2))
         return False
-    if version_number is not None:
-        a_num = version_number
-    elif a_match is not None:
-        a_num = int(a_match.group(0))
-    else:
-        return False
-    return a_num == int(b_match.group(0))
+
+    return False
 
 
 def has_media_extension(filename: str, valid_extensions: set) -> bool:
@@ -290,12 +290,31 @@ class HistoryEntry:
             # Single versioned file (e.g. hero_comp_v003.mov)
             file_type = source_p.suffix.lower()
         elif source_p.is_dir():
-            # Version directory — infer from first matching file
+            # Version directory — infer from first non-hidden media file via os.scandir
+            known_media = set(DEFAULT_FILE_EXTENSIONS) | {".avi", ".jpeg", ".wav", ".aiff", ".mkv"}
+            fallback_ext = ""
             try:
-                for entry in sorted(source_p.iterdir()):
-                    if entry.is_file() and entry.suffix:
-                        file_type = entry.suffix.lower()
-                        break
+                with os.scandir(source_p) as it:
+                    entries = sorted(
+                        (e for e in it if not e.name.startswith(".")),
+                        key=lambda e: e.name,
+                    )
+                for entry in entries:
+                    try:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    dot = entry.name.rfind(".")
+                    if dot > 0:
+                        ext = entry.name[dot:].lower()
+                        if ext in known_media:
+                            file_type = ext
+                            break
+                        if not fallback_ext:
+                            fallback_ext = ext
+                if not file_type:
+                    file_type = fallback_ext
             except OSError:
                 pass
         return cls(
@@ -600,7 +619,7 @@ class ProjectConfig:
             d["default_version_pattern"] = self.default_version_pattern
         if self.default_file_extensions != DEFAULT_FILE_EXTENSIONS:
             d["default_file_extensions"] = self.default_file_extensions
-        if self.default_file_rename_template and self.default_file_rename_template != "{source_basename}_latest":
+        if self.default_file_rename_template != "{source_basename}_latest":
             d["default_file_rename_template"] = self.default_file_rename_template
         if self.default_link_mode != "copy":
             d["default_link_mode"] = self.default_link_mode
@@ -665,37 +684,59 @@ class ProjectConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ProjectConfig":
-        sources = [WatchedSource.from_dict(s) for s in data.get("watched_sources", [])]
+        if not isinstance(data, dict):
+            data = {}
+        raw_sources = data.get("watched_sources")
+        sources = [
+            WatchedSource.from_dict(s)
+            for s in (raw_sources if isinstance(raw_sources, list) else [])
+            if isinstance(s, dict)
+        ]
+        raw_exts = data.get("default_file_extensions")
+        raw_cols = data.get("source_list_columns")
+        raw_groups = data.get("groups")
+        tc_mode = data.get("timecode_mode", "lazy")
+        if tc_mode not in ("always", "lazy", "never"):
+            tc_mode = "lazy"
+        link_mode = data.get(
+            "default_link_mode",
+            "symlink" if data.get("default_use_symlinks", False) else "copy",
+        )
+        if link_mode not in ("copy", "symlink", "hardlink"):
+            link_mode = "copy"
         return cls(
-            project_name=data.get("project_name", "Untitled"),
+            project_name=data.get("project_name") or "Untitled",
             watched_sources=sources,
-            base_path_template=data.get("base_path_template", ""),
-            latest_path_template=data.get("latest_path_template", ""),
-            default_version_pattern=data.get("default_version_pattern", "_v{version}"),
-            default_file_extensions=data.get("default_file_extensions", list(DEFAULT_FILE_EXTENSIONS)),
-            default_file_rename_template=data.get("default_file_rename_template", "{source_basename}_latest"),
-            default_link_mode=data.get("default_link_mode",
-                                        "symlink" if data.get("default_use_symlinks", False) else "copy"),
-            default_date_format=data.get("default_date_format", ""),
-            name_whitelist=data.get("name_whitelist", []),
-            name_blacklist=data.get("name_blacklist", []),
-            groups=data.get("groups", {}),
-            task_tokens=data.get("task_tokens", []),
-            default_naming_rule=data.get("default_naming_rule", ""),
-            naming_configured=data.get("naming_configured", False),
-            timecode_mode=data.get("timecode_mode", "lazy"),
-            discovery_search_history=data.get("discovery_search_history", []),
-            block_incomplete_sequences=data.get("block_incomplete_sequences", True),
-            pre_promote_cmd=data.get("pre_promote_cmd", ""),
-            post_promote_cmd=data.get("post_promote_cmd", ""),
-            project_root=data.get("project_root", ""),
-            skip_resolve=data.get("skip_resolve", True),
+            base_path_template=data.get("base_path_template") or "",
+            latest_path_template=data.get("latest_path_template") or "",
+            default_version_pattern=data.get("default_version_pattern") or "_v{version}",
+            default_file_extensions=list(raw_exts) if isinstance(raw_exts, list) else list(DEFAULT_FILE_EXTENSIONS),
+            default_file_rename_template=(
+                data["default_file_rename_template"]
+                if "default_file_rename_template" in data and data["default_file_rename_template"] is not None
+                else "{source_basename}_latest"
+            ),
+            default_link_mode=link_mode,
+            default_date_format=data.get("default_date_format") or "",
+            name_whitelist=list(data.get("name_whitelist") or []),
+            name_blacklist=list(data.get("name_blacklist") or []),
+            groups=dict(raw_groups) if isinstance(raw_groups, dict) else {},
+            task_tokens=list(data.get("task_tokens") or []),
+            default_naming_rule=data.get("default_naming_rule") or "",
+            naming_configured=bool(data.get("naming_configured", False)),
+            timecode_mode=tc_mode,
+            discovery_search_history=list(data.get("discovery_search_history") or []),
+            block_incomplete_sequences=bool(data.get("block_incomplete_sequences", True)),
+            pre_promote_cmd=data.get("pre_promote_cmd") or "",
+            post_promote_cmd=data.get("post_promote_cmd") or "",
+            project_root=data.get("project_root") or "",
+            skip_resolve=bool(data.get("skip_resolve", True)),
             watch_mode=data.get("watch_mode", "auto")
             if data.get("watch_mode") in ("auto", "native", "polling") else "auto",
             watch_poll_interval=_positive_float(data.get("watch_poll_interval"), 10.0),
             source_list_columns=[
                 "layers" if c == "layer_count" else c
-                for c in data.get("source_list_columns", ["version", "status"])
+                for c in (raw_cols if isinstance(raw_cols, list) else ["version", "status"])
             ],
             nle_auto_sync_resolve=data.get("nle_auto_sync_resolve", False),
             nle_auto_sync_premiere=data.get("nle_auto_sync_premiere", False),

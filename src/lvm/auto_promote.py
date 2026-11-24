@@ -190,6 +190,8 @@ def _evaluate(name, promoter, scanner, settle_seconds, previous, now,
 
     prev_range = normalize_frame_range(current.frame_range)
     new_range = normalize_frame_range(highest.frame_range)
+    prev_bounds = _parse_range(prev_range)
+    new_bounds = _parse_range(new_range)
     waiting_file = ""
     if previous is None or previous.key != settle.key:
         incomplete = (f"waiting for files to settle "
@@ -199,6 +201,9 @@ def _evaluate(name, promoter, scanner, settle_seconds, previous, now,
         incomplete = f"frames missing ({highest.frame_range})"
     elif _is_strict_subrange(new_range, prev_range):
         incomplete = f"frames {new_range} of {prev_range} rendered so far"
+    elif prev_bounds is not None and new_range is None and highest.file_count == 1:
+        # Only frame 1 of a multi-frame sequence has landed so far
+        incomplete = f"only 1 frame of {prev_range} rendered so far"
     else:
         waiting_file = promoter.newest_frames_open_for_writing(highest) or ""
         incomplete = f"{waiting_file} is still being written" if waiting_file else ""
@@ -210,7 +215,14 @@ def _evaluate(name, promoter, scanner, settle_seconds, previous, now,
         return done(WAIT_RENDER, incomplete, waiting_file=waiting_file)
 
     # -- 5.-8. --------------------------------------------------------
-    if prev_range != new_range:
+    # Compare parsed (start, end) numerically so padding width changes
+    # ("01001-01120" vs "1001-1120") don't falsely skip auto-promote.
+    ranges_differ = (
+        prev_bounds != new_bounds
+        if (prev_bounds is not None and new_bounds is not None)
+        else prev_range != new_range
+    )
+    if ranges_differ:
         return done(SKIP, f"frame range changed ({prev_range} → {new_range})")
 
     obsolete = promoter.detect_obsolete_layers(highest)
@@ -218,10 +230,13 @@ def _evaluate(name, promoter, scanner, settle_seconds, previous, now,
         layer_names = ", ".join(layer["name"] for layer in obsolete)
         return done(SKIP, f"obsolete layers in target ({layer_names})")
 
-    # Don't publish a QuickTime/MXF the renderer is still writing.
+    # Don't publish a QuickTime/MXF the renderer is still writing (bounded by max_wait_seconds).
     unfinished = promoter.find_unfinished_renders(highest, settle_seconds=settle_seconds)
     if unfinished:
         path, why = unfinished[0]
+        waited = now - settle.first_seen
+        if waited > max_wait_seconds:
+            return done(SKIP, f"stopped waiting after {_format_duration(waited)}: {path.name} ({why})")
         return done(WAIT_RENDER, why, waiting_file=path.name)
 
     available, reason = check_link_mode_available(promoter.source.link_mode)

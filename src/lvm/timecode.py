@@ -16,6 +16,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable, Optional
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Cached ffprobe path
 _ffprobe_path: Optional[str] = None
 _ffprobe_checked: bool = False
+_ffprobe_lock = threading.Lock()
 
 # Extensions handled by native parsers (no ffprobe needed)
 _NATIVE_TC_EXTENSIONS = {".exr", ".dpx"}
@@ -80,14 +82,17 @@ def _read_exr_timecode(file_path: Path) -> Optional[str]:
 
             tc_smpte = None
             tc_nuke_str = None
+            max_header_bytes = 65536
 
             # Parse attribute headers until empty name (null byte)
-            while True:
+            while f.tell() < max_header_bytes:
                 name = _read_null_string(f)
                 if not name:
                     break  # end of header
 
                 attr_type = _read_null_string(f)
+                if not attr_type:
+                    break
                 size_data = f.read(4)
                 if len(size_data) < 4:
                     break
@@ -102,6 +107,8 @@ def _read_exr_timecode(file_path: Path) -> Optional[str]:
                     if not _is_valid_timecode_string(tc_nuke_str):
                         tc_nuke_str = None
                 else:
+                    if size > max_header_bytes:
+                        break
                     # Skip this attribute's value
                     f.seek(size, 1)
 
@@ -117,14 +124,16 @@ def _read_exr_timecode(file_path: Path) -> Optional[str]:
         return None
 
 
-def _read_null_string(f) -> Optional[str]:
+def _read_null_string(f, max_len: int = 256) -> Optional[str]:
     """Read a null-terminated string from a file. Returns empty string for end-of-header."""
     chars = []
-    while True:
+    while len(chars) < max_len:
         c = f.read(1)
         if not c or c == b"\x00":
             break
         chars.append(c)
+    else:
+        return ""
     return b"".join(chars).decode("ascii", errors="replace") if chars else ""
 
 
@@ -132,7 +141,7 @@ def _decode_smpte_timecode(data: bytes) -> Optional[str]:
     """Decode SMPTE 12M timecode from 8 bytes (two uint32, little-endian).
 
     The first uint32 contains the time value in BCD:
-    - bits 0-3: frame units, 4-5: frame tens
+    - bits 0-3: frame units, 4-5: frame tens, bit 6: drop-frame flag
     - bits 8-11: second units, 12-14: second tens
     - bits 16-19: minute units, 20-22: minute tens
     - bits 24-27: hour units, 28-29: hour tens
@@ -141,16 +150,24 @@ def _decode_smpte_timecode(data: bytes) -> Optional[str]:
         return None
     try:
         tc_packed = struct.unpack("<I", data[:4])[0]
-        frames = (tc_packed & 0x0F) + ((tc_packed >> 4) & 0x03) * 10
-        seconds = ((tc_packed >> 8) & 0x0F) + ((tc_packed >> 12) & 0x07) * 10
-        minutes = ((tc_packed >> 16) & 0x0F) + ((tc_packed >> 20) & 0x07) * 10
-        hours = ((tc_packed >> 24) & 0x0F) + ((tc_packed >> 28) & 0x03) * 10
+        f_u, f_t = (tc_packed & 0x0F), ((tc_packed >> 4) & 0x03)
+        s_u, s_t = ((tc_packed >> 8) & 0x0F), ((tc_packed >> 12) & 0x07)
+        m_u, m_t = ((tc_packed >> 16) & 0x0F), ((tc_packed >> 20) & 0x07)
+        h_u, h_t = ((tc_packed >> 24) & 0x0F), ((tc_packed >> 28) & 0x03)
+        if f_u > 9 or s_u > 9 or m_u > 9 or h_u > 9:
+            return None
+
+        frames = f_u + f_t * 10
+        seconds = s_u + s_t * 10
+        minutes = m_u + m_t * 10
+        hours = h_u + h_t * 10
 
         # Sanity check
         if hours > 23 or minutes > 59 or seconds > 59 or frames > 59:
             return None
 
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}:{frames:02d}"
+        sep = ";" if ((tc_packed >> 6) & 0x01) else ":"
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}{sep}{frames:02d}"
     except struct.error:
         return None
 
@@ -197,20 +214,28 @@ def _read_dpx_timecode(file_path: Path) -> Optional[str]:
             if tc_packed == 0xFFFFFFFF:
                 return None
 
-            # DPX uses BCD encoding similar to SMPTE but big-endian nibble order:
-            # bits 28-31: hours tens, 24-27: hours units
-            # bits 20-23: minutes tens, 16-19: minutes units
-            # bits 12-15: seconds tens, 8-11: seconds units
-            # bits 4-7: frames tens, 0-3: frames units
-            hours = ((tc_packed >> 28) & 0x0F) * 10 + ((tc_packed >> 24) & 0x0F)
-            minutes = ((tc_packed >> 20) & 0x0F) * 10 + ((tc_packed >> 16) & 0x0F)
-            seconds = ((tc_packed >> 12) & 0x0F) * 10 + ((tc_packed >> 8) & 0x0F)
-            frames = ((tc_packed >> 4) & 0x0F) * 10 + (tc_packed & 0x0F)
+            # DPX uses SMPTE 12M BCD encoding (upper bits of tens nibbles are flags):
+            # bits 28-29: hours tens, 24-27: hours units
+            # bits 20-22: minutes tens, 16-19: minutes units
+            # bits 12-14: seconds tens, 8-11: seconds units
+            # bits 4-5: frames tens, 0-3: frames units, bit 6: drop-frame flag
+            h_t, h_u = ((tc_packed >> 28) & 0x03), ((tc_packed >> 24) & 0x0F)
+            m_t, m_u = ((tc_packed >> 20) & 0x07), ((tc_packed >> 16) & 0x0F)
+            s_t, s_u = ((tc_packed >> 12) & 0x07), ((tc_packed >> 8) & 0x0F)
+            f_t, f_u = ((tc_packed >> 4) & 0x03), (tc_packed & 0x0F)
+            if h_u > 9 or m_u > 9 or s_u > 9 or f_u > 9:
+                return None
+
+            hours = h_t * 10 + h_u
+            minutes = m_t * 10 + m_u
+            seconds = s_t * 10 + s_u
+            frames = f_t * 10 + f_u
 
             if hours > 23 or minutes > 59 or seconds > 59 or frames > 59:
                 return None
 
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}:{frames:02d}"
+            sep = ";" if ((tc_packed >> 6) & 0x01) else ":"
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}{sep}{frames:02d}"
 
     except (OSError, struct.error) as e:
         logger.debug(f"DPX timecode read error for {file_path}: {e}")
@@ -227,13 +252,16 @@ def find_ffprobe() -> Optional[str]:
     if _ffprobe_checked:
         return _ffprobe_path
 
-    _ffprobe_checked = True
-    _ffprobe_path = shutil.which("ffprobe")
-    if _ffprobe_path is None:
-        logger.info("ffprobe not found on PATH — timecode extraction for container formats disabled")
-    else:
-        logger.debug(f"Found ffprobe: {_ffprobe_path}")
-    return _ffprobe_path
+    with _ffprobe_lock:
+        if _ffprobe_checked:
+            return _ffprobe_path
+        _ffprobe_path = shutil.which("ffprobe")
+        _ffprobe_checked = True
+        if _ffprobe_path is None:
+            logger.info("ffprobe not found on PATH — timecode extraction for container formats disabled")
+        else:
+            logger.debug(f"Found ffprobe: {_ffprobe_path}")
+        return _ffprobe_path
 
 
 def _extract_timecode_ffprobe(file_path: Path) -> Optional[str]:
@@ -252,7 +280,7 @@ def _extract_timecode_ffprobe(file_path: Path) -> Optional[str]:
                 "-v", "quiet",
                 "-print_format", "json",
                 "-show_entries", "format_tags=timecode:stream_tags=timecode",
-                str(file_path),
+                "-i", str(file_path),
             ],
             capture_output=True,
             text=True,
@@ -313,7 +341,7 @@ def extract_clip_frame_count(file_path: Path) -> int:
                 [ffprobe, "-v", "quiet", "-select_streams", "v:0",
                  *extra_args,
                  "-show_entries", "stream=nb_read_frames,nb_frames,duration,r_frame_rate",
-                 "-print_format", "json", str(file_path)],
+                 "-print_format", "json", "-i", str(file_path)],
                 capture_output=True, text=True, timeout=30,
                 **_subprocess_kwargs(),
             )

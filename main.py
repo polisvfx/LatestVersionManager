@@ -63,7 +63,13 @@ def _print_byte_progress(done, total, filename):
 def cmd_setup(args):
     """Set up a new project."""
     project_name = args.name
-    project_dir = args.dir or os.getcwd()
+    output_filename = None
+    if args.output:
+        out_dir = os.path.dirname(args.output)
+        output_filename = os.path.basename(args.output)
+        project_dir = args.dir or (out_dir if out_dir else os.getcwd())
+    else:
+        project_dir = args.dir or os.getcwd()
 
     whitelist = [kw.strip() for kw in args.whitelist.split(",")] if args.whitelist else []
     blacklist = [kw.strip() for kw in args.blacklist.split(",")] if args.blacklist else []
@@ -84,7 +90,7 @@ def cmd_setup(args):
         name_whitelist=whitelist,
         name_blacklist=blacklist,
         task_tokens=task_tokens,
-        output_filename=os.path.basename(args.output) if args.output else None,
+        output_filename=output_filename,
     )
 
     # Apply template if specified
@@ -142,8 +148,9 @@ def cmd_discover(args):
     )
 
     # Populate timecodes (lazy-loaded after discovery scan)
-    for result in results:
-        populate_timecodes(result.versions_found)
+    if not getattr(args, "no_timecode", False):
+        for result in results:
+            populate_timecodes(result.versions_found)
 
     report = format_discovery_report(results, root_dir)
     print(report)
@@ -296,9 +303,13 @@ def cmd_promote(args):
             print("Cancelled.")
             return
 
+    if getattr(args, "no_hooks", False):
+        source.pre_promote_cmd = ""
+        source.post_promote_cmd = ""
+
     # Do it
     def progress(current, total, filename):
-        pct = int(current / total * 100)
+        pct = int(current / total * 100) if total else 0
         print(f"\r  Copying: {current}/{total} ({pct}%) - {filename}", end="", flush=True)
 
     try:
@@ -396,14 +407,32 @@ def cmd_promote_all(args):
 
     # Execute promotions
     reports = []
+    failed = 0
+    no_hooks = getattr(args, "no_hooks", False)
     for i, (source, version, promoter) in enumerate(promote_list):
         print(f"\n[{i+1}/{len(promote_list)}] Promoting {source.name} -> {version.version_string}...")
+        if config.timecode_mode != "never" and not version.start_timecode:
+            populate_timecodes([version])
+        if no_hooks:
+            source.pre_promote_cmd = ""
+            source.post_promote_cmd = ""
+
+        def progress(current, total, filename):
+            pct = int(current / total * 100) if total else 0
+            print(f"\r  Copying: {current}/{total} ({pct}%) - {filename}", end="", flush=True)
+
         try:
-            entry = promoter.promote(version, force=args.force)
-            print(f"  Done.")
+            entry = promoter.promote(
+                version,
+                progress_callback=progress,
+                byte_progress_callback=_print_byte_progress,
+                force=args.force,
+            )
+            print(f"\n  Done.")
             reports.append(generate_report(entry, source))
         except Exception as e:
-            print(f"  FAILED: {e}")
+            failed += 1
+            print(f"\n  FAILED: {e}")
 
     print(f"\nBatch promotion complete: {len(reports)}/{len(promote_list)} succeeded.")
 
@@ -412,6 +441,9 @@ def cmd_promote_all(args):
         with open(args.report, "w", encoding="utf-8") as f:
             json.dump(reports, f, indent=2, ensure_ascii=False)
         print(f"Report written to: {args.report}")
+
+    if failed:
+        sys.exit(1)
 
 
 def cmd_history(args):
@@ -456,6 +488,7 @@ def cmd_verify(args):
         print("\nAll sources verified OK.")
     else:
         print("\nSome sources have issues - check above.")
+        sys.exit(1)
 
 
 def cmd_rollback(args):
@@ -493,6 +526,9 @@ def cmd_rollback(args):
         print(f"Version {previous.version} no longer exists on disk.")
         sys.exit(1)
 
+    if config.timecode_mode != "never" and not target_version.start_timecode:
+        populate_timecodes([target_version])
+
     print(f"  Source: {target_version.source_path}")
     print(f"  Files:  {target_version.file_count} ({target_version.total_size_human})")
     if target_version.frame_range:
@@ -505,11 +541,15 @@ def cmd_rollback(args):
             return
 
     def progress(current, total, filename):
-        pct = int(current / total * 100)
+        pct = int(current / total * 100) if total else 0
         print(f"\r  Copying: {current}/{total} ({pct}%) - {filename}", end="", flush=True)
 
-    entry = promoter.promote(target_version, progress_callback=progress,
-                             byte_progress_callback=_print_byte_progress)
+    try:
+        entry = promoter.promote(target_version, progress_callback=progress,
+                                 byte_progress_callback=_print_byte_progress)
+    except PromotionError as e:
+        print(f"\nRollback failed: {e}")
+        sys.exit(1)
     print(f"\n\nRollback complete. {source.name} is now at {entry.version}")
 
     if args.report:
@@ -606,8 +646,9 @@ def cmd_validate(args):
     # Check templates
     if config.latest_path_template and "{" in config.latest_path_template:
         tokens_found = re.findall(r"\{(\w+)\}", config.latest_path_template)
-        known = {"project_root", "group_root", "source_name", "source_basename",
-                 "source_fullname", "source_filename", "source_dir", "group"}
+        known = {"project_root", "group_root", "source_title", "source_name",
+                 "source_basename", "source_fullname", "source_filename",
+                 "source_dir", "group"}
         unknown = set(tokens_found) - known
         if unknown:
             warnings.append(f"Unknown tokens in latest_path_template: {unknown}")
@@ -694,6 +735,7 @@ def main():
     p_discover.add_argument("--extensions", nargs="*", help="File extensions to look for (e.g. .exr .dpx)")
     p_discover.add_argument("--whitelist", default="", help="Comma-separated keywords to include")
     p_discover.add_argument("--blacklist", default="", help="Comma-separated keywords to exclude")
+    p_discover.add_argument("--no-timecode", action="store_true", help="Skip timecode extraction")
 
     # init
     p_init = subparsers.add_parser("init", help="Create an example config file")
@@ -715,6 +757,7 @@ def main():
     p_promote.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
     p_promote.add_argument("--force", action="store_true", help="Override gap/incompleteness and still-rendering blocks")
     p_promote.add_argument("--dry-run", action="store_true", help="Preview file operations without copying")
+    p_promote.add_argument("--no-hooks", action="store_true", help="Skip pre/post promotion hooks")
     p_promote.add_argument("--report", help="Write promotion report to file (JSON)")
 
     # promote-all
@@ -723,6 +766,7 @@ def main():
     p_promote_all.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
     p_promote_all.add_argument("--force", action="store_true", help="Include sources already on highest version")
     p_promote_all.add_argument("--dry-run", action="store_true", help="Preview without promoting")
+    p_promote_all.add_argument("--no-hooks", action="store_true", help="Skip pre/post promotion hooks")
     p_promote_all.add_argument("--report", help="Write promotion report to file (JSON)")
 
     # history

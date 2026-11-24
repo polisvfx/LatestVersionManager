@@ -38,9 +38,9 @@ class BatchPromoteReviewDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        summary = QLabel(f"<b>{len(promote_list)}</b> source(s) will be promoted")
-        summary.setStyleSheet("font-size: 13pt; padding: 4px;")
-        layout.addWidget(summary)
+        self._summary_label = QLabel(f"<b>{len(promote_list)}</b> source(s) will be promoted")
+        self._summary_label.setStyleSheet("font-size: 13pt; padding: 4px;")
+        layout.addWidget(self._summary_label)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["", "Source", "Current", "Target Version", "Files", "Frame Range", "Timecode", "Status"])
@@ -167,13 +167,34 @@ class BatchPromoteReviewDialog(QDialog):
         for seq in PROMOTE_ALL_SHORTCUTS + PROMOTE_ALL_FORCE_SHORTCUTS:
             sc = QShortcut(QKeySequence(seq), self)
             sc.setAutoRepeat(False)
-            sc.activated.connect(self.accept)
+            sc.activated.connect(self._confirm_if_any_selected)
             self._confirm_shortcuts.append(sc)
+
+        self.tree.itemChanged.connect(self._update_checked_summary)
+        self._update_checked_summary()
+
+    def _confirm_if_any_selected(self):
+        if self.btn_promote.isEnabled():
+            self.accept()
+
+    def _update_checked_summary(self, *_args):
+        total = self.tree.topLevelItemCount()
+        checked = sum(
+            1 for i in range(total)
+            if self.tree.topLevelItem(i).checkState(0) == Qt.Checked
+        )
+        self._summary_label.setText(f"<b>{checked}</b> of {total} source(s) will be promoted")
+        self.btn_promote.setEnabled(checked > 0)
 
     def _set_all_checked(self, checked):
         state = Qt.Checked if checked else Qt.Unchecked
-        for i in range(self.tree.topLevelItemCount()):
-            self.tree.topLevelItem(i).setCheckState(0, state)
+        self.tree.blockSignals(True)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                self.tree.topLevelItem(i).setCheckState(0, state)
+        finally:
+            self.tree.blockSignals(False)
+        self._update_checked_summary()
 
     def get_selected(self):
         selected = []

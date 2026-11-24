@@ -108,8 +108,8 @@ APP_NAME = "Latest Version Manager"
 from src.lvm import __version__ as APP_VERSION
 
 # When frozen by PyInstaller, data files live under sys._MEIPASS.
-# When running from source, they live next to this file.
-_BASE_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
+# When running from source, resources/ lives at the repository root (parent of app/).
+_BASE_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent.parent))
 LOGO_PATH = _BASE_DIR / "resources" / "mp_logo.svg"
 
 
@@ -207,23 +207,26 @@ def _preview_sample_suffix(source) -> str:
 def reveal_in_file_browser(path: str) -> None:
     """Open the containing folder in the native file browser and select the item."""
     p = Path(path)
-    if not p.exists():
-        # Fall back to parent if the exact path doesn't exist
-        p = p.parent
+    try:
         if not p.exists():
-            return
-    target = str(p)
-    if _PLATFORM == "Windows":
-        if p.is_dir():
-            os.startfile(target)
+            # Fall back to parent if the exact path doesn't exist
+            p = p.parent
+            if not p.exists():
+                return
+        target = str(p)
+        if _PLATFORM == "Windows":
+            if p.is_dir():
+                os.startfile(target)
+            else:
+                subprocess.Popen(["explorer", f"/select,{target}"])
+        elif _PLATFORM == "Darwin":
+            subprocess.Popen(["open", "-R", target])
         else:
-            subprocess.Popen(["explorer", "/select,", target])
-    elif _PLATFORM == "Darwin":
-        subprocess.Popen(["open", "-R", target])
-    else:
-        # Linux / other — xdg-open opens the containing folder
-        folder = target if p.is_dir() else str(p.parent)
-        subprocess.Popen(["xdg-open", folder])
+            # Linux / other — xdg-open opens the containing folder
+            folder = target if p.is_dir() else str(p.parent)
+            subprocess.Popen(["xdg-open", folder])
+    except OSError as e:
+        logger.warning("Could not reveal %s in file browser: %s", path, e)
 
 
 

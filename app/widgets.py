@@ -1,6 +1,6 @@
 """Custom Qt widgets used by the GUI."""
 
-from PySide6.QtCore import QRect, QPoint
+from PySide6.QtCore import QEvent, QRect, QPoint
 from PySide6.QtWidgets import QLayout
 
 from app._common import *  # noqa: F401,F403
@@ -202,19 +202,29 @@ class TagInputWidget(QWidget):
         outer.setSpacing(4)
 
         self._tag_container = QWidget()
-        self._flow = FlowLayout(self._tag_container, spacing=4)
+        self._flow = WrapFlowLayout(self._tag_container, margin=0, spacing=4)
         outer.addWidget(self._tag_container)
 
         self._input = QLineEdit()
         self._input.setPlaceholderText(placeholder)
         self._input.textChanged.connect(self._on_text_changed)
-        self._input.returnPressed.connect(self._commit_input)
+        self._input.installEventFilter(self)
         outer.addWidget(self._input)
 
         if initial_tags:
             for tag in initial_tags:
                 self._add_tag(tag)
         self._update_container_visibility()
+
+    def eventFilter(self, watched, event):
+        # Swallow Return/Enter when committing a tag so parent QDialogs don't
+        # prematurely accept/close when the user presses Enter to add a tag.
+        if watched is self._input and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                if self._input.text().strip():
+                    self._commit_input()
+                    return True
+        return super().eventFilter(watched, event)
 
     def _on_text_changed(self, text: str):
         if "," in text:
@@ -245,17 +255,16 @@ class TagInputWidget(QWidget):
     def _remove_tag(self, text: str):
         if text in self._tags:
             self._tags.remove(text)
-        for i in range(self._tag_container.layout().count()):
-            item = self._tag_container.layout().itemAt(i)
-            if item and isinstance(item, QHBoxLayout):
-                for j in range(item.count()):
-                    sub = item.itemAt(j)
-                    if sub and sub.widget() and isinstance(sub.widget(), TagWidget):
-                        if sub.widget().text == text:
-                            self._flow.removeWidget(sub.widget())
-                            self._update_container_visibility()
-                            self.tagsChanged.emit()
-                            return
+        for i in range(self._flow.count()):
+            item = self._flow.itemAt(i)
+            widget = item.widget() if item else None
+            if isinstance(widget, TagWidget) and widget.text == text:
+                self._flow.takeAt(i)
+                widget.setParent(None)
+                widget.deleteLater()
+                self._update_container_visibility()
+                self.tagsChanged.emit()
+                return
 
     def _update_container_visibility(self):
         self._tag_container.setVisible(bool(self._tags))
