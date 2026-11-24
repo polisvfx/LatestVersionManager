@@ -647,7 +647,7 @@ class Promoter:
         seen_norm: dict[str, str] = {}
         for src_file in source_files:
             name = self._remap_filename(src_file.name)
-            norm = os.path.normcase(name)
+            norm = name.casefold()
             if norm in seen_norm:
                 raise PromotionError(
                     f"Two source files map to the same target name '{name}' "
@@ -1218,29 +1218,40 @@ class Promoter:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
 
-        existing_by_key = {os.path.normcase(n): n for n in existing}
-        staged_by_key = {os.path.normcase(n): n for n in staged}
-        retire_by_key = {os.path.normcase(f.name): f.name for f in files_to_remove}
+        # Key by casefolded filename so case-only renames (e.g. Shot.exr -> shot.exr)
+        # are matched on Windows NTFS, macOS APFS (where posixpath.normcase is a
+        # no-op!), and Linux clients writing to case-insensitive SMB/NAS shares.
+        existing_by_key: dict[str, list[str]] = {}
+        for n in sorted(existing):
+            existing_by_key.setdefault(n.casefold(), []).append(n)
+        staged_by_key = {n.casefold(): n for n in staged}
+        retire_by_key: dict[str, list[str]] = {}
+        for f in files_to_remove:
+            retire_by_key.setdefault(f.name.casefold(), []).append(f.name)
 
         backup_keys = set(retire_by_key) | (set(existing_by_key) & set(staged_by_key))
-        # Old files with no replacement (case-insensitive on Windows/macOS so a
-        # case-only rename never retires the newly placed file).
         leftovers = sorted(
-            retire_by_key[k] for k in (set(retire_by_key) - set(staged_by_key))
+            name
+            for k in (set(retire_by_key) - set(staged_by_key))
+            for name in retire_by_key[k]
         )
-        replaced_count = len(backup_keys & set(staged_by_key))
+        replaced_count = sum(
+            len(existing_by_key[k])
+            for k in (backup_keys & set(staged_by_key))
+            if k in existing_by_key
+        )
 
         lock = threading.Lock()
         moved: list[str] = []    # exact names parked in backup_dir
         placed: list[str] = []   # staged names renamed into target_dir
 
         def swap_one(name: str) -> None:
-            key = os.path.normcase(name)
+            key = name.casefold()
             if key in backup_keys and key in existing_by_key:
-                old_name = existing_by_key[key]
-                os.replace(target_dir / old_name, backup_dir / old_name)
-                with lock:
-                    moved.append(old_name)
+                for old_name in existing_by_key[key]:
+                    os.replace(target_dir / old_name, backup_dir / old_name)
+                    with lock:
+                        moved.append(old_name)
             os.replace(staging_dir / name, target_dir / name)
             with lock:
                 placed.append(name)
