@@ -319,7 +319,7 @@ jobs:
       # off to the publish job which attaches to the GitHub Release.
       - name: Upload build artifact (Windows / Linux)
         if: runner.os != 'macOS' && github.event_name != 'push'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}.zip
@@ -327,7 +327,7 @@ jobs:
 
       - name: Upload build artifact (macOS DMG)
         if: runner.os == 'macOS' && github.event_name == 'release'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}-dmg
           path: dist/${{ matrix.artifact_name }}.dmg
@@ -335,7 +335,7 @@ jobs:
 
       - name: Upload build artifact (macOS ZIP)
         if: runner.os == 'macOS' && github.event_name != 'push'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}.zip
@@ -380,7 +380,7 @@ jobs:
 
       - name: Upload Python source artifact
         if: github.event_name != 'push'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: LatestVersionManager-python
           path: dist/LatestVersionManager-python.zip
