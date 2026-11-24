@@ -480,7 +480,7 @@ class ProjectLoadWorker(QThread):
         try:
             config = load_config(self._path)
             from src.lvm.scan_cache import load_cache
-            cached = load_cache(self._path, config.watched_sources) or None
+            cached = load_cache(self._path, config.watched_sources, task_tokens=config.task_tokens) or None
             self.completed.emit(config, cached, self._path)
         except Exception as e:
             self.error.emit(str(e), self._path)

@@ -201,12 +201,10 @@ def _new_display_name(source_path, clip_basename, cur=None):
     return source_basename
 
 
-def _match_sidecar_to_clip(clip_path):
-    """Return (sidecar_dict, sidecar_path) for the clip, or (None, None)."""
-    clip_dir = os.path.dirname(clip_path)
-    clip_basename = os.path.basename(clip_path)
-    if not clip_dir or not clip_basename:
-        return None, None
+def _load_dir_sidecars(clip_dir, sidecar_cache=None):
+    """Return cached list of ``(stem, data, sc_path)`` for *clip_dir*."""
+    if sidecar_cache is not None and clip_dir in sidecar_cache:
+        return sidecar_cache[clip_dir]
 
     # pathlib.Path.glob (rather than the stdlib ``glob`` module) keeps this
     # script working in PyInstaller frozen builds where ``glob`` may not be
@@ -219,6 +217,7 @@ def _match_sidecar_to_clip(clip_path):
     except OSError:
         sc_paths = []
 
+    parsed = []
     for sc_path in sc_paths:
         data = _read_sidecar(sc_path)
         if not data:
@@ -227,9 +226,32 @@ def _match_sidecar_to_clip(clip_path):
         if not cur:
             continue
         stem = cur.get("latest_basename") or _derive_stem_from_source(cur.get("source", ""))
-        if _stem_matches_clip(stem, clip_basename):
-            return data, sc_path
-    return None, None
+        if stem:
+            parsed.append((stem, data, sc_path))
+
+    if sidecar_cache is not None:
+        sidecar_cache[clip_dir] = parsed
+    return parsed
+
+
+def _match_sidecar_to_clip(clip_path, sidecar_cache=None):
+    """Return (sidecar_dict, sidecar_path) for the clip, or (None, None).
+
+    Selects the longest matching stem so a clip like ``shot1_bg.mov`` binds
+    to stem ``shot1_bg`` instead of a shorter prefix ``shot1``.
+    """
+    clip_dir = os.path.dirname(clip_path)
+    clip_basename = os.path.basename(clip_path)
+    if not clip_dir or not clip_basename:
+        return None, None
+
+    best_len = -1
+    best_match = (None, None)
+    for stem, data, sc_path in _load_dir_sidecars(clip_dir, sidecar_cache):
+        if _stem_matches_clip(stem, clip_basename) and len(stem) > best_len:
+            best_len = len(stem)
+            best_match = (data, sc_path)
+    return best_match
 
 
 # ---- status flags ---------------------------------------------------------
@@ -524,6 +546,7 @@ def rename_clips(resolve, log=None):
     metadata_written = 0
     metadata_kept = 0
     stale_cache = {}
+    sidecar_cache = {}
     HEARTBEAT_EVERY = 250
 
     for item in _iter_clips(root, log):
@@ -544,7 +567,7 @@ def rename_clips(resolve, log=None):
             skipped_match += 1
             continue
 
-        sidecar, sc_path = _match_sidecar_to_clip(clip_path)
+        sidecar, sc_path = _match_sidecar_to_clip(clip_path, sidecar_cache)
         if not sidecar:
             skipped_match += 1
             continue

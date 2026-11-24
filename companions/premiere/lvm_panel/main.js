@@ -181,6 +181,7 @@
 
     function tryDelete(p) {
         try { fs.unlinkSync(p); } catch (e) { /* ignore */ }
+        delete seenTriggers[p];
     }
 
     function runRename(reason, done) {

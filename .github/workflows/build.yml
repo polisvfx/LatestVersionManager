@@ -114,6 +114,7 @@ jobs:
           python -m unittest tests.test_bench_tool -v
           python -m unittest tests.test_p0_regressions -v
           python -m unittest tests.test_p1_security -v
+          python -m unittest tests.test_p2_correctness -v
 
       # ── Inject release version into package ─────────────────────────────
       # When triggered by a published release (tag e.g. v1.2.3), patch

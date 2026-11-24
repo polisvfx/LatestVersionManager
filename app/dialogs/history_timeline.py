@@ -517,6 +517,9 @@ class HistoryTimelineDialog(QDialog):
         time_min = self._model["time_min"]
         time_max = self._model["time_max"]
 
+        # Hide 0-bar rows when rendering so date-filtered or unpromoted sources
+        # don't produce empty blank stripes in the Gantt chart.
+        rows = [r for r in rows if r["bars"]]
         if not rows or time_min is None or time_max is None:
             self.scene.addText("No promotion history matches the current filters.",
                                QFont()).setDefaultTextColor(QColor("#888"))
@@ -550,12 +553,17 @@ class HistoryTimelineDialog(QDialog):
         self._frozen_items.append((label_bg, 0.0))  # base x = 0
 
         # Rows
+        label_fm = QFontMetrics(QFont())
+        max_label_px = LABEL_WIDTH - 16
         for i, row in enumerate(rows):
             y = HEADER_HEIGHT + i * (ROW_HEIGHT + ROW_PADDING)
             source = row["source"]
 
-            # Row label (source name)
-            label = QGraphicsSimpleTextItem(source.name)
+            # Row label (source name) — elide long names so they never bleed past LABEL_WIDTH
+            elided_name = label_fm.elidedText(source.name, Qt.ElideMiddle, max_label_px)
+            label = QGraphicsSimpleTextItem(elided_name)
+            if elided_name != source.name:
+                label.setToolTip(source.name)
             label.setBrush(QColor("#cccccc"))
             label.setPos(8, y + 3)
             label.setZValue(21)

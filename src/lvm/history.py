@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from .fileutil import atomic_write_json
-from .models import HistoryEntry
+from .models import HistoryEntry, version_strings_match
 
 logger = logging.getLogger(__name__)
 
@@ -33,35 +33,37 @@ class HistoryManager:
         """
         self.path = Path(history_path)
         self._cache: Optional[dict] = None
-        self._cache_mtime: Optional[float] = None
+        self._cache_stat: Optional[tuple[int, int]] = None
 
-    def load(self) -> dict:
+    def load(self, bypass_cache: bool = False) -> dict:
         """
         Load the history file. Returns a dict with 'current' and 'history' keys.
         Returns empty structure if file doesn't exist.
 
-        Results are cached by file mtime to avoid redundant disk reads when
-        get_current() and get_history() are called in quick succession.
+        Results are cached by ``(st_mtime_ns, st_size)`` to avoid redundant disk
+        reads when get_current() and get_history() are called in quick succession.
 
         Raises OSError when the file exists but cannot be read (permission
         denied, network share dropped). That is deliberately *not* reported
         as "no history": a caller that then promoted would overwrite the
         real history with a single entry.
         """
-        if not self.path.exists():
+        try:
+            st = self.path.stat()
+            current_stat: Optional[tuple[int, int]] = (st.st_mtime_ns, st.st_size)
+        except (FileNotFoundError, NotADirectoryError):
             self._cache = None
-            self._cache_mtime = None
+            self._cache_stat = None
             return {"current": None, "history": []}
 
-        try:
-            current_mtime = self.path.stat().st_mtime
-        except OSError:
-            current_mtime = None
-
-        if (self._cache is not None
-                and current_mtime is not None
-                and current_mtime == self._cache_mtime):
-            return self._cache
+        if (not bypass_cache
+                and self._cache is not None
+                and current_stat is not None
+                and current_stat == self._cache_stat):
+            return {
+                "current": self._cache["current"],
+                "history": list(self._cache["history"]),
+            }
 
         try:
             with open(self.path, "r", encoding="utf-8") as f:
@@ -72,8 +74,11 @@ class HistoryManager:
                 "current": HistoryEntry.from_dict(data["current"]) if data.get("current") else None,
                 "history": [HistoryEntry.from_dict(h) for h in data.get("history", [])],
             }
-            self._cache = result
-            self._cache_mtime = current_mtime
+            self._cache = {
+                "current": result["current"],
+                "history": list(result["history"]),
+            }
+            self._cache_stat = current_stat
             return result
         except (ValueError, KeyError, TypeError) as e:  # incl. JSON/Unicode decode errors
             logger.error(f"Failed to parse history file {self.path}: {e}")
@@ -89,7 +94,7 @@ class HistoryManager:
             except OSError as be:
                 logger.error(f"Could not back up corrupt history {self.path}: {be}")
             self._cache = None
-            self._cache_mtime = None
+            self._cache_stat = None
             return {"current": None, "history": []}
 
     def save(self, current: HistoryEntry, history: list[HistoryEntry]):
@@ -98,7 +103,7 @@ class HistoryManager:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         # Trim history to a reasonable length
-        trimmed = history[:MAX_HISTORY_ENTRIES]
+        trimmed = list(history[:MAX_HISTORY_ENTRIES])
 
         data = {
             "current": current.to_dict(),
@@ -112,18 +117,19 @@ class HistoryManager:
 
             # Update cache to avoid re-reading the file we just wrote
             try:
-                new_mtime = self.path.stat().st_mtime
+                st = self.path.stat()
+                new_stat: Optional[tuple[int, int]] = (st.st_mtime_ns, st.st_size)
             except OSError:
-                new_mtime = None
+                new_stat = None
             self._cache = {
                 "current": current,
-                "history": trimmed,
+                "history": list(trimmed),
             }
-            self._cache_mtime = new_mtime
+            self._cache_stat = new_stat
         except OSError as e:
             logger.error(f"Failed to save history file: {e}")
             self._cache = None
-            self._cache_mtime = None
+            self._cache_stat = None
             raise
 
     def get_current(self) -> Optional[HistoryEntry]:
@@ -134,7 +140,7 @@ class HistoryManager:
     def get_history(self) -> list[HistoryEntry]:
         """Get full promotion history, newest first."""
         data = self.load()
-        return data["history"]
+        return list(data["history"])
 
     def get_previous(self, n: int = 1) -> Optional[HistoryEntry]:
         """Return the entry that was current n promotes ago.
@@ -154,7 +160,9 @@ class HistoryManager:
         """
         Record a new promotion: set as current and prepend to history.
         """
-        data = self.load()
+        # Bypass cache so an external writer on a coarse-mtime filesystem
+        # cannot be clobbered by a stale cached history list.
+        data = self.load(bypass_cache=True)
         history = data.get("history", [])
         if isinstance(history, list):
             history = list(history)
@@ -226,16 +234,33 @@ def has_newer_versions_since(current: HistoryEntry, versions: list) -> bool:
     # Add tolerance for timestamp rounding (set_at truncates to seconds)
     threshold = promoted_at + timedelta(seconds=2)
 
-    current_num = None
+    current_rank: Optional[tuple[int, int]] = None
     for v in versions:
-        if v.version_string == current.version:
-            current_num = v.version_number
+        if version_strings_match(v.version_string, current.version, v.version_number):
+            current_rank = (getattr(v, "date_sortable", 0) or 0, v.version_number)
             break
-    if current_num is None:
-        return False
+    if current_rank is None:
+        # Current version may have been archived/deleted from disk — infer
+        # its rank from the version string so newer arrivals are still spotted.
+        import re
+        cur_ver = current.version or ""
+        m_v = re.search(r"v(\d+)", cur_ver, re.IGNORECASE)
+        m_iso = re.search(r"(\d{4})-(\d{2})-(\d{2})", cur_ver)
+        m_dmy = re.search(r"(\d{2})-(\d{2})-(\d{4})", cur_ver)
+        inferred_date = 0
+        if m_iso:
+            inferred_date = int(f"{m_iso.group(1)}{m_iso.group(2)}{m_iso.group(3)}")
+        elif m_dmy:
+            inferred_date = int(f"{m_dmy.group(3)}{m_dmy.group(2)}{m_dmy.group(1)}")
+        inferred_ver = int(m_v.group(1)) if m_v else 0
+        if inferred_date or m_v:
+            current_rank = (inferred_date, inferred_ver)
+        else:
+            return False
 
     for v in versions:
-        if v.version_number <= current_num:
+        rank = (getattr(v, "date_sortable", 0) or 0, v.version_number)
+        if rank <= current_rank:
             continue
         # Check when this higher version's source path was last modified
         try:

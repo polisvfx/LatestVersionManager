@@ -79,6 +79,7 @@ if sys.platform == "win32":
 
     _GENERIC_READ = 0x80000000
     _FILE_SHARE_READ = 0x00000001
+    _FILE_SHARE_DELETE = 0x00000004
     _OPEN_EXISTING = 3
     _FILE_ATTRIBUTE_NORMAL = 0x80
     _ERROR_SHARING_VIOLATION = 32
@@ -96,17 +97,33 @@ if sys.platform == "win32":
     _CloseHandle.argtypes = [wintypes.HANDLE]
     _CloseHandle.restype = wintypes.BOOL
 
+    def _win32_long_path(path: Path) -> str:
+        s = str(path)
+        if s.startswith("\\\\?\\") or len(s) < 260:
+            return s
+        s = os.path.abspath(s)
+        if s.startswith("\\\\?\\"):
+            return s
+        if s.startswith("\\\\"):
+            return "\\\\?\\UNC\\" + s[2:]
+        return "\\\\?\\" + s
+
     def is_open_for_writing(path: Path) -> bool:
         """True if another process has *path* open with write access.
 
-        We ask for read access while sharing only reads: Windows refuses
+        We ask for read access while sharing read + delete: Windows refuses
         that with a sharing violation if any existing handle has write
         access. Plain readers (players, Resolve) don't conflict. Works on
         local disks and SMB shares.
         """
         handle = _CreateFileW(
-            str(path), _GENERIC_READ, _FILE_SHARE_READ, None,
-            _OPEN_EXISTING, _FILE_ATTRIBUTE_NORMAL, None,
+            _win32_long_path(path),
+            _GENERIC_READ,
+            _FILE_SHARE_READ | _FILE_SHARE_DELETE,
+            None,
+            _OPEN_EXISTING,
+            _FILE_ATTRIBUTE_NORMAL,
+            None,
         )
         if handle == _INVALID_HANDLE_VALUE or handle is None:
             err = ctypes.get_last_error()
@@ -127,6 +144,15 @@ def _qt_status(f, size: int) -> tuple[str, str]:
     """Walk top-level atoms. A finished file has a ``moov`` atom and its
     atoms tile the file exactly; a file mid-render has no ``moov`` yet
     (it is written last) and often an ``mdat`` sized 0 or past EOF."""
+    if 0 < size < 8:
+        hdr = f.read(size)
+        if len(hdr) > 4:
+            tag_prefix = hdr[4:]
+            if any(atom.startswith(tag_prefix) for atom in _QT_TOP_LEVEL_ATOMS):
+                return INCOMPLETE, "QuickTime file header is truncated"
+        elif hdr and hdr[0] == 0:
+            return INCOMPLETE, "QuickTime file header is truncated"
+        return UNKNOWN, ""
     pos = 0
     seen_moov = False
     first = True
@@ -226,6 +252,15 @@ def _mxf_status(f, size: int) -> tuple[str, str]:
 def _avi_status(f, size: int) -> tuple[str, str]:
     """RIFF chunk sizes are patched when the writer finishes; until then
     they are 0 or don't add up to the file size."""
+    if 0 < size < 12:
+        hdr = f.read(size)
+        if len(hdr) <= 4:
+            if b"RIFF".startswith(hdr):
+                return INCOMPLETE, "AVI RIFF header is truncated"
+        elif hdr.startswith(b"RIFF"):
+            if len(hdr) <= 8 or b"AVI ".startswith(hdr[8:]):
+                return INCOMPLETE, "AVI RIFF header is truncated"
+        return UNKNOWN, ""
     pos = 0
     first = True
     while pos < size:
@@ -269,10 +304,10 @@ def container_structure_status(path: Path) -> tuple[str, str]:
     else:
         return UNKNOWN, ""
     try:
-        size = path.stat().st_size
-        if size == 0:
-            return INCOMPLETE, "file is empty"
         with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            if size == 0:
+                return INCOMPLETE, "file is empty"
             return parser(f, size)
     except OSError as e:
         logger.debug(f"Structure check skipped for {path}: {e}")

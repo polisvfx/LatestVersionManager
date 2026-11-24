@@ -13,6 +13,7 @@ __all__ = [
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -134,17 +135,26 @@ def apply_project_defaults(config: ProjectConfig):
             # Resolve latest target from template using source context
             # Derive tokens from actual filename if available, falling back to source name
             token_input = source.sample_filename or source.name
-            tokens = derive_source_tokens(token_input, config.task_tokens,
-                                          source_title=source.name)
-            tpl = config.latest_path_template
-            tpl = tpl.replace("{project_root}", config.effective_project_root)
-            tpl = tpl.replace("{group_root}", _resolve_group_root(config, source.group))
-            tpl = tpl.replace("{source_title}", tokens["source_title"])
-            tpl = tpl.replace("{source_name}", tokens["source_name"])
-            tpl = tpl.replace("{source_basename}", tokens["source_basename"])
-            tpl = tpl.replace("{source_fullname}", tokens["source_fullname"])
-            tpl = tpl.replace("{source_filename}", tokens["source_filename"])
-            tpl = tpl.replace("{source_dir}", source.source_dir)
+            eff_date_fmt = source.date_format if source.override_date_format else config.default_date_format
+            tokens = derive_source_tokens(
+                token_input, config.task_tokens, eff_date_fmt,
+                source_title=source.name,
+            )
+            token_map = {
+                "{project_root}": config.effective_project_root,
+                "{group_root}": _resolve_group_root(config, source.group),
+                "{source_title}": tokens["source_title"],
+                "{source_name}": tokens["source_name"],
+                "{source_basename}": tokens["source_basename"],
+                "{source_fullname}": tokens["source_fullname"],
+                "{source_filename}": tokens["source_filename"],
+                "{source_dir}": source.source_dir,
+            }
+            tpl = re.sub(
+                r"\{(?:project_root|group_root|source_title|source_name|source_basename|source_fullname|source_filename|source_dir)\}",
+                lambda m: token_map[m.group(0)],
+                config.latest_path_template,
+            )
             tpl = _expand_group_token(tpl, source.group)
             # Relative paths resolve from the source directory
             resolved = Path(tpl)
@@ -297,42 +307,39 @@ def _migrate_shared_history_filenames(config: ProjectConfig) -> int:
 
     Returns the number of sources whose history filename was changed.
     """
-    # Group sources by (resolved_target_dir, history_filename)
+    # Precompute resolved target directories once (avoids O(N^2) Path.resolve())
+    # and track all taken history filenames per directory case-insensitively.
     groups: dict[tuple[str, str], list] = {}
+    taken_by_dir: dict[str, set[str]] = {}
+    display_dir_by_key: dict[str, str] = {}
     for s in config.watched_sources:
         if not s.latest_target:
             continue
-        try:
-            resolved_dir = str(Path(s.latest_target).resolve())
-        except (OSError, ValueError):
-            resolved_dir = s.latest_target
+        resolved_dir = _safe_resolve(s.latest_target)
+        dir_key = os.path.normcase(resolved_dir)
+        display_dir_by_key.setdefault(dir_key, resolved_dir)
         history = s.history_filename or ".latest_history.json"
-        groups.setdefault((resolved_dir, history), []).append(s)
+        history_key = history.casefold()
+        groups.setdefault((dir_key, history_key), []).append(s)
+        taken_by_dir.setdefault(dir_key, set()).add(history_key)
 
     renamed = 0
-    for (resolved_dir, _), sources in groups.items():
+    for (dir_key, _), sources in groups.items():
         if len(sources) < 2:
             continue
-        # Track filenames already in use within this directory so we don't
-        # accidentally pick another colliding name during disambiguation.
-        taken = {
-            (sx.history_filename or ".latest_history.json")
-            for sx in config.watched_sources
-            if sx.latest_target and (
-                _safe_resolve(sx.latest_target) == resolved_dir
-            )
-        }
-        # Keep sources[0] as-is, disambiguate the rest.
+        taken_lower = taken_by_dir[dir_key]
+        resolved_dir = display_dir_by_key[dir_key]
+        # Keep sources[0] as-is (so its filename stays in taken_lower),
+        # and disambiguate the rest.
         for s in sources[1:]:
             safe = re.sub(r"[^A-Za-z0-9_-]", "_", s.name) or "source"
             desired = f".latest_history_{safe}.json"
             n = 2
-            while desired in taken:
+            while desired.casefold() in taken_lower:
                 desired = f".latest_history_{safe}_{n}.json"
                 n += 1
-            taken.discard(s.history_filename or ".latest_history.json")
             s.history_filename = desired
-            taken.add(desired)
+            taken_lower.add(desired.casefold())
             renamed += 1
             logger.info(
                 "Auto-namespaced history file for source '%s' to '%s' "

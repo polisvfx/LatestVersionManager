@@ -72,8 +72,11 @@ class DirectoryPoller:
     def start(self) -> None:
         if self.is_alive():
             return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True,
+        # Allocate a fresh stop event per thread so a previously-blocked
+        # thread from an earlier stop() never sees its event cleared.
+        stop_ev = threading.Event()
+        self._stop = stop_ev
+        self._thread = threading.Thread(target=self._run, args=(stop_ev,), daemon=True,
                                         name="lvm-dir-poller")
         self._thread.start()
 
@@ -88,24 +91,25 @@ class DirectoryPoller:
 
     # -- polling ------------------------------------------------------------
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self.poll_once()
-            self._stop.wait(self.interval)
+    def _run(self, stop_ev: threading.Event) -> None:
+        while not stop_ev.is_set():
+            self.poll_once(_stop_ev=stop_ev)
+            stop_ev.wait(self.interval)
 
-    def poll_once(self) -> list[str]:
+    def poll_once(self, _stop_ev: Optional[threading.Event] = None) -> list[str]:
         """Poll every directory once; returns the keys that changed (the
         callback has already been called for them)."""
+        stop_ev = _stop_ev if _stop_ev is not None else self._stop
         with self._lock:
             targets = list(self._dirs.items())
         changed = []
         for key, path in targets:
-            if self._stop.is_set():
+            if stop_ev.is_set():
                 break
             names = self._list(path)
             with self._lock:
-                if key not in self._dirs:
-                    continue  # removed meanwhile
+                if self._dirs.get(key) != path:
+                    continue  # removed or repointed meanwhile
                 first_poll = key not in self._names
                 previous = self._names.get(key)
                 self._names[key] = names
@@ -121,6 +125,8 @@ class DirectoryPoller:
             elif names - previous:
                 changed.append(key)
         for key in changed:
+            if stop_ev.is_set():
+                break
             try:
                 self._callback(key)
             except Exception:

@@ -31,14 +31,16 @@ class DiscoveryWorker(QThread):
     progress = Signal(str, int, int)  # current_path, dirs_scanned, estimated_total
 
     def __init__(self, root_dir: str, max_depth: int = 4, extensions=None,
-                 whitelist=None, blacklist=None, skip_resolve=True, parent=None):
+                 whitelist=None, blacklist=None, skip_resolve=True,
+                 populate_tc: bool = True, parent=None):
         super().__init__(parent)
         self.root_dir = root_dir
         self.max_depth = max_depth
-        self.extensions = extensions
-        self.whitelist = whitelist
-        self.blacklist = blacklist
+        self.extensions = list(extensions) if extensions else None
+        self.whitelist = list(whitelist) if whitelist else None
+        self.blacklist = list(blacklist) if blacklist else None
         self.skip_resolve = skip_resolve
+        self.populate_tc = populate_tc
 
     def _on_progress(self, current_path: str, dirs_scanned: int, estimated_total: int):
         self.progress.emit(current_path, dirs_scanned, estimated_total)
@@ -54,6 +56,11 @@ class DiscoveryWorker(QThread):
                 progress_callback=self._on_progress,
                 skip_resolve=self.skip_resolve,
             )
+            # Extract timecodes off the GUI thread so ffprobe never freezes the dialog
+            if self.populate_tc and results:
+                all_versions = [v for r in results for v in r.versions_found]
+                if all_versions:
+                    populate_timecodes_parallel(all_versions, max_workers=8)
             self.completed.emit(results)
         except Exception as e:
             self.error.emit(str(e))
@@ -230,6 +237,8 @@ class DiscoveryDialog(QDialog):
 
         self.result_tree.clear()
         self._results.clear()
+        self._filtered_by_whitelist.clear()
+        self._filtered_by_blacklist.clear()
         self.scan_btn.setEnabled(False)
         self.add_btn.setEnabled(False)
         self.status_label.setText("Scanning...")
@@ -237,17 +246,24 @@ class DiscoveryDialog(QDialog):
         self.progress_bar.setRange(0, 0)  # indeterminate initially
         self.progress_bar.setFormat("Estimating scan size...")
 
-        # Use project filters if available
+        # Use project filters and extensions if available
         whitelist = self._config.name_whitelist if self._config else None
         blacklist = self._config.name_blacklist if self._config else None
-
+        extensions = (
+            list(self._config.default_file_extensions)
+            if self._config and self._config.default_file_extensions
+            else None
+        )
         skip_resolve = self._config.skip_resolve if self._config else True
+        populate_tc = (self._config.timecode_mode != "never") if self._config else True
 
         self._worker = DiscoveryWorker(
             root_dir,
+            extensions=extensions,
             whitelist=whitelist or None,
             blacklist=blacklist or None,
             skip_resolve=skip_resolve,
+            populate_tc=populate_tc,
             parent=self,
         )
         self._worker.completed.connect(self._on_results)
@@ -256,13 +272,20 @@ class DiscoveryDialog(QDialog):
         self._worker.progress.connect(self._on_scan_progress)
         self._worker.start()
 
+    @staticmethod
+    def _safe_resolve_lower(path_str: str) -> str:
+        try:
+            return str(Path(path_str).resolve()).lower()
+        except (OSError, ValueError):
+            return os.path.normpath(path_str).lower()
+
     def _get_existing_sources(self) -> set:
         """Return a set of (resolved_source_dir, source_name) tuples already in the project."""
         existing = set()
         if self._config:
             for src in self._config.watched_sources:
                 if src.source_dir:
-                    existing.add((str(Path(src.source_dir).resolve()).lower(), src.name.lower()))
+                    existing.add((self._safe_resolve_lower(src.source_dir), src.name.lower()))
         return existing
 
     def _is_existing(self, result_path: str, existing_sources: set, result_name: str = "") -> bool:
@@ -271,7 +294,7 @@ class DiscoveryDialog(QDialog):
         Compares both the source directory path AND the result name to handle
         multi-shot directories where multiple sources share the same parent.
         """
-        resolved = str(Path(result_path).resolve()).lower()
+        resolved = self._safe_resolve_lower(result_path)
         # Check if this specific (path, name) combination exists
         if (resolved, result_name.lower()) in existing_sources:
             return True
@@ -302,22 +325,18 @@ class DiscoveryDialog(QDialog):
         self.scan_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self._results = results
-        self._timecodes_populated = False
+        tc_mode = self._config.timecode_mode if self._config else "lazy"
+        self._timecodes_populated = bool(results and tc_mode != "never")
 
         if not results:
             self.status_label.setText("No versioned content found.")
             return
 
-        # Populate timecodes once on new results rather than on every tree rebuild.
-        # Flatten across all results into a single parallel pool so a slow
-        # ffprobe in one result doesn't stall others.
-        tc_mode = self._config.timecode_mode if self._config else "lazy"
-        if tc_mode != "never":
-            all_versions = [v for r in self._results for v in r.versions_found]
-            populate_timecodes_parallel(all_versions, max_workers=8)
-            self._timecodes_populated = True
-
-        self._rebuild_tree()
+        # Re-apply any live whitelist/blacklist tags to the new results
+        if self.discovery_whitelist.tags() or self.discovery_blacklist.tags():
+            self._on_discovery_filters_changed()
+        else:
+            self._rebuild_tree()
 
     def _rebuild_tree(self):
         """Rebuild the results tree, respecting filters (existing, ignored).
@@ -338,7 +357,12 @@ class DiscoveryDialog(QDialog):
             return
 
         root_dir = self.dir_combo.currentText().strip()
-        root = Path(root_dir).resolve() if root_dir else None
+        root = None
+        if root_dir:
+            try:
+                root = Path(root_dir).resolve()
+            except OSError:
+                root = Path(root_dir)
 
         existing_sources = self._get_existing_sources()
         hide_existing = self.hide_existing_cb.isChecked()
@@ -681,9 +705,10 @@ class DiscoveryDialog(QDialog):
         # If no latest path template is set, prompt the user to define one
         if not self._config.latest_path_template:
             path_dlg = LatestPathDialog(self._config, discovery_results=selected_results, parent=self)
-            if path_dlg.exec() == QDialog.Accepted:
-                self._config.latest_path_template = path_dlg.get_template()
-                self._config.default_file_rename_template = path_dlg.get_rename_template()
+            if path_dlg.exec() != QDialog.Accepted:
+                return
+            self._config.latest_path_template = path_dlg.get_template()
+            self._config.default_file_rename_template = path_dlg.get_rename_template()
 
         added, renamed_count, history_disambiguated = add_discovery_results_to_config(
             self._config, selected_results

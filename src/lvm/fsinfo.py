@@ -33,8 +33,8 @@ WATCH_MODES = ("auto", NATIVE, POLLING)
 # Filesystem types (Linux /proc/mounts, macOS `mount`) that live on another machine.
 NETWORK_FS_TYPES = frozenset({
     "cifs", "smb3", "smbfs", "smb", "nfs", "nfs4", "afpfs", "webdav", "davfs",
-    "fuse.sshfs", "sshfs", "fuse.rclone", "9p", "ceph", "glusterfs",
-    "fuse.glusterfs", "lustre", "beegfs", "gpfs",
+    "fuse.sshfs", "sshfs", "fuse.rclone", "fuse.gvfsd-fuse", "9p", "ceph",
+    "glusterfs", "fuse.glusterfs", "lustre", "beegfs", "gpfs",
 })
 
 _DRIVE_REMOTE = 4  # GetDriveTypeW
@@ -46,8 +46,12 @@ def parse_proc_mounts(text: str) -> list[tuple[str, str]]:
     for line in text.splitlines():
         parts = line.split()
         if len(parts) >= 3:
-            # /proc/mounts escapes spaces as \040
-            mounts.append((parts[1].replace("\\040", " "), parts[2]))
+            mp = (parts[1]
+                  .replace("\\040", " ")
+                  .replace("\\011", "\t")
+                  .replace("\\012", "\n")
+                  .replace("\\134", "\\"))
+            mounts.append((mp, parts[2]))
     return mounts
 
 
@@ -100,18 +104,25 @@ class _MountTable:
 _MOUNT_TABLE = _MountTable()
 
 
-def _fs_type_for(path: str, mounts: Iterable[tuple[str, str]]) -> Optional[str]:
+def _fs_type_for(path: str, mounts: Iterable[tuple[str, str]], *, case_insensitive: bool = False) -> Optional[str]:
     """fs type of the longest mount point containing *path*."""
+    p_cmp = path.lower() if case_insensitive else path
     best, best_len = None, -1
     for mount_point, fs_type in mounts:
         mp = mount_point.rstrip("/") or "/"
-        if path == mp or path.startswith(mp + "/") or mp == "/":
+        mp_cmp = mp.lower() if case_insensitive else mp
+        if p_cmp == mp_cmp or p_cmp.startswith(mp_cmp + "/") or mp_cmp == "/":
             if len(mp) > best_len:
                 best, best_len = fs_type, len(mp)
     return best
 
 
 def _windows_is_network(path: str) -> bool:
+    if path.startswith("\\\\?\\UNC\\"):
+        return True
+    if path.startswith("\\\\?\\"):
+        # Extended-length local path like \\?\C:\... -> check drive letter
+        path = path[4:]
     if path.startswith(("\\\\", "//")):
         return True  # UNC path
     drive = os.path.splitdrive(path)[0]
@@ -137,7 +148,7 @@ def is_network_path(path, *, platform: Optional[str] = None,
         return _windows_is_network(p)
     if mounts is None:
         mounts = _MOUNT_TABLE.get()
-    fs_type = _fs_type_for(p, mounts)
+    fs_type = _fs_type_for(p, mounts, case_insensitive=(platform == "darwin"))
     return bool(fs_type) and fs_type.lower() in NETWORK_FS_TYPES
 
 

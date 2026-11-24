@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from .fileutil import atomic_write_json
 from .models import VersionInfo, WatchedSource
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,10 @@ CACHE_VERSION = 1  # Bump when cache format changes
 CACHE_FILENAME = "scan_cache.json"
 
 
-def _source_fingerprint(source: WatchedSource) -> str:
+def _source_fingerprint(
+    source: WatchedSource,
+    task_tokens: Optional[list] = None,
+) -> str:
     """Compute a fingerprint for the source fields that affect scan results.
 
     If any of these fields change, cached versions for this source are
@@ -32,9 +36,10 @@ def _source_fingerprint(source: WatchedSource) -> str:
     key_data = json.dumps({
         "source_dir": source.source_dir,
         "version_pattern": source.version_pattern,
-        "file_extensions": sorted(source.file_extensions),
+        "file_extensions": sorted(e.lower() for e in source.file_extensions),
         "sample_filename": source.sample_filename,
         "date_format": source.date_format,
+        "task_tokens": list(task_tokens or []),
     }, sort_keys=True)
     return hashlib.md5(key_data.encode()).hexdigest()
 
@@ -47,6 +52,7 @@ def cache_path_for_project(config_path: str) -> Path:
 def load_cache(
     config_path: str,
     sources: list[WatchedSource],
+    task_tokens: Optional[list] = None,
 ) -> dict[str, list[VersionInfo]]:
     """Load cached scan results, returning only entries with valid fingerprints.
 
@@ -65,25 +71,31 @@ def load_cache(
         logger.warning("Failed to read scan cache: %s", e)
         return {}
 
+    if not isinstance(data, dict):
+        logger.warning("Scan cache root is not a JSON object, ignoring cache")
+        return {}
+
     if data.get("cache_version") != CACHE_VERSION:
         logger.info("Scan cache version mismatch, ignoring cache")
         return {}
 
     cached_sources = data.get("sources", {})
+    if not isinstance(cached_sources, dict):
+        return {}
     result: dict[str, list[VersionInfo]] = {}
 
     for source in sources:
         entry = cached_sources.get(source.name)
-        if not entry:
+        if not isinstance(entry, dict):
             continue
-        expected_fp = _source_fingerprint(source)
+        expected_fp = _source_fingerprint(source, task_tokens=task_tokens)
         if entry.get("fingerprint") != expected_fp:
             logger.info("Cache fingerprint mismatch for '%s', will rescan", source.name)
             continue
         try:
             versions = [VersionInfo.from_dict(v) for v in entry.get("versions", [])]
             result[source.name] = versions
-        except (KeyError, TypeError) as e:
+        except (KeyError, TypeError, AttributeError) as e:
             logger.warning("Failed to deserialize cache for '%s': %s", source.name, e)
             continue
 
@@ -95,10 +107,11 @@ def save_cache(
     config_path: str,
     sources: list[WatchedSource],
     versions_cache: dict[str, list[VersionInfo]],
+    task_tokens: Optional[list] = None,
 ) -> None:
     """Save scan results to the cache file.
 
-    Uses atomic write (write to temp, then rename) to prevent corruption.
+    Uses atomic write (write to unique temp, fsync, replace) to prevent corruption.
     """
     cp = cache_path_for_project(config_path)
     cp.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +120,7 @@ def save_cache(
     for source in sources:
         versions = versions_cache.get(source.name, [])
         sources_data[source.name] = {
-            "fingerprint": _source_fingerprint(source),
+            "fingerprint": _source_fingerprint(source, task_tokens=task_tokens),
             "cached_at": time.time(),
             "versions": [v.to_dict() for v in versions],
         }
@@ -118,19 +131,11 @@ def save_cache(
         "sources": sources_data,
     }
 
-    tmp_path = cp.with_suffix(".json.tmp")
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=1, ensure_ascii=False)
-        tmp_path.replace(cp)
+        atomic_write_json(cp, data, indent=1)
         logger.info("Scan cache saved: %d sources", len(sources_data))
     except OSError as e:
         logger.warning("Failed to save scan cache: %s", e)
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
 
 
 def clear_cache(config_path: str) -> None:

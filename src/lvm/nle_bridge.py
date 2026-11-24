@@ -150,7 +150,7 @@ def _check_resolve_process() -> bool:
             return proc.returncode == 0
         if sys.platform.startswith("linux"):
             proc = subprocess.run(
-                ["pgrep", "-f", "resolve"],
+                ["pgrep", "-x", "resolve"],
                 capture_output=True, text=True, timeout=4,
                 encoding="utf-8", errors="replace",
             )
@@ -577,20 +577,52 @@ def collect_premiere_renames(latest_dirs) -> list:
     from pathlib import Path
 
     seen = set()
+    seen_dirs = set()
     renames: list = []
     for d in latest_dirs:
         if not d:
             continue
         dir_path = Path(d)
-        if not dir_path.is_dir():
-            continue
         try:
-            sidecars = sorted(dir_path.glob(".latest_history*.json"))
+            dir_key = os.path.normcase(str(dir_path.resolve()))
+        except OSError:
+            dir_key = os.path.normcase(str(dir_path))
+        if dir_key in seen_dirs:
+            continue
+        seen_dirs.add(dir_key)
+
+        try:
+            if not dir_path.is_dir():
+                continue
         except OSError:
             continue
-        for sc in sidecars:
+
+        # Single os.scandir pass per directory — collects both sidecars and
+        # non-hidden media files in one listing instead of N+1 directory reads.
+        sidecar_paths = []
+        media_files = []
+        try:
+            with os.scandir(dir_path) as it:
+                for entry in it:
+                    name = entry.name
+                    try:
+                        if not entry.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    if name.startswith(".latest_history") and name.endswith(".json"):
+                        sidecar_paths.append(entry.path)
+                    elif not name.startswith("."):
+                        media_files.append((name, entry.path))
+        except OSError:
+            continue
+
+        sidecar_paths.sort()
+        parsed_sidecars = []
+        for sc_path in sidecar_paths:
             try:
-                data = json.loads(sc.read_text(encoding="utf-8"))
+                with open(sc_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
             except (OSError, ValueError):
                 continue
             cur = data.get("current") if isinstance(data, dict) else None
@@ -599,32 +631,36 @@ def collect_premiere_renames(latest_dirs) -> list:
             stem = cur.get("latest_basename") or ""
             if not stem:
                 continue
-            try:
-                entries = list(dir_path.iterdir())
-            except OSError:
-                continue
-            for entry in entries:
-                if not entry.is_file():
-                    continue
-                base = entry.name
-                if base.startswith("."):
-                    continue
-                # Same stem-match rules as host.jsx stemMatchesClip().
+            parsed_sidecars.append((stem, cur))
+
+        if not parsed_sidecars:
+            continue
+
+        # Match each media file to the sidecar with the longest matching stem
+        # so "shot1_bg.mov" picks stem "shot1_bg" over "shot1".
+        for base, full_path in media_files:
+            best_len = -1
+            best_cur = None
+            for stem, cur in parsed_sidecars:
                 stem_dot = base[:len(stem) + 1] in (stem + ".", stem + "_")
                 exact_with_ext = (base.rpartition(".")[0] == stem and "." in base)
                 if not (stem_dot or exact_with_ext):
                     continue
-                key = str(entry)
-                if key in seen:
-                    continue
-                seen.add(key)
-                new_name = _premiere_display_name(base, cur)
-                if not new_name:
-                    continue
-                renames.append({
-                    "clip_match_key": key,
-                    "new_display_name": new_name,
-                })
+                if len(stem) > best_len:
+                    best_len = len(stem)
+                    best_cur = cur
+            if best_cur is None:
+                continue
+            if full_path in seen:
+                continue
+            seen.add(full_path)
+            new_name = _premiere_display_name(base, best_cur)
+            if not new_name:
+                continue
+            renames.append({
+                "clip_match_key": full_path,
+                "new_display_name": new_name,
+            })
     return renames
 
 

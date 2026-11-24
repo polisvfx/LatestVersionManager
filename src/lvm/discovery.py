@@ -124,7 +124,7 @@ def discover(
         logger.warning(f"Directory does not exist: {root}")
         return []
 
-    valid_extensions = set(extensions) if extensions else MEDIA_EXTENSIONS
+    valid_extensions = {e.lower() for e in extensions} if extensions else MEDIA_EXTENSIONS
 
     # Phase 1: Quick pre-count for progress estimation
     estimated = 0
@@ -156,8 +156,8 @@ def discover(
                 continue
             top_subdirs.append(Path(entry.path))
         top_subdirs.sort()
-    except PermissionError:
-        logger.debug(f"Permission denied listing root: {root}")
+    except (PermissionError, OSError):
+        logger.debug(f"Cannot list root: {root}")
 
     # Dispatch top-level subdirectories in parallel
     if max_depth >= 1 and top_subdirs:
@@ -179,7 +179,7 @@ def discover(
                     future = executor.submit(
                         _walk_for_versions, subdir, root, 1, max_depth,
                         valid_extensions, branch_results, branch_visited,
-                        tracker, skip_resolve)
+                        tracker, skip_resolve, True)
                     futures[future] = branch_results
                 for future in as_completed(futures):
                     try:
@@ -205,7 +205,7 @@ def discover(
     if whitelist or blacklist:
         results = _apply_filters(results, root, whitelist, blacklist)
 
-    results.sort(key=lambda r: r.path)
+    results.sort(key=lambda r: (r.path, r.name))
     return results
 
 
@@ -283,6 +283,7 @@ def _walk_for_versions(
     visited: set = None,
     progress: _ProgressTracker = None,
     skip_resolve: bool = True,
+    in_worker: bool = False,
 ):
     """Recursively walk directories looking for versioned content."""
     if visited is None:
@@ -301,8 +302,8 @@ def _walk_for_versions(
             for entry in it:
                 if not entry.name.startswith("."):
                     raw_entries.append(entry)
-    except PermissionError:
-        logger.debug(f"Permission denied: {current}")
+    except (PermissionError, OSError):
+        logger.debug(f"Cannot list directory: {current}")
         return
     raw_entries.sort(key=lambda e: e.name)
 
@@ -344,11 +345,10 @@ def _walk_for_versions(
     # Group by source name (version-stripped dir name) so that different
     # shots sharing a parent folder become separate DiscoveryResults.
     if versioned_dirs:
-        # Parallel scan of version directories using ThreadPoolExecutor
-        # _scan_version_dir now returns (VersionInfo, found_exts) to avoid
-        # a second os.scandir call just to collect extensions.
+        # Parallel scan of version directories only when not already inside a
+        # top-level worker branch (avoids nested 8x8 thread explosion).
         scan_results = []  # list of (vdir, match, vi, exts, sample)
-        worker_count = min(os.cpu_count() or 4, 8, len(versioned_dirs))
+        worker_count = 1 if in_worker else min(os.cpu_count() or 4, 8, len(versioned_dirs))
         if worker_count > 1:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 future_to_entry = {}
@@ -362,6 +362,8 @@ def _walk_for_versions(
                     try:
                         vi, exts_found, sample = future.result()
                         vdir, vmatch = future_to_entry[future]
+                        if vi.file_count == 0:
+                            continue
                         _populate_date_on_vi(vi, vdir.name)
                         scan_results.append((vdir, vmatch, vi, exts_found, sample))
                     except Exception as e:
@@ -372,8 +374,13 @@ def _walk_for_versions(
                 raw = match.group(1)
                 ver_num = int(raw)
                 vi, exts_found, sample = _scan_version_dir(vdir, ver_num, len(raw), extensions)
+                if vi.file_count == 0:
+                    continue
                 _populate_date_on_vi(vi, vdir.name)
                 scan_results.append((vdir, match, vi, exts_found, sample))
+
+        # Sort deterministically by directory name regardless of thread completion order
+        scan_results.sort(key=lambda item: item[0].name)
 
         # Group scanned results by source name (dir name with version stripped)
         groups = {}  # source_name -> list of (vdir, match, vi, exts, sample)
@@ -384,7 +391,7 @@ def _walk_for_versions(
         # Use parent dir name when all dirs share the same source name
         single_group = len(groups) == 1
 
-        for source_name, group in groups.items():
+        for source_name, group in sorted(groups.items()):
             found_extensions = set()
             versions = []
             first_sample = ""
@@ -478,11 +485,19 @@ def _walk_for_versions(
                 ver_str = f"v{ver_num:0{len(raw)}d}"
                 found_extensions.add(vfile.suffix.lower())
 
-                if ver_num in seen_versions:
+                vi_probe = VersionInfo(
+                    version_string=ver_str,
+                    version_number=ver_num,
+                    source_path=str(vfile),
+                )
+                _populate_date_on_vi(vi_probe, vfile.stem)
+                ver_key = (vi_probe.date_sortable, ver_num)
+
+                if ver_key in seen_versions:
                     # Multiple files for same version - increment count
                     try:
-                        seen_versions[ver_num].file_count += 1
-                        seen_versions[ver_num].total_size_bytes += vfile.stat().st_size
+                        seen_versions[ver_key].file_count += 1
+                        seen_versions[ver_key].total_size_bytes += vfile.stat().st_size
                     except OSError:
                         pass
                 else:
@@ -490,17 +505,11 @@ def _walk_for_versions(
                         file_size = vfile.stat().st_size
                     except OSError:
                         file_size = 0
-                    vi = VersionInfo(
-                        version_string=ver_str,
-                        version_number=ver_num,
-                        source_path=str(vfile),
-                        file_count=1,
-                        total_size_bytes=file_size,
-                        start_timecode=None,  # Lazy: extracted on demand
-                    )
-                    _populate_date_on_vi(vi, vfile.stem)
-                    seen_versions[ver_num] = vi
-                    versions.append(vi)
+                    vi_probe.file_count = 1
+                    vi_probe.total_size_bytes = file_size
+                    vi_probe.start_timecode = None  # Lazy: extracted on demand
+                    seen_versions[ver_key] = vi_probe
+                    versions.append(vi_probe)
 
             versions.sort(key=lambda v: (v.date_sortable, v.version_number))
 
@@ -647,7 +656,7 @@ def _walk_for_versions(
                 continue
             visited.add(real_path)
         _walk_for_versions(subdir, root, depth + 1, max_depth, extensions,
-                           results, visited, progress, skip_resolve)
+                           results, visited, progress, skip_resolve, in_worker)
 
 
 def _populate_date_on_vi(vi: VersionInfo, name: str):
@@ -770,10 +779,17 @@ def _detect_date_format(date_str: str) -> str:
     avoid YYYYMMDD), so a single format is returned.
     """
     if len(date_str) == 8:
-        first_four = int(date_str[:4])
-        if 1900 <= first_four <= 2099:
+        from .task_tokens import validate_date_string
+        ymd_ok = validate_date_string(date_str, "YYYYMMDD")
+        dmy_ok = validate_date_string(date_str, "DDMMYYYY")
+        if ymd_ok and not dmy_ok:
             return "YYYYMMDD"
-        return "DDMMYYYY"
+        if dmy_ok and not ymd_ok:
+            return "DDMMYYYY"
+        if ymd_ok and dmy_ok:
+            first_four = int(date_str[:4])
+            return "YYYYMMDD" if 1900 <= first_four <= 2099 else "DDMMYYYY"
+        return ""
 
     if len(date_str) == 6:
         from .task_tokens import validate_date_string
@@ -838,9 +854,12 @@ def _suggest_pattern(name: str, ver_match: re.Match = None,
                 return date_prefix + "{date}" + ver_prefix + "{version}"
             else:
                 return ver_prefix + "{version}" + date_prefix + "{date}"
-        # else: not adjacent — fall through to version-only or date-only below
+        # else: not adjacent — fall through to version-only below
+        start = ver_match.start()
+        prefix_before_v = name[start:ver_match.start(1)]
+        return prefix_before_v + "{version}"
 
-    elif date_match and not ver_match:
+    if date_match and not ver_match:
         # Date only
         date_start = date_match.start(1)
         if date_start > 0 and name[date_start - 1] in "_.-":

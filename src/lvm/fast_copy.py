@@ -105,6 +105,7 @@ if sys.platform == "win32":
 
     _CopyFileExW = None
     _win32_available: Optional[bool] = None
+    _win32_setup_lock = threading.Lock()
 
     def _noop_progress(*args):
         return _PROGRESS_CONTINUE
@@ -116,29 +117,38 @@ if sys.platform == "win32":
         global _CopyFileExW, _win32_available
         if _win32_available is not None:
             return _win32_available
-        try:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            _CopyFileExW = kernel32.CopyFileExW
-            _CopyFileExW.argtypes = [
-                wintypes.LPCWSTR,
-                wintypes.LPCWSTR,
-                _LPPROGRESS_ROUTINE,
-                ctypes.c_void_p,
-                ctypes.POINTER(wintypes.BOOL),
-                wintypes.DWORD,
-            ]
-            _CopyFileExW.restype = wintypes.BOOL
-            _win32_available = True
-            logger.debug("Win32 CopyFileExW binding initialized")
-        except (OSError, AttributeError) as exc:
-            logger.debug("Win32 CopyFileExW not available: %s", exc)
-            _win32_available = False
-        return _win32_available
+        with _win32_setup_lock:
+            if _win32_available is not None:
+                return _win32_available
+            try:
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                func = kernel32.CopyFileExW
+                func.argtypes = [
+                    wintypes.LPCWSTR,
+                    wintypes.LPCWSTR,
+                    _LPPROGRESS_ROUTINE,
+                    ctypes.c_void_p,
+                    ctypes.POINTER(wintypes.BOOL),
+                    wintypes.DWORD,
+                ]
+                func.restype = wintypes.BOOL
+                _CopyFileExW = func
+                _win32_available = True
+                logger.debug("Win32 CopyFileExW binding initialized")
+            except (OSError, AttributeError) as exc:
+                logger.debug("Win32 CopyFileExW not available: %s", exc)
+                _win32_available = False
+            return _win32_available
 
     def _prepare_win32_path(path: Path) -> str:
         """Prepend extended-length prefix for paths exceeding MAX_PATH."""
         s = str(path)
+        if s.startswith("\\\\?\\"):
+            return s
         if len(s) < 260:
+            return s
+        s = os.path.abspath(s)
+        if s.startswith("\\\\?\\"):
             return s
         if s.startswith("\\\\"):
             return "\\\\?\\UNC\\" + s[2:]
@@ -220,38 +230,45 @@ if sys.platform == "darwin":
     _clonefile = None
     _copyfile_func = None
     _macos_available: Optional[bool] = None
+    _macos_setup_lock = threading.Lock()
 
     def _setup_macos_copy() -> bool:
         """One-time initialization of macOS copy bindings."""
         global _libsystem, _clonefile, _copyfile_func, _macos_available
         if _macos_available is not None:
             return _macos_available
-        try:
-            _libsystem = ctypes.CDLL("libSystem.B.dylib", use_errno=True)
+        with _macos_setup_lock:
+            if _macos_available is not None:
+                return _macos_available
+            try:
+                lib = ctypes.CDLL("libSystem.B.dylib", use_errno=True)
 
-            _clonefile = _libsystem.clonefile
-            _clonefile.argtypes = [
-                ctypes.c_char_p,  # src
-                ctypes.c_char_p,  # dst
-                ctypes.c_int,     # flags
-            ]
-            _clonefile.restype = ctypes.c_int
+                cf = lib.clonefile
+                cf.argtypes = [
+                    ctypes.c_char_p,  # src
+                    ctypes.c_char_p,  # dst
+                    ctypes.c_int,     # flags
+                ]
+                cf.restype = ctypes.c_int
 
-            _copyfile_func = _libsystem.copyfile
-            _copyfile_func.argtypes = [
-                ctypes.c_char_p,  # from
-                ctypes.c_char_p,  # to
-                ctypes.c_void_p,  # state (NULL)
-                ctypes.c_uint32,  # flags
-            ]
-            _copyfile_func.restype = ctypes.c_int
+                cp = lib.copyfile
+                cp.argtypes = [
+                    ctypes.c_char_p,  # from
+                    ctypes.c_char_p,  # to
+                    ctypes.c_void_p,  # state (NULL)
+                    ctypes.c_uint32,  # flags
+                ]
+                cp.restype = ctypes.c_int
 
-            _macos_available = True
-            logger.debug("macOS clonefile/copyfile bindings initialized")
-        except (OSError, AttributeError) as exc:
-            logger.debug("macOS native copy not available: %s", exc)
-            _macos_available = False
-        return _macos_available
+                _libsystem = lib
+                _clonefile = cf
+                _copyfile_func = cp
+                _macos_available = True
+                logger.debug("macOS clonefile/copyfile bindings initialized")
+            except (OSError, AttributeError) as exc:
+                logger.debug("macOS native copy not available: %s", exc)
+                _macos_available = False
+            return _macos_available
 
     def _macos_clonefile(src: Path, dst: Path) -> bool:
         """Try an APFS CoW clone. Only works on same APFS volume."""
@@ -259,8 +276,8 @@ if sys.platform == "darwin":
             return False
         try:
             result = _clonefile(
-                str(src).encode("utf-8"),
-                str(dst).encode("utf-8"),
+                os.fsencode(src),
+                os.fsencode(dst),
                 0,
             )
             if result == 0:
@@ -287,8 +304,8 @@ if sys.platform == "darwin":
         try:
             flags = _COPYFILE_CLONE | _COPYFILE_ALL
             result = _copyfile_func(
-                str(src).encode("utf-8"),
-                str(dst).encode("utf-8"),
+                os.fsencode(src),
+                os.fsencode(dst),
                 None,
                 flags,
             )
@@ -312,6 +329,7 @@ def _linux_copy_file_range(
     src: Path,
     dst: Path,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> bool:
     """Copy using os.copy_file_range() on Linux (Python 3.8+).
 
@@ -322,7 +340,7 @@ def _linux_copy_file_range(
     if not hasattr(os, "copy_file_range"):
         return False
     try:
-        chunk = (32 if progress_cb else 128) * 1024 * 1024
+        chunk = (32 if (progress_cb or cancel_event) else 128) * 1024 * 1024
         with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
             # Size from the open handle: a separate src.stat() is one more
             # path lookup (a network round-trip on NFS/CIFS) per frame.
@@ -330,6 +348,8 @@ def _linux_copy_file_range(
             src_size = os.fstat(fsrc.fileno()).st_size
             copied = 0
             while copied < src_size:
+                if cancel_event and cancel_event.is_set():
+                    raise CopyCancelled("Copy cancelled by user")
                 written = os.copy_file_range(
                     fsrc.fileno(), fdst.fileno(), min(chunk, src_size - copied)
                 )
@@ -338,7 +358,19 @@ def _linux_copy_file_range(
                 copied += written
                 if progress_cb:
                     progress_cb(copied, src_size)
+        if copied != src_size:
+            logger.debug(
+                "copy_file_range short copy for %s (%d/%d bytes)",
+                src.name, copied, src_size,
+            )
+            return False
         return True
+    except CopyCancelled:
+        try:
+            dst.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     except OSError as exc:
         logger.debug("copy_file_range failed for %s: %s", src.name, exc)
         return False
@@ -397,15 +429,19 @@ def smart_copy(
         CopyCancelled: If cancelled via cancel_event.
         shutil.Error / OSError: If all copy methods fail.
     """
+    if cancel_event and cancel_event.is_set():
+        raise CopyCancelled("Copy cancelled by user")
+
     if sys.platform == "win32":
         # Per-file messages stay at DEBUG: a 2,000-frame promotion used to
         # emit 2,000 INFO lines into the GUI log. The promoter logs one
         # summary line per promotion instead. (CopyFileExW only *attempts*
         # SMB server-side copy; it's the server that decides.)
-        if is_same_smb_server(src, dst):
-            logger.debug("CopyFileExW, same SMB server (server-side copy possible): %s", src.name)
-        else:
-            logger.debug("Native copy (CopyFileExW): %s", src.name)
+        if logger.isEnabledFor(logging.DEBUG):
+            if is_same_smb_server(src, dst):
+                logger.debug("CopyFileExW, same SMB server (server-side copy possible): %s", src.name)
+            else:
+                logger.debug("Native copy (CopyFileExW): %s", src.name)
 
         if _win32_copy_file(src, dst, cancel_event, progress_cb):
             # No copystat: CopyFileExW already carries over the last-write
@@ -427,11 +463,14 @@ def smart_copy(
         logger.debug("Falling back to shutil.copy2 for %s", src.name)
 
     elif sys.platform == "linux":
-        if _linux_copy_file_range(src, dst, progress_cb):
+        if _linux_copy_file_range(src, dst, progress_cb, cancel_event=cancel_event):
             logger.debug("copy_file_range succeeded: %s", src.name)
             _preserve_metadata(src, dst)
             return
         logger.debug("Falling back to shutil.copy2 for %s", src.name)
+
+    if cancel_event and cancel_event.is_set():
+        raise CopyCancelled("Copy cancelled by user")
 
     # Universal fallback
     shutil.copy2(str(src), str(dst))

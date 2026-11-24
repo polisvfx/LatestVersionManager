@@ -802,16 +802,21 @@ class Promoter:
         """Copy files in parallel using a thread pool."""
         completed = 0
         counter_lock = threading.Lock()
+        abort = threading.Event()
 
         def _copy_one(src_file: Path):
             nonlocal completed
-            if self._cancelled.is_set():
+            if self._cancelled.is_set() or abort.is_set():
                 return
             target_name = self._remap_filename(src_file.name)
             # target_dir is the staging dir, emptied by _prepare_staging_dir,
             # so there is nothing to remove first (that check cost 1-2 stats
             # per frame over SMB).
-            smart_copy(src_file, target_dir / target_name, cancel_event=self._cancelled)
+            try:
+                smart_copy(src_file, target_dir / target_name, cancel_event=self._cancelled)
+            except BaseException:
+                abort.set()
+                raise
             with counter_lock:
                 completed += 1
                 done = completed
@@ -820,9 +825,17 @@ class Promoter:
 
         with ThreadPoolExecutor(max_workers=_COPY_WORKERS) as executor:
             futures = [executor.submit(_copy_one, f) for f in source_files]
-            # Wait for all to complete, propagate exceptions
+            # Wait for all to complete, propagate first exception
+            first_error: Optional[BaseException] = None
             for future in futures:
-                future.result()
+                try:
+                    future.result()
+                except BaseException as exc:
+                    abort.set()
+                    if first_error is None:
+                        first_error = exc
+            if first_error is not None:
+                raise first_error
 
         if self._cancelled.is_set():
             raise PromotionError("Promotion cancelled by user — target left unchanged.")
@@ -1038,12 +1051,19 @@ class Promoter:
         # Extract layer suffix for this specific file (e.g. "_alpha")
         layer_suffix = self._extract_layer_suffix(filename)
 
-        # Expand template tokens
-        base = template
-        base = base.replace("{source_title}", tokens["source_title"])
-        base = base.replace("{source_name}", tokens["source_name"])
-        base = base.replace("{source_basename}", tokens["source_basename"])
-        base = base.replace("{source_fullname}", tokens["source_fullname"])
+        # Expand template tokens in a single pass so a token value containing
+        # another literal token is never re-expanded.
+        _tok = {
+            "{source_title}": tokens["source_title"],
+            "{source_name}": tokens["source_name"],
+            "{source_basename}": tokens["source_basename"],
+            "{source_fullname}": tokens["source_fullname"],
+        }
+        base = re.sub(
+            r"\{(?:source_title|source_name|source_basename|source_fullname)\}",
+            lambda m: _tok[m.group(0)],
+            template,
+        )
         base = _expand_group_token(base, self.source.group)
 
         # Append layer suffix after template expansion to preserve original position
@@ -1172,6 +1192,10 @@ class Promoter:
             for stem, mine in candidates:
                 if not name.startswith(stem):
                     continue
+                # Require a delimiter boundary (or exact match) so stem "shot1"
+                # does not falsely match "shot10.exr".
+                if len(name) > len(stem) and name[len(stem)] not in "._-":
+                    continue
                 # Ties go to this source: an equal foreign stem is usually
                 # this source's own pre-migration sidecar (and a genuine
                 # same-stem clash is flagged by conflicts.py anyway).
@@ -1224,8 +1248,9 @@ class Promoter:
             if is_media(e):
                 if e.name not in keep_files:
                     removal.append(Path(e.path))
-            elif e.is_symlink():
-                removal.append(Path(e.path))
+            elif e.is_symlink() and has_media_extension(e.name, valid_extensions):
+                if e.name not in keep_files:
+                    removal.append(Path(e.path))
         return self._drop_foreign_files(removal, target_dir, own_stem)
 
     @staticmethod
@@ -1634,10 +1659,17 @@ class Promoter:
         versions = scanner.scan()
 
         target_version = None
+        prev_source_norm = os.path.normcase(os.path.normpath(prev.source)) if prev.source else ""
+        fallback_version = None
         for v in versions:
             if version_strings_match(v.version_string, prev.version, v.version_number):
-                target_version = v
-                break
+                if prev_source_norm and os.path.normcase(os.path.normpath(v.source_path)) == prev_source_norm:
+                    target_version = v
+                    break
+                if fallback_version is None:
+                    fallback_version = v
+        if target_version is None:
+            target_version = fallback_version
 
         if target_version is None:
             raise PromotionError(
@@ -1665,8 +1697,11 @@ class Promoter:
         valid_extensions = self._valid_extensions
 
         if source_path.is_dir():
-            source_entries = self._media_entries(source_path)
-            source_files = [Path(e.path) for e in source_entries]
+            source_entries_map = {e.path: e for e in self._media_entries(source_path)}
+            source_files = [Path(p) for p in source_entries_map]
+            if self._same_dir(source_path, Path(self.source.source_dir)):
+                source_files = self._filter_version_files(source_files, version)
+            source_entries = [source_entries_map.get(str(f)) for f in source_files]
         else:
             source_entries = None
             source_files = [source_path] if source_path.is_file() else []
@@ -1676,7 +1711,8 @@ class Promoter:
         for i, f in enumerate(source_files):
             try:
                 # DirEntry.stat() reuses the listing's data on Windows.
-                st = source_entries[i].stat() if source_entries is not None else f.stat()
+                entry = source_entries[i] if source_entries is not None else None
+                st = entry.stat() if entry is not None else f.stat()
                 size = st.st_size
             except OSError:
                 size = 0
@@ -1777,16 +1813,24 @@ class Promoter:
         except Exception:
             return list(target_entries)
 
-        m = _FRAME_EXT_RE.search(expected)
-        if m:
-            sep = m.group(1)
-            ext = m.group(3)
-            stem = expected[:m.start()]
-            own_re = re.compile(
-                re.escape(stem) + re.escape(sep) + r"\d+\." + re.escape(ext) + r"$",
-                re.IGNORECASE,
-            )
-            return [e for e in target_entries if own_re.match(e.name)]
+        if not is_container_file(expected):
+            m = _FRAME_EXT_RE.search(expected)
+            if m:
+                sep = m.group(1)
+                ext = m.group(3)
+                stem = expected[:m.start()]
+                own_re = re.compile(
+                    re.escape(stem) + r"(?:[._\-].+)?" + re.escape(sep) + r"\d+\." + re.escape(ext) + r"$",
+                    re.IGNORECASE,
+                )
+                matched = [e for e in target_entries if own_re.match(e.name)]
+                if matched:
+                    target_dir = Path(matched[0].path).parent
+                    kept_paths = set(self._drop_foreign_files(
+                        [Path(e.path) for e in matched], target_dir, stem
+                    ))
+                    return [e for e in matched if Path(e.path) in kept_paths]
+                return []
 
         # Single-file source — exact name match (case-insensitive on Windows).
         expected_lower = expected.lower()

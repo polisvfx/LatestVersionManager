@@ -615,7 +615,7 @@ class ProjectSettingsDialog(QDialog):
         def _refresh_resolve_running(force: bool = True) -> None:
             if force:
                 invalidate_resolve_running_cache()
-            running = is_resolve_running(force=True)
+            running = is_resolve_running(force=force)
             if running:
                 self._resolve_running_label.setText("DaVinci Resolve: running")
                 self._resolve_running_label.setStyleSheet(
@@ -627,7 +627,9 @@ class ProjectSettingsDialog(QDialog):
                     "color: #ffaa00; font-size: 11pt;"
                 )
 
-        resolve_refresh_btn.clicked.connect(_refresh_resolve_running)
+        resolve_refresh_btn.clicked.connect(
+            lambda _checked=False: _refresh_resolve_running(force=True)
+        )
         _refresh_resolve_running(force=False)  # initial fill without busting cache
 
         running_row = QHBoxLayout()
@@ -751,7 +753,17 @@ class ProjectSettingsDialog(QDialog):
             self._nav_list.addItem(title.replace("&&", "&"))
         self._nav_list.currentRowChanged.connect(self._on_nav_changed)
         if self._sections:
-            self._nav_list.setCurrentRow(0)
+            if not ProjectSettingsDialog._collapsed_states:
+                self._nav_list.setCurrentRow(0)
+            else:
+                # Preserve remembered collapsed states across dialog re-opens
+                first_open = next(
+                    (idx for idx, (_t, sec) in enumerate(self._sections) if not sec._collapsed),
+                    0,
+                )
+                self._nav_list.blockSignals(True)
+                self._nav_list.setCurrentRow(first_open)
+                self._nav_list.blockSignals(False)
 
         # Bottom bar outside scroll
         bottom = QHBoxLayout()
@@ -1225,11 +1237,16 @@ class ProjectSettingsDialog(QDialog):
         super().done(result)
 
     def _save_as_template(self):
-        """Save the current config as a reusable template (Feature #17)."""
+        """Save the current dialog settings as a reusable template (Feature #17)."""
+        import copy
         from src.lvm.templates import save_template
         name, ok = QInputDialog.getText(self, "Save Template", "Template name:")
         if ok and name.strip():
-            path = save_template(self._config, name.strip())
+            # Apply in-progress dialog edits onto a snapshot so unsaved tweaks
+            # are included without mutating the live project config if cancelled.
+            snapshot = copy.deepcopy(self._config)
+            self.apply_to_config(snapshot)
+            path = save_template(snapshot, name.strip())
             QMessageBox.information(self, "Template Saved", f"Template saved to:\n{path}")
 
 

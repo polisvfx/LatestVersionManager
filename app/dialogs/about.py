@@ -27,7 +27,8 @@ class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"About {APP_NAME}")
-        self.setFixedSize(400, 340)
+        self.setMinimumWidth(380)
+        self.resize(420, 360)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)

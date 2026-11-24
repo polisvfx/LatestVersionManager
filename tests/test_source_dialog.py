@@ -64,6 +64,12 @@ class TestSourceDialogEditPreservesFields(unittest.TestCase):
         self.original = _make_full_source()
         self.dialog = SourceDialog(source=self.original, project_config=self.config)
 
+    def tearDown(self):
+        self.dialog.close()
+        self.dialog.deleteLater()
+        self.dialog = None
+        _app.processEvents()
+
     def test_unmanaged_fields_survive_unchanged_accept(self):
         result = self.dialog.get_source()
         self.assertEqual(result.group, "Shots")
@@ -117,6 +123,7 @@ class TestSourceDialogNewSource(unittest.TestCase):
 
     def test_new_source_defaults(self):
         dlg = SourceDialog(source=None, project_config=ProjectConfig(project_name="Show"))
+        self.addCleanup(lambda: (dlg.close(), dlg.deleteLater(), _app.processEvents()))
         dlg.name_edit.setText("NewSource")
         dlg.source_dir_edit.setText("/projects/show/new")
         result = dlg.get_source()
@@ -130,10 +137,11 @@ class TestSourceDialogNewSource(unittest.TestCase):
 
     def test_titles(self):
         cfg = ProjectConfig(project_name="Show")
-        self.assertEqual(SourceDialog(project_config=cfg).windowTitle(), "Add Source")
-        self.assertEqual(
-            SourceDialog(source=_make_full_source(), project_config=cfg).windowTitle(),
-            "Edit Source")
+        d1 = SourceDialog(project_config=cfg)
+        d2 = SourceDialog(source=_make_full_source(), project_config=cfg)
+        self.addCleanup(lambda: (d1.close(), d1.deleteLater(), d2.close(), d2.deleteLater(), _app.processEvents()))
+        self.assertEqual(d1.windowTitle(), "Add Source")
+        self.assertEqual(d2.windowTitle(), "Edit Source")
 
     def test_prefilled_draft_is_add_and_keeps_fields(self):
         """A drag-and-drop draft opens as Add Source and keeps its sample."""
@@ -146,6 +154,7 @@ class TestSourceDialogNewSource(unittest.TestCase):
         )
         dlg = SourceDialog(source=draft, project_config=ProjectConfig(project_name="Show"),
                            is_new=True)
+        self.addCleanup(lambda: (dlg.close(), dlg.deleteLater(), _app.processEvents()))
         self.assertEqual(dlg.windowTitle(), "Add Source")
         self.assertEqual(dlg.name_edit.text(), "sh020_comp")
         result = dlg.get_source()
