@@ -250,7 +250,7 @@ class Promoter:
         source_path = Path(version.source_path)
         if source_path.is_dir():
             source_files = self._list_media(source_path)
-            if source_path == Path(self.source.source_dir):
+            if self._same_dir(source_path, Path(self.source.source_dir)):
                 source_files = self._filter_version_files(source_files, version)
         else:
             source_files = [source_path] if source_path.is_file() else []
@@ -489,7 +489,7 @@ class Promoter:
                     ]
             except OSError:
                 return []
-            if candidates and source_path == Path(self.source.source_dir):
+            if candidates and self._same_dir(source_path, Path(self.source.source_dir)):
                 # Flat layout: only this version's files.
                 candidates = self._filter_version_files(sorted(candidates), version)
         else:
@@ -516,7 +516,7 @@ class Promoter:
                 )
         except OSError:
             return None  # not a directory (single file) or unreadable
-        if files and source_path == Path(self.source.source_dir):
+        if files and self._same_dir(source_path, Path(self.source.source_dir)):
             files = self._filter_version_files(files, version)
         for f in files[-count:]:
             try:
@@ -542,6 +542,19 @@ class Promoter:
             pass
         return entries
 
+    @staticmethod
+    def _same_dir(a: Path, b: Path) -> bool:
+        """Compare two directory paths tolerating symlinks, '..', and platform casing."""
+        try:
+            ra = str(a.resolve())
+        except OSError:
+            ra = os.path.abspath(str(a))
+        try:
+            rb = str(b.resolve())
+        except OSError:
+            rb = os.path.abspath(str(b))
+        return os.path.normcase(ra) == os.path.normcase(rb)
+
     def _filter_version_files(
         self, files: list[Path], version: VersionInfo
     ) -> list[Path]:
@@ -549,8 +562,8 @@ class Promoter:
 
         When a watched source uses flat versioned files (all versions in the
         same directory), the file list contains every version's files.  This
-        method keeps only the files whose embedded version/date matches the
-        target *version*.
+        method keeps only the files whose embedded version/date (and basename,
+        when ``sample_filename`` is set) matches the target *version*.
         """
         from .scanner import VersionScanner
         from .task_tokens import parse_date_to_sortable
@@ -561,37 +574,43 @@ class Promoter:
 
         date_format = getattr(self.source, "date_format", "")
         regex = VersionScanner._compile_version_pattern(pattern, date_format)
+        scanner = VersionScanner(self.source, self.task_tokens)
 
         has_version = "{version}" in pattern
         has_date = "{date}" in pattern
 
         filtered = []
         for f in files:
+            if not scanner._matches_basename(f.name):
+                continue
             match = regex.search(f.name)
             if not match:
                 continue
             groups = match.groups()
 
-            if has_version and has_date:
-                date_pos = pattern.index("{date}")
-                ver_pos = pattern.index("{version}")
-                if date_pos < ver_pos:
-                    date_str, ver_str = groups[0], groups[1]
+            try:
+                if has_version and has_date:
+                    date_pos = pattern.index("{date}")
+                    ver_pos = pattern.index("{version}")
+                    if date_pos < ver_pos:
+                        date_str, ver_str = groups[0], groups[1]
+                    else:
+                        ver_str, date_str = groups[0], groups[1]
+                    if (int(ver_str) != version.version_number
+                            or parse_date_to_sortable(date_str, date_format) != version.date_sortable):
+                        continue
+                elif has_date and not has_version:
+                    if parse_date_to_sortable(groups[0], date_format) != version.date_sortable:
+                        continue
                 else:
-                    ver_str, date_str = groups[0], groups[1]
-                if (int(ver_str) != version.version_number
-                        or parse_date_to_sortable(date_str, date_format) != version.date_sortable):
-                    continue
-            elif has_date and not has_version:
-                if parse_date_to_sortable(groups[0], date_format) != version.date_sortable:
-                    continue
-            else:
-                if int(match.group(1)) != version.version_number:
-                    continue
+                    if int(match.group(1)) != version.version_number:
+                        continue
+            except (IndexError, ValueError):
+                continue
 
             filtered.append(f)
 
-        return filtered if filtered else files
+        return filtered
 
     def _promote_sequence(
         self,
@@ -615,23 +634,27 @@ class Promoter:
 
         # When source_dir is the watched source root (flat file layout),
         # it contains files from ALL versions — filter to only the target version.
-        if source_dir == Path(self.source.source_dir):
+        if self._same_dir(source_dir, Path(self.source.source_dir)):
             source_files = self._filter_version_files(source_files, version)
 
         if not source_files:
             raise PromotionError(f"No matching files found in {source_dir}")
 
         # What the staging dir must contain afterwards: staged name -> source
-        # size. Two source files renamed to the same target name would
-        # silently overwrite each other — refuse instead.
+        # size. Two source files renamed to the same target name (or colliding
+        # in case on Windows/macOS) would silently overwrite each other — refuse.
         expected: dict[str, Optional[int]] = {}
+        seen_norm: dict[str, str] = {}
         for src_file in source_files:
             name = self._remap_filename(src_file.name)
-            if name in expected:
+            norm = name.casefold()
+            if norm in seen_norm:
                 raise PromotionError(
                     f"Two source files map to the same target name '{name}' "
-                    f"(check the file rename template) — nothing was promoted."
+                    f"(conflicts with '{seen_norm[norm]}'; check the file rename "
+                    f"template) — nothing was promoted."
                 )
+            seen_norm[norm] = name
             entry = source_entries.get(str(src_file))
             expected[name] = self._entry_size(entry) if entry is not None else None
 
@@ -1195,20 +1218,40 @@ class Promoter:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise PromotionError(f"Cannot read target directory {target_dir}: {e}") from e
 
-        staged_set = set(staged)
-        retire = {f.name for f in files_to_remove}
-        backup_names = retire | (existing & staged_set)
-        leftovers = sorted(retire - staged_set)  # old files with no replacement
+        # Key by casefolded filename so case-only renames (e.g. Shot.exr -> shot.exr)
+        # are matched on Windows NTFS, macOS APFS (where posixpath.normcase is a
+        # no-op!), and Linux clients writing to case-insensitive SMB/NAS shares.
+        existing_by_key: dict[str, list[str]] = {}
+        for n in sorted(existing):
+            existing_by_key.setdefault(n.casefold(), []).append(n)
+        staged_by_key = {n.casefold(): n for n in staged}
+        retire_by_key: dict[str, list[str]] = {}
+        for f in files_to_remove:
+            retire_by_key.setdefault(f.name.casefold(), []).append(f.name)
+
+        backup_keys = set(retire_by_key) | (set(existing_by_key) & set(staged_by_key))
+        leftovers = sorted(
+            name
+            for k in (set(retire_by_key) - set(staged_by_key))
+            for name in retire_by_key[k]
+        )
+        replaced_count = sum(
+            len(existing_by_key[k])
+            for k in (backup_keys & set(staged_by_key))
+            if k in existing_by_key
+        )
 
         lock = threading.Lock()
-        moved: list[str] = []    # names parked in backup_dir
+        moved: list[str] = []    # exact names parked in backup_dir
         placed: list[str] = []   # staged names renamed into target_dir
 
         def swap_one(name: str) -> None:
-            if name in backup_names:
-                os.replace(target_dir / name, backup_dir / name)
-                with lock:
-                    moved.append(name)
+            key = name.casefold()
+            if key in backup_keys and key in existing_by_key:
+                for old_name in existing_by_key[key]:
+                    os.replace(target_dir / old_name, backup_dir / old_name)
+                    with lock:
+                        moved.append(old_name)
             os.replace(staging_dir / name, target_dir / name)
             with lock:
                 placed.append(name)
@@ -1219,7 +1262,7 @@ class Promoter:
                 moved.append(name)
 
         try:
-            if backup_names:
+            if backup_keys:
                 if backup_dir.exists():
                     shutil.rmtree(backup_dir, ignore_errors=True)
                 backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1258,10 +1301,10 @@ class Promoter:
         logger.info(
             "Swapped %d file(s) into %s in %.2fs (%d replaced, %d retired)",
             len(staged), target_dir, self.last_swap_seconds,
-            len(backup_names & staged_set), len(leftovers),
+            replaced_count, len(leftovers),
         )
         shutil.rmtree(staging_dir, ignore_errors=True)
-        if backup_names:
+        if backup_keys:
             try:
                 shutil.rmtree(backup_dir)
             except OSError as e:
@@ -1556,7 +1599,7 @@ class Promoter:
         and contains files from every version.  This method filters to only
         the files belonging to *version* so that mtime checks are accurate.
         """
-        if source_path.is_dir() and source_path == Path(self.source.source_dir):
+        if source_path.is_dir() and self._same_dir(source_path, Path(self.source.source_dir)):
             return self._filter_version_files(self._list_media(source_path), version)
         return None
 
@@ -1644,10 +1687,25 @@ class Promoter:
             # so that new versions rendered into the same folder don't
             # trigger a false stale detection.
             version_files = None
-            if source_path.is_dir() and source_path == Path(self.source.source_dir):
+            if source_path.is_dir() and self._same_dir(source_path, Path(self.source.source_dir)):
                 ver_num = self._extract_version_number(current.version)
-                if ver_num is not None:
-                    stub = VersionInfo(current.version, ver_num, current.source)
+                date_sortable = 0
+                date_fmt = getattr(self.source, "date_format", "")
+                if date_fmt:
+                    from .task_tokens import parse_date_to_sortable
+                    # current.version may contain an ISO date like '2026-03-01' or raw digits
+                    m_iso = re.search(r"(\d{4})-(\d{2})-(\d{2})", current.version or "")
+                    if m_iso:
+                        date_sortable = int(f"{m_iso.group(1)}{m_iso.group(2)}{m_iso.group(3)}")
+                    else:
+                        date_sortable = parse_date_to_sortable(current.version or "", date_fmt)
+                if ver_num is not None or date_sortable:
+                    stub = VersionInfo(
+                        current.version,
+                        ver_num if ver_num is not None else 0,
+                        current.source,
+                        date_sortable=date_sortable,
+                    )
                     version_files = self._get_version_source_files(source_path, stub)
             current_source_mtime = self._get_max_mtime(source_path, files=version_files)
             if current_source_mtime is not None and current_source_mtime > current.source_mtime + 1.0:

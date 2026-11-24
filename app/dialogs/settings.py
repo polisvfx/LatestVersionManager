@@ -276,7 +276,7 @@ class ProjectSettingsDialog(QDialog):
         self.extensions_edit = QLineEdit(" ".join(config.default_file_extensions))
         self.extensions_edit.setToolTip(
             "Space-separated list of file extensions recognised when scanning "
-            "for versioned content (e.g. exr dpx mov mp4)."
+            "for versioned content (e.g. .exr .dpx .mov .mp4; leading dots added automatically)."
         )
         detection.addRow("File Extensions:", self.extensions_edit)
 
@@ -1163,8 +1163,9 @@ class ProjectSettingsDialog(QDialog):
             fmt for fmt, cb in self.date_format_checks.items() if cb.isChecked()
         )
 
-        exts = self.extensions_edit.text().strip().split()
-        config.default_file_extensions = exts if exts else list(DEFAULT_FILE_EXTENSIONS)
+        config.default_file_extensions = normalize_extensions(
+            self.extensions_edit.text(), DEFAULT_FILE_EXTENSIONS
+        )
 
         config.default_link_mode = self.link_mode_combo.currentText()
         config.timecode_mode = self.timecode_combo.currentText()

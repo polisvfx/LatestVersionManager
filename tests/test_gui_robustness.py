@@ -751,5 +751,133 @@ class TestAutoPromoteNotifications(_MainWindowTestBase):
                          ProjectConfig(project_name="P").to_dict())
 
 
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestP0GuiRegressions(_MainWindowTestBase):
+    """Regression tests for P0 GUI bugs (templates, groups, extensions, force flag)."""
+
+    def test_normalize_extensions_adds_leading_dots(self):
+        from app._common import normalize_extensions
+        self.assertEqual(normalize_extensions("exr .DPX, mov"), [".exr", ".dpx", ".mov"])
+        self.assertEqual(normalize_extensions(""), list(normalize_extensions("")))
+
+    def test_manage_groups_cancel_does_not_mutate_sources(self):
+        from app.dialogs.manage_groups import ManageGroupsDialog
+        from src.lvm.models import ProjectConfig, WatchedSource
+        cfg = ProjectConfig(
+            project_name="G",
+            groups={"Comp": {"color": "#ff0000"}},
+            watched_sources=[WatchedSource(name="s1", source_dir="/a", group="Comp")],
+        )
+        dlg = ManageGroupsDialog(cfg)
+        self.addCleanup(dlg.deleteLater)
+        dlg.group_list.setCurrentRow(0)
+        with patch("app.dialogs.manage_groups.QInputDialog.getText", return_value=("Renamed", True)):
+            dlg._rename_group()
+        # Cancel — live source must still belong to "Comp"
+        dlg.reject()
+        self.assertEqual(cfg.watched_sources[0].group, "Comp")
+        self.assertIn("Comp", cfg.groups)
+
+        # Now verify OK applies both groups and source assignments
+        dlg2 = ManageGroupsDialog(cfg)
+        self.addCleanup(dlg2.deleteLater)
+        dlg2.group_list.setCurrentRow(0)
+        with patch("app.dialogs.manage_groups.QInputDialog.getText", return_value=("Renamed", True)):
+            dlg2._rename_group()
+        dlg2.apply_to_config(cfg)
+        self.assertEqual(cfg.watched_sources[0].group, "Renamed")
+        self.assertIn("Renamed", cfg.groups)
+
+    def test_group_by_keeps_sorting_disabled_and_skips_header_selection(self):
+        from PySide6.QtCore import Qt
+        from src.lvm.models import ProjectConfig, WatchedSource
+        cfg = ProjectConfig(
+            project_name="G",
+            groups={"Alpha": {"color": "#ff0000"}, "Beta": {"color": "#00ff00"}},
+            watched_sources=[
+                WatchedSource(name="z_shot", source_dir=str(self.tmp / "z"), group="Alpha"),
+                WatchedSource(name="a_shot", source_dir=str(self.tmp / "a"), group="Beta"),
+            ],
+        )
+        self.win.config = cfg
+        self.win.group_by_check.setChecked(True)
+        self.win._populate_source_list()
+        self.assertFalse(self.win.source_list.isSortingEnabled())
+        # Item 0 is the Alpha group header; item 1 is z_shot
+        self.assertIn("Alpha", self.win.source_list.topLevelItem(0).text(0))
+        self.assertEqual(self.win.source_list.topLevelItem(1).data(0, Qt.UserRole), "z_shot")
+        self.win._select_first_source_item()
+        cur = self.win.source_list.currentItem()
+        self.assertIsNotNone(cur)
+        self.assertEqual(cur.data(0, Qt.UserRole), "z_shot")
+
+    def test_new_project_with_template_does_not_clobber_open_project(self):
+        from src.lvm.config import save_config, load_config
+        from src.lvm.models import ProjectConfig
+        from src.lvm.templates import save_template
+
+        open_path = str(self.tmp / "open_proj.json")
+        open_cfg = ProjectConfig(project_name="OpenProj", default_link_mode="copy")
+        save_config(open_cfg, open_path)
+        self.win.config = open_cfg
+        self.win.config_path = open_path
+
+        tpl_cfg = ProjectConfig(project_name="Tpl", default_link_mode="hardlink")
+        tpl_path = save_template(tpl_cfg, "HardlinkTpl", location="project", project_dir=str(self.tmp))
+
+        new_dir = self.tmp / "new_proj"
+        new_dir.mkdir()
+        fake_info = {
+            "project_name": "NewProj",
+            "project_root": str(new_dir),
+            "save_dir": str(new_dir),
+            "name_whitelist": [],
+            "name_blacklist": [],
+            "task_tokens": [],
+            "template_path": str(tpl_path),
+        }
+        fake_dlg = type("D", (), {
+            "exec": lambda self_: 1,
+            "get_project_info": lambda self_: fake_info,
+        })()
+        with patch("app.main_window.ProjectSetupDialog", return_value=fake_dlg), \
+             patch.object(self.win, "_load_project") as mock_load:
+            self.win._new_project()
+
+        # Previously open project must remain untouched on disk and in memory
+        self.assertEqual(self.win.config.default_link_mode, "copy")
+        self.assertEqual(load_config(open_path).default_link_mode, "copy")
+        # Newly created project on disk must have the template applied
+        created_path = mock_load.call_args.args[0]
+        self.assertEqual(load_config(created_path).default_link_mode, "hardlink")
+
+    def test_force_promote_does_not_leak_to_next_promotion(self):
+        from src.lvm.models import VersionInfo, WatchedSource
+        from src.lvm.promoter import Promoter
+        src = WatchedSource(name="shot", source_dir=str(self.tmp), latest_target=str(self.tmp))
+        p = Promoter(src)
+        v = VersionInfo("v001", 1, str(self.tmp))
+        captured_force = []
+
+        class FakeWorker:
+            def __init__(self_, promoter, version, parent, force=False, pinned=False, keep_layers=None):
+                captured_force.append(force)
+                self_.progress = type("S", (), {"connect": lambda *a: None})()
+                self_.byte_progress = type("S", (), {"connect": lambda *a: None})()
+                self_.finished = type("S", (), {"connect": lambda *a: None})()
+                self_.error = type("S", (), {"connect": lambda *a: None})()
+            def start(self_):
+                pass
+            def isRunning(self_):
+                return False
+
+        with patch("app.main_window.check_link_mode_available", return_value=(True, "")), \
+             patch("app.main_window.PromoteWorker", FakeWorker):
+            self.win._start_promotion(p, v, force=True)
+            self.win._start_promotion(p, v)
+        self.win._worker = None
+        self.assertEqual(captured_force, [True, False])
+
+
 if __name__ == "__main__":
     unittest.main()

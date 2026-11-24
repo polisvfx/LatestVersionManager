@@ -112,6 +112,7 @@ jobs:
           python -m unittest tests.test_render_check -v
           python -m unittest tests.test_nle_bridge -v
           python -m unittest tests.test_bench_tool -v
+          python -m unittest tests.test_p0_regressions -v
 
       # ── Inject release version into package ─────────────────────────────
       # When triggered by a published release (tag e.g. v1.2.3), patch
@@ -329,8 +330,10 @@ jobs:
           mkdir -p dist
           zip -r dist/LatestVersionManager-python.zip \
             app.py \
+            app/ \
             main.py \
             src/ \
+            companions/ \
             resources/ \
             requirements.txt \
             README.md \

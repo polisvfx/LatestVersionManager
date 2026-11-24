@@ -191,8 +191,7 @@ class SourceDialog(QDialog):
             self.target_dir_edit.setText(d)
 
     def get_source(self) -> WatchedSource:
-        exts_text = self.extensions_edit.text().strip()
-        exts = exts_text.split() if exts_text else list(DEFAULT_FILE_EXTENSIONS)
+        exts = normalize_extensions(self.extensions_edit.text(), DEFAULT_FILE_EXTENSIONS)
 
         pc = self._project_config
         date_fmt = ",".join(
