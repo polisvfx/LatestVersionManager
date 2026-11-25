@@ -574,6 +574,9 @@ class ProjectConfig:
     # When True, the first-run preview dialog is suppressed on subsequent
     # clicks. Set by the user via an opt-out checkbox in the preview dialog.
     discover_and_promote_skip_preview: bool = False
+    # Project-level toggle for row thumbnails and preview pane extraction.
+    # When False, no thumbnails are queued or generated for this project.
+    thumbnails_enabled: bool = True
     # Runtime only — not serialized, set by config loader
     project_dir: str = field(default="", repr=False)
     # Runtime only — the "config_version" the file had when it was loaded.
@@ -680,6 +683,8 @@ class ProjectConfig:
             d["auto_promote_notifications"] = self.auto_promote_notifications
         if self.discover_and_promote_skip_preview:
             d["discover_and_promote_skip_preview"] = True
+        if not self.thumbnails_enabled:
+            d["thumbnails_enabled"] = False
         return d
 
     @classmethod
@@ -751,6 +756,7 @@ class ProjectConfig:
             auto_promote_notifications=data.get("auto_promote_notifications", "off")
             if data.get("auto_promote_notifications") in ("off", "problems", "all") else "off",
             discover_and_promote_skip_preview=data.get("discover_and_promote_skip_preview", False),
+            thumbnails_enabled=bool(data.get("thumbnails_enabled", True)),
         )
 
 

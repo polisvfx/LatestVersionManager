@@ -181,6 +181,17 @@ class ProjectSettingsDialog(QDialog):
         )
         general.addRow("", self.discover_promote_cb)
 
+        self.thumbnails_enabled_cb = QCheckBox(
+            "Enable thumbnails (version row icons && preview pane)"
+        )
+        self.thumbnails_enabled_cb.setChecked(getattr(config, "thumbnails_enabled", True))
+        self.thumbnails_enabled_cb.setToolTip(
+            "Allow thumbnail extraction and display for this project.\n"
+            "Disable on slow network shares or headless workflows to prevent\n"
+            "all background thumbnail loading and caching."
+        )
+        general.addRow("", self.thumbnails_enabled_cb)
+
         from app.notifier import AutoPromoteNotifier
         self.notify_combo = QComboBox()
         self.notify_combo.addItem("Off", "off")
@@ -1208,6 +1219,7 @@ class ProjectSettingsDialog(QDialog):
 
         was_enabled = config.discover_and_promote_enabled
         config.discover_and_promote_enabled = self.discover_promote_cb.isChecked()
+        config.thumbnails_enabled = self.thumbnails_enabled_cb.isChecked()
         # When the feature is re-enabled, reset the skip-preview opt-out so
         # the user sees the preview at least once after toggling it back on.
         if config.discover_and_promote_enabled and not was_enabled:

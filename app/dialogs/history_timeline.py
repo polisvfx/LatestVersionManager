@@ -412,18 +412,33 @@ class HistoryTimelineDialog(QDialog):
         self._worker = w
         w.completed.connect(self._on_loaded)
         w.error.connect(self._on_load_error)
-        w.finished.connect(w.deleteLater)
+        w.finished.connect(lambda worker=w: self._on_worker_finished(worker))
         w.start()
 
-    def _stop_worker(self):
-        if getattr(self, "_worker", None) is not None:
-            try:
-                self._worker.disconnect()
-            except RuntimeError:
-                pass
-            if self._worker.isRunning():
-                self._worker.wait(3000)
+    def _on_worker_finished(self, worker):
+        if self._worker is worker:
             self._worker = None
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _stop_worker(self):
+        worker = getattr(self, "_worker", None)
+        self._worker = None
+        if worker is None:
+            return
+        try:
+            worker.blockSignals(True)
+        except RuntimeError:
+            pass
+        try:
+            if worker.isRunning():
+                worker.wait(3000)
+            if not worker.isRunning():
+                worker.deleteLater()
+        except RuntimeError:
+            pass
 
     def reject(self):
         self._stop_worker()

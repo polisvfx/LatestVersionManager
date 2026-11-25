@@ -204,6 +204,64 @@ class DialogSmokeTest(unittest.TestCase):
         finally:
             dlg.deleteLater()
 
+    def test_close_button_closes_after_worker_finishes(self):
+        import time as _time
+        from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox
+        from app.dialogs.history_timeline import HistoryTimelineDialog
+
+        cfg = _make_project(n_sources=2, m_entries=2, base_dir=self.tmp)
+        dlg = HistoryTimelineDialog(cfg)
+        self.addCleanup(dlg.deleteLater)
+        dlg.show()
+
+        deadline = _time.monotonic() + 5.0
+        while dlg._worker is not None and _time.monotonic() < deadline:
+            QApplication.processEvents()
+            _time.sleep(0.01)
+        for _ in range(5):
+            QApplication.processEvents()
+            _time.sleep(0.01)
+
+        close_btn = dlg.findChild(QDialogButtonBox).button(QDialogButtonBox.Close)
+        self.assertIsNotNone(close_btn)
+        close_btn.click()
+        QApplication.processEvents()
+
+        self.assertEqual(dlg.result(), QDialog.Rejected)
+        self.assertFalse(dlg.isVisible())
+
+    def test_close_button_closes_while_worker_running(self):
+        import threading
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox
+        from app.dialogs.history_timeline import HistoryLoadWorker, HistoryTimelineDialog
+
+        cfg = _make_project(n_sources=2, m_entries=2, base_dir=self.tmp)
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_run(worker_self):
+            started.set()
+            release.wait(0.15)
+            worker_self.completed.emit([])
+
+        with patch.object(HistoryLoadWorker, "run", slow_run):
+            dlg = HistoryTimelineDialog(cfg)
+            self.addCleanup(dlg.deleteLater)
+            dlg.show()
+            self.assertTrue(started.wait(timeout=2.0))
+            self.assertIsNotNone(dlg._worker)
+            self.assertTrue(dlg._worker.isRunning())
+
+            close_btn = dlg.findChild(QDialogButtonBox).button(QDialogButtonBox.Close)
+            self.assertIsNotNone(close_btn)
+            close_btn.click()
+            QApplication.processEvents()
+            release.set()
+
+            self.assertEqual(dlg.result(), QDialog.Rejected)
+            self.assertFalse(dlg.isVisible())
+
 
 if __name__ == "__main__":
     unittest.main()

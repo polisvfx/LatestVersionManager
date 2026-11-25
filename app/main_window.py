@@ -143,6 +143,8 @@ class MainWindow(
         self._version_thumbs_enabled = self._settings.value(
             "version_thumbs_enabled", False, type=bool
         )
+        self._preview_panel_width: int = 220
+        self._preview_pixmap: Optional[QPixmap] = None
 
         self._build_ui()
         self._build_menu()
@@ -362,8 +364,8 @@ class MainWindow(
         self.btn_promote_split_all = QPushButton("All")
         self.btn_promote_split_all.setStyleSheet(promote_style_secondary)
         self.btn_promote_split_all.setToolTip(
-            "Promote all sources to latest.\n"
-            "Hold Shift to force re-promote all sources."
+            "Promote all sources to latest (F9).\n"
+            "Hold Shift to force re-promote all sources (Shift+F9)."
         )
         self.btn_promote_split_all.clicked.connect(self._promote_all_forced)
         self.btn_promote_split_all.setVisible(False)
@@ -423,8 +425,50 @@ class MainWindow(
         self.ver_hist_splitter = QSplitter(Qt.Vertical)
 
         # Version tree
-        ver_group = QGroupBox("Available Versions")
+        ver_group = QFrame()
+        ver_group.setObjectName("availableVersionsPanel")
+        ver_group.setStyleSheet(
+            "QFrame#availableVersionsPanel { border: 1px solid #2a2a2a; border-radius: 4px; }"
+        )
         ver_layout = QVBoxLayout(ver_group)
+        ver_layout.setContentsMargins(6, 5, 6, 6)
+        ver_layout.setSpacing(4)
+
+        # Compact header bar: section title on the left, Thumbnails checkbox and
+        # folded Preview toggle on the right (no extra toolbar row or side gutter).
+        ver_header = QHBoxLayout()
+        ver_header.setContentsMargins(2, 0, 2, 0)
+        ver_header.setSpacing(10)
+        ver_title = QLabel("Available Versions")
+        ver_title.setStyleSheet("font-weight: bold;")
+        ver_header.addWidget(ver_title)
+        ver_header.addStretch(1)
+
+        # Thumbnails toggle — opt-in per-row icons, generated lazily in the
+        # background (one ffmpeg/oiiotool at a time via ThumbnailQueueWorker)
+        self._version_thumbs_toggle = QCheckBox("Thumbnails")
+        self._version_thumbs_toggle.setChecked(self._version_thumbs_enabled)
+        self._version_thumbs_toggle.setToolTip(
+            "Show a thumbnail next to each version row "
+            "(generated in the background, cached on disk)"
+        )
+        self._version_thumbs_toggle.toggled.connect(self._toggle_version_thumbnails)
+        ver_header.addWidget(self._version_thumbs_toggle)
+
+        self._preview_toggle = QPushButton("\u25b6 Preview")
+        self._preview_toggle.setCheckable(True)
+        self._preview_toggle.setChecked(False)
+        self._preview_toggle.setCursor(Qt.PointingHandCursor)
+        self._preview_toggle.setToolTip("Show or hide the preview pane for the selected version")
+        self._preview_toggle.setStyleSheet(
+            "QPushButton { padding: 2px 8px; border: 1px solid #333333; "
+            "border-radius: 3px; background-color: #242424; }"
+            "QPushButton:hover { background-color: #2e2e2e; }"
+            "QPushButton:checked { background-color: #2d4a63; border-color: #4d7aae; font-weight: bold; }"
+        )
+        self._preview_toggle.toggled.connect(self._toggle_preview_panel)
+        ver_header.addWidget(self._preview_toggle)
+        ver_layout.addLayout(ver_header)
 
         self.version_tree = VersionTreeWidget()
         self.version_tree.setHeaderLabels(["Version", "Date", "Files", "Size", "Frame Range", "Timecode", "Path"])
@@ -442,61 +486,30 @@ class MainWindow(
         header.resizeSection(3, 80)
         header.resizeSection(4, 160)
         header.resizeSection(5, 110)
-        if self._version_thumbs_enabled:
-            self.version_tree.setIconSize(QSize(48, 27))
 
-        # Thumbnails toggle — opt-in per-row icons, generated lazily in the
-        # background (one ffmpeg/oiiotool at a time via ThumbnailQueueWorker)
-        thumbs_row = QHBoxLayout()
-        thumbs_row.addStretch(1)
-        self._version_thumbs_toggle = QToolButton()
-        self._version_thumbs_toggle.setText("Thumbnails")
-        self._version_thumbs_toggle.setCheckable(True)
-        self._version_thumbs_toggle.setChecked(self._version_thumbs_enabled)
-        self._version_thumbs_toggle.setToolTip(
-            "Show a first-frame thumbnail next to each version "
-            "(generated in the background, cached on disk)"
-        )
-        self._version_thumbs_toggle.toggled.connect(self._toggle_version_thumbnails)
-        thumbs_row.addWidget(self._version_thumbs_toggle)
-        ver_layout.addLayout(thumbs_row)
-
-        # Thumbnail/Preview panel (Feature #7) — collapsible, collapsed by default
+        # Thumbnail/Preview panel (Feature #7) — collapsible, hidden when folded
+        # so version_tree gets 100% of the width with zero dead space.
         self._ver_content_splitter = QSplitter(Qt.Horizontal)
         self._ver_content_splitter.addWidget(self.version_tree)
 
-        # Preview panel container with toggle button
-        preview_frame = QWidget()
-        preview_layout = QVBoxLayout(preview_frame)
-        preview_layout.setContentsMargins(0, 0, 0, 0)
-
-        self._preview_toggle = QPushButton("\u25b6 Preview")
-        self._preview_toggle.setCheckable(True)
-        self._preview_toggle.setChecked(False)
-        self._preview_toggle.setFixedHeight(24)
-        self._preview_toggle.setStyleSheet(
-            "QPushButton { text-align: left; border: none; padding-left: 4px; }"
-            " QPushButton:checked { font-weight: bold; }"
-        )
-        self._preview_toggle.toggled.connect(self._toggle_preview_panel)
-
         self.thumbnail_label = QLabel()
         self.thumbnail_label.setAlignment(Qt.AlignCenter)
-        self.thumbnail_label.setMinimumWidth(160)
+        self.thumbnail_label.setMinimumSize(160, 90)
         self.thumbnail_label.setMaximumWidth(320)
-        self.thumbnail_label.setStyleSheet("QLabel { background-color: #121212; border: 1px solid #2a2a2a; border-radius: 4px; padding: 4px; }")
+        self.thumbnail_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.thumbnail_label.setStyleSheet(
+            "QLabel { background-color: #121212; border: 1px solid #2a2a2a; "
+            "border-radius: 4px; padding: 4px; }"
+        )
         self.thumbnail_label.setText("No Preview")
         self.thumbnail_label.setVisible(False)  # Hidden by default
 
-        preview_layout.addWidget(self._preview_toggle)
-        preview_layout.addWidget(self.thumbnail_label, 1)
-
-        self._ver_content_splitter.addWidget(preview_frame)
+        self._ver_content_splitter.addWidget(self.thumbnail_label)
         self._ver_content_splitter.setCollapsible(0, False)  # Version tree not collapsible
         self._ver_content_splitter.setCollapsible(1, True)   # Preview panel collapsible
-        self._ver_content_splitter.setSizes([600, 24])       # Only toggle button width
+        self._ver_content_splitter.splitterMoved.connect(self._on_preview_splitter_moved)
 
-        ver_layout.addWidget(self._ver_content_splitter)
+        ver_layout.addWidget(self._ver_content_splitter, 1)
 
         # Connect version selection for thumbnail (lazy — only loads when visible)
         self.version_tree.currentItemChanged.connect(self._on_version_selected_thumbnail)
@@ -506,6 +519,8 @@ class MainWindow(
 
         # Promote controls
         promote_row = QHBoxLayout()
+        promote_row.setContentsMargins(0, 2, 0, 0)
+        promote_row.setSpacing(6)
         self.btn_import_version = QPushButton("Import Version...")
         self.btn_import_version.setEnabled(False)
         self.btn_import_version.clicked.connect(self._import_version)
@@ -521,6 +536,10 @@ class MainWindow(
         promote_row.addStretch()
         promote_row.addWidget(self.btn_promote)
 
+        self._progress_container = QWidget()
+        progress_row = QHBoxLayout(self._progress_container)
+        progress_row.setContentsMargins(0, 0, 0, 0)
+        progress_row.setSpacing(6)
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(True)
@@ -529,12 +548,14 @@ class MainWindow(
         self.btn_cancel_promote.setMinimumWidth(70)
         self.btn_cancel_promote.clicked.connect(self._cancel_promotion)
 
-        progress_row = QHBoxLayout()
         progress_row.addWidget(self.progress_bar)
         progress_row.addWidget(self.btn_cancel_promote)
+        self._progress_container.setVisible(False)
 
         ver_layout.addLayout(promote_row)
-        ver_layout.addLayout(progress_row)
+        ver_layout.addWidget(self._progress_container)
+
+        self._sync_thumbnail_controls()
 
         self.ver_hist_splitter.addWidget(ver_group)
 
@@ -757,12 +778,13 @@ class MainWindow(
         source_menu.addSeparator()
 
         promote_all_action = QAction("&Promote All to Latest", self)
-        # F9 is shown in the menu; Ctrl+Alt+Up still works. The Shift
-        # variants force re-promotion (_promote_all_or_selected reads Shift).
+        # F9 is shown in the menu; Ctrl+Alt+Up still works. Both always promote
+        # all sources; Shift+F9 / Ctrl+Alt+Shift+Up force re-promotion
+        # (_promote_all_or_selected reads Shift).
         promote_all_action.setShortcuts([
             QKeySequence(s) for s in PROMOTE_ALL_SHORTCUTS + PROMOTE_ALL_FORCE_SHORTCUTS
         ])
-        promote_all_action.triggered.connect(self._promote_all_or_selected)
+        promote_all_action.triggered.connect(self._promote_all)
         source_menu.addAction(promote_all_action)
 
         help_menu = menubar.addMenu("&Help")
@@ -1427,6 +1449,7 @@ class MainWindow(
         """User selected a source — populate versions and history."""
         self.version_tree.clear()
         self.history_tree.clear()
+        self._clear_thumbnail_work()
         self.btn_promote.setEnabled(False)
         self.btn_revert.setEnabled(False)
         self.btn_import_version.setEnabled(False)
@@ -1662,13 +1685,13 @@ class MainWindow(
                 self.history_tree.addTopLevelItem(item)
 
     _PROMOTE_STYLE = (
-        "QPushButton { background-color: #336699; color: white; padding: 8px 16px; "
+        "QPushButton { background-color: #336699; color: white; padding: 6px 16px; "
         "border-radius: 4px; font-weight: bold; font-size: 13pt; }"
         "QPushButton:hover { background-color: #4d7aae; }"
         "QPushButton:disabled { background-color: #2a2a2a; color: #8c8c8c; }"
     )
     _KEEP_STYLE = (
-        "QPushButton { background-color: #1e3a5a; color: white; padding: 8px 16px; "
+        "QPushButton { background-color: #1e3a5a; color: white; padding: 6px 16px; "
         "border-radius: 4px; font-weight: bold; font-size: 13pt; }"
         "QPushButton:hover { background-color: #2a5070; }"
         "QPushButton:disabled { background-color: #2a2a2a; color: #8c8c8c; }"
@@ -1801,23 +1824,109 @@ class MainWindow(
 
     # --- Thumbnail/Preview helpers (Feature #7) ---
 
-    def _toggle_preview_panel(self, checked):
+    def _project_thumbnails_enabled(self) -> bool:
+        """Whether thumbnails are enabled for the currently loaded project."""
+        return bool(self.config and getattr(self.config, "thumbnails_enabled", True))
+
+    def _clear_thumbnail_work(self):
+        """Cancel pending row-thumbnail queue entries and ignore stale preview loads."""
+        self._thumb_request_id += 1
+        if self._thumb_queue_worker is not None:
+            self._thumb_queue_worker.clear_pending()
+
+    def _sync_thumbnail_controls(self):
+        """Show/hide thumbnail controls and stop/start thumbnail work per project setting."""
+        allowed = self._project_thumbnails_enabled()
+        self._version_thumbs_toggle.setVisible(allowed)
+        self._preview_toggle.setVisible(allowed)
+        if not allowed:
+            self._clear_thumbnail_work()
+            self.version_tree.setIconSize(QSize())
+            for i in range(self.version_tree.topLevelItemCount()):
+                self.version_tree.topLevelItem(i).setIcon(0, QIcon())
+            self._preview_toggle.blockSignals(True)
+            self._preview_toggle.setChecked(False)
+            self._preview_toggle.blockSignals(False)
+            self._preview_toggle.setText("\u25b6 Preview")
+            self._preview_pixmap = None
+            self.thumbnail_label.setPixmap(QPixmap())
+            self.thumbnail_label.setText("No Preview")
+            self.thumbnail_label.setVisible(False)
+            return
+
+        self._version_thumbs_toggle.blockSignals(True)
+        self._version_thumbs_toggle.setChecked(self._version_thumbs_enabled)
+        self._version_thumbs_toggle.blockSignals(False)
+        if self._version_thumbs_enabled:
+            self.version_tree.setIconSize(QSize(48, 27))
+            self._queue_version_thumbnails()
+        else:
+            self.version_tree.setIconSize(QSize())
+
+    def _toggle_preview_panel(self, checked: bool):
         """Show/hide the preview panel. Triggers thumbnail load if becoming visible."""
-        self.thumbnail_label.setVisible(checked)
+        if checked and not self._project_thumbnails_enabled():
+            self._preview_toggle.blockSignals(True)
+            self._preview_toggle.setChecked(False)
+            self._preview_toggle.blockSignals(False)
+            self._preview_toggle.setText("\u25b6 Preview")
+            self.thumbnail_label.setVisible(False)
+            return
+        if self._preview_toggle.isChecked() != checked:
+            self._preview_toggle.blockSignals(True)
+            self._preview_toggle.setChecked(checked)
+            self._preview_toggle.blockSignals(False)
         self._preview_toggle.setText("\u25bc Preview" if checked else "\u25b6 Preview")
         if checked:
-            # Expand the splitter to show the preview
+            self.thumbnail_label.setVisible(True)
             sizes = self._ver_content_splitter.sizes()
-            if sizes[1] < 160:
-                self._ver_content_splitter.setSizes([600, 200])
+            total = sum(sizes) or max(self._ver_content_splitter.width(), 600)
+            prev_w = max(160, min(self._preview_panel_width, max(160, total // 2)))
+            self._ver_content_splitter.setSizes([max(200, total - prev_w), prev_w])
             # Trigger thumbnail load for currently selected version
             current = self.version_tree.currentItem()
             if current:
                 self._on_version_selected_thumbnail(current, None)
         else:
-            self._ver_content_splitter.setSizes([600, 24])
+            sizes = self._ver_content_splitter.sizes()
+            if len(sizes) > 1 and sizes[1] >= 160:
+                self._preview_panel_width = sizes[1]
+            self._thumb_request_id += 1
+            self._preview_pixmap = None
+            self.thumbnail_label.setPixmap(QPixmap())
+            self.thumbnail_label.setText("No Preview")
+            self.thumbnail_label.setVisible(False)
+
+    def _on_preview_splitter_moved(self, _pos: int = 0, _index: int = 0):
+        """Keep preview button and pixmap scaling in sync when dragging the splitter."""
+        if self.thumbnail_label.isHidden():
+            return
+        sizes = self._ver_content_splitter.sizes()
+        if len(sizes) <= 1:
+            return
+        w = sizes[1]
+        if w == 0:
+            self._preview_toggle.setChecked(False)
+        else:
+            self._preview_panel_width = max(160, w)
+            self._render_preview_pixmap()
+
+    def _render_preview_pixmap(self):
+        """Scale the current preview pixmap to fit thumbnail_label."""
+        if self._preview_pixmap is None or self._preview_pixmap.isNull():
+            return
+        target_size = self.thumbnail_label.contentsRect().size()
+        if target_size.width() < 40 or target_size.height() < 40:
+            target_size = QSize(max(160, self._preview_panel_width - 12), 180)
+        scaled = self._preview_pixmap.scaled(
+            target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        self.thumbnail_label.setPixmap(scaled)
+        self.thumbnail_label.setText("")
 
     def _on_version_selected_thumbnail(self, current, previous):
+        if not self._project_thumbnails_enabled():
+            return
         # Bump the selected version to the front of the row-thumbnail queue
         # (LIFO), regardless of the preview panel's visibility.
         if (self._version_thumbs_enabled and current is not None
@@ -1831,11 +1940,12 @@ class MainWindow(
                     str(Path(self.config_path).parent / ".lvm_cache"),
                 )
 
-        # Only load the large preview when the panel is visible
-        if not self.thumbnail_label.isVisible():
+        # Only load the large preview when the panel is open
+        if not (self._preview_toggle.isChecked() and not self.thumbnail_label.isHidden()):
             return
 
         if not current:
+            self._preview_pixmap = None
             self.thumbnail_label.setPixmap(QPixmap())
             self.thumbnail_label.setText("No Preview")
             return
@@ -1870,17 +1980,17 @@ class MainWindow(
         worker.deleteLater()
 
     def _on_thumbnail_ready(self, req_id: int, thumb_path: str):
-        if req_id != self._thumb_request_id:
+        if (req_id != self._thumb_request_id
+                or not self._project_thumbnails_enabled()
+                or self.thumbnail_label.isHidden()):
             return
         if thumb_path:
             pixmap = QPixmap(thumb_path)
             if not pixmap.isNull():
-                scaled = pixmap.scaled(
-                    self.thumbnail_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
-                self.thumbnail_label.setPixmap(scaled)
-                self.thumbnail_label.setText("")
+                self._preview_pixmap = pixmap
+                self._render_preview_pixmap()
                 return
+        self._preview_pixmap = None
         self.thumbnail_label.setPixmap(QPixmap())
         self.thumbnail_label.setText("No Preview")
 
@@ -1890,7 +2000,7 @@ class MainWindow(
         """Enable/disable per-version thumbnails in the version tree."""
         self._version_thumbs_enabled = checked
         self._settings.setValue("version_thumbs_enabled", checked)
-        if checked:
+        if checked and self._project_thumbnails_enabled():
             self.version_tree.setIconSize(QSize(48, 27))
             self._queue_version_thumbnails()
         else:
@@ -1909,8 +2019,10 @@ class MainWindow(
 
     def _queue_version_thumbnails(self):
         """Queue background thumbnail generation for all version rows."""
-        if not (self._version_thumbs_enabled and self.config_path
-                and self._current_source):
+        if not (self._project_thumbnails_enabled() and self._version_thumbs_enabled
+                and self.config_path and self._current_source):
+            return
+        if self.version_tree.topLevelItemCount() == 0:
             return
         cache_dir = str(Path(self.config_path).parent / ".lvm_cache")
         worker = self._ensure_thumb_queue_worker()
@@ -1927,7 +2039,7 @@ class MainWindow(
     def _on_version_thumb_ready(self, key: str, thumb_path: str):
         """Set the row icon when its thumbnail lands (rows looked up by
         source_path — item pointers may have been invalidated by a repopulate)."""
-        if not thumb_path or not self._version_thumbs_enabled:
+        if not thumb_path or not self._version_thumbs_enabled or not self._project_thumbnails_enabled():
             return
         for i in range(self.version_tree.topLevelItemCount()):
             item = self.version_tree.topLevelItem(i)
@@ -1978,7 +2090,7 @@ class MainWindow(
             worker.cancel()
             # No "Promotion cancelled" dialogs or batch prompts while closing.
             try:
-                worker.disconnect()
+                worker.blockSignals(True)
             except RuntimeError:
                 pass
             self.statusBar().showMessage("Cancelling promotion before quitting…")
@@ -2045,12 +2157,12 @@ class MainWindow(
                 continue
             seen_ids.add(id(worker))
             try:
-                worker.disconnect()
+                worker.blockSignals(True)
+                if worker.isRunning():
+                    worker.quit()
+                    worker.wait(3000)
             except RuntimeError:
                 pass
-            if worker.isRunning():
-                worker.quit()
-                worker.wait(3000)
 
         # Flush in-flight project config / scan cache writes before exiting
         self._io_executor.shutdown(wait=True)

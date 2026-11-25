@@ -33,11 +33,23 @@ class PromoteControllerMixin:
         if len(selected) >= 1:
             label = f"Promote Selected ({len(selected)})" if len(selected) > 1 else "Promote Selected"
             self.btn_promote_all.setText(label)
+            self.btn_promote_all.setToolTip(
+                "Promotes selected sources that are not on their highest version.\n"
+                "Hold Shift to force re-promote selected sources."
+            )
             self.btn_promote_all.setEnabled(self._worker is None)
             self.btn_promote_split_all.setVisible(True)
+            self.btn_promote_split_all.setToolTip(
+                "Promote all sources to latest (F9).\n"
+                "Hold Shift to force re-promote all sources (Shift+F9)."
+            )
             self.btn_promote_split_all.setEnabled(has_sources and self._worker is None)
         else:
             self.btn_promote_all.setText("Promote All to Latest")
+            self.btn_promote_all.setToolTip(
+                "Promotes sources that are not on their highest version (F9).\n"
+                "Hold Shift to force re-promote all sources (Shift+F9)."
+            )
             self.btn_promote_all.setEnabled(has_sources and self._worker is None)
             self.btn_promote_split_all.setVisible(False)
         self._update_discover_promote_button()
@@ -67,7 +79,11 @@ class PromoteControllerMixin:
                 "everything that isn't on its latest version."
             )
 
-    def _promote_all_or_selected(self):
+    def _promote_all(self, _checked: bool = False):
+        """Promote highest version of all sources (ignoring current selection)."""
+        self._promote_all_or_selected(all_sources=True)
+
+    def _promote_all_or_selected(self, _checked: bool = False, *, all_sources: bool = False):
         """Promote highest version of all or selected sources.
 
         By default, only promotes sources that are not already on their
@@ -75,8 +91,8 @@ class PromoteControllerMixin:
         rewriting identical data, which would trigger unnecessary resyncs
         with file-sync solutions.
 
-        Hold Shift while clicking to force-promote every source, including
-        those already on the highest version.
+        Hold Shift while clicking (or press Shift+F9) to force-promote every
+        source, including those already on the highest version.
         """
         if not self.config or self._is_promotion_active:
             return
@@ -99,7 +115,7 @@ class PromoteControllerMixin:
             if self.config_path:
                 self._save_project()
 
-        selected_items = self.source_list.selectedItems()
+        selected_items = [] if all_sources else self.source_list.selectedItems()
         if len(selected_items) >= 1:
             # Promote selected
             source_names = [item.data(0, Qt.UserRole) for item in selected_items]
@@ -151,7 +167,7 @@ class PromoteControllerMixin:
             if already_current:
                 detail = (
                     "\n\nAll sources are already on their highest version.\n"
-                    "Hold Shift and click to force re-promote."
+                    "Hold Shift and click (or press Shift+F9) to force re-promote."
                 )
             QMessageBox.information(
                 self, "Nothing to Promote",
@@ -228,10 +244,9 @@ class PromoteControllerMixin:
         self._batch_promote_index = 0
         self._batch_promote_next()
 
-    def _promote_all_forced(self):
+    def _promote_all_forced(self, _checked: bool = False):
         """Promote all sources regardless of selection (used by split 'All' button)."""
-        self.source_list.clearSelection()
-        self._promote_all_or_selected()
+        self._promote_all()
 
     def _discover_and_promote(self):
         """Run discovery + auto-add new sources + batch-promote in one click.
@@ -903,6 +918,7 @@ class PromoteControllerMixin:
 
         self.btn_promote.setEnabled(False)
         self.btn_revert.setEnabled(False)
+        self._progress_container.setVisible(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.btn_cancel_promote.setVisible(True)
@@ -960,6 +976,7 @@ class PromoteControllerMixin:
     def _on_promote_finished(self, entry):
         self._worker = None
         self.progress_bar.setVisible(False)
+        self._progress_container.setVisible(False)
         self.btn_cancel_promote.setVisible(False)
 
         self._restore_fallback_link_mode()
@@ -1023,6 +1040,7 @@ class PromoteControllerMixin:
                                   f"{error_source_name}: {first_line[0] if first_line else 'error'}")
         self._auto_promoting_name = None
         self.progress_bar.setVisible(False)
+        self._progress_container.setVisible(False)
         self.btn_cancel_promote.setVisible(False)
         self.btn_promote.setEnabled(True)
 
