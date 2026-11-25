@@ -600,6 +600,86 @@ class TestPromoteAllShortcuts(_MainWindowTestBase):
         self.assertTrue(dlg.isVisible())
         self.assertEqual(dlg.result(), 0)
 
+    def _setup_two_sources(self, status: str):
+        from lvm.models import ProjectConfig, VersionInfo, WatchedSource
+        from lvm.promoter import Promoter
+        from lvm.scanner import VersionScanner
+
+        sources = []
+        for name in ("alpha", "beta"):
+            src_dir = self.tmp / name / "renders"
+            tgt_dir = self.tmp / name / "online"
+            src_dir.mkdir(parents=True)
+            tgt_dir.mkdir(parents=True)
+            sources.append(WatchedSource(name=name, source_dir=str(src_dir), latest_target=str(tgt_dir)))
+
+        self.win.config = ProjectConfig(project_name="P", watched_sources=sources)
+        for s in sources:
+            self.win._scanners[s.name] = VersionScanner(s)
+            self.win._promoters[s.name] = Promoter(s)
+            self.win._versions_cache[s.name] = [
+                VersionInfo("v002", 2, str(self.tmp / s.name / "renders" / "v002"), file_count=1),
+            ]
+            self.win._source_status[s.name] = {"status": status}
+        self.win._populate_source_list()
+        self.win._select_source_by_name("alpha")
+        return next(
+            a for m in self.win.menuBar().actions()
+            for a in m.menu().actions() if a.text() == "&Promote All to Latest"
+        )
+
+    def test_f9_promotes_all_even_when_one_source_is_selected(self):
+        from PySide6.QtWidgets import QDialog
+        action = self._setup_two_sources("newer")
+        captured = []
+
+        class FakeReviewDlg:
+            def __init__(self, promote_list, *_args, **_kwargs):
+                captured.append([s.name for s, _v in promote_list])
+            def exec(self):
+                return QDialog.Rejected
+
+        with patch("app.controllers.promote.BatchPromoteReviewDialog", FakeReviewDlg):
+            action.trigger()
+
+        self.assertEqual(captured, [["alpha", "beta"]])
+        selected = self.win.source_list.selectedItems()
+        self.assertEqual([i.data(0, 0x0100) for i in selected], ["alpha"])
+
+    def test_shift_f9_force_promotes_all_even_when_one_source_is_selected(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDialog
+        action = self._setup_two_sources("highest")
+        captured = []
+
+        class FakeReviewDlg:
+            def __init__(self, promote_list, *_args, **_kwargs):
+                captured.append([s.name for s, _v in promote_list])
+            def exec(self):
+                return QDialog.Rejected
+
+        with patch("app.controllers.promote.BatchPromoteReviewDialog", FakeReviewDlg), \
+             patch.object(QApplication, "keyboardModifiers", return_value=Qt.ShiftModifier):
+            action.trigger()
+
+        self.assertEqual(captured, [["alpha", "beta"]])
+
+    def test_promote_selected_button_still_promotes_only_selected(self):
+        from PySide6.QtWidgets import QDialog
+        self._setup_two_sources("newer")
+        captured = []
+
+        class FakeReviewDlg:
+            def __init__(self, promote_list, *_args, **_kwargs):
+                captured.append([s.name for s, _v in promote_list])
+            def exec(self):
+                return QDialog.Rejected
+
+        with patch("app.controllers.promote.BatchPromoteReviewDialog", FakeReviewDlg):
+            self.win._promote_all_or_selected()
+
+        self.assertEqual(captured, [["alpha"]])
+
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")
 class TestResolveMetadataSetting(unittest.TestCase):
@@ -885,6 +965,139 @@ class TestP0GuiRegressions(_MainWindowTestBase):
             self.win._start_promotion(p, v)
         self.win._worker = None
         self.assertEqual(captured_force, [True, False])
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TestThumbnailsSettingAndLayout(_MainWindowTestBase):
+    """Project-level thumbnails setting, checkbox toggle, header preview, and no-preload guards."""
+
+    def _setup_source_with_version(self, thumbnails_enabled: bool = True):
+        from lvm.models import ProjectConfig, VersionInfo, WatchedSource
+        from lvm.scanner import VersionScanner
+
+        vdir = self.tmp / "renders" / "shot_v001"
+        vdir.mkdir(parents=True)
+        (vdir / "shot_v001.1001.exr").write_bytes(b"exr")
+        src = WatchedSource(name="shot", source_dir=str(self.tmp / "renders"))
+        cfg = ProjectConfig(
+            project_name="P",
+            watched_sources=[src],
+            thumbnails_enabled=thumbnails_enabled,
+        )
+        self.win.config = cfg
+        self.win.config_path = str(self.tmp / "p.json")
+        self.win._scanners["shot"] = VersionScanner(src)
+        self.win._versions_cache["shot"] = [
+            VersionInfo("v001", 1, str(vdir), file_count=1),
+        ]
+        self.win._source_status = {"shot": {"status": "no_version"}}
+        self.win._sync_thumbnail_controls()
+        return cfg
+
+    def test_thumbnails_toggle_is_checkbox_and_preview_starts_folded(self):
+        from PySide6.QtWidgets import QCheckBox
+        self.assertIsInstance(self.win._version_thumbs_toggle, QCheckBox)
+        self.assertFalse(self.win._preview_toggle.isChecked())
+        self.assertTrue(self.win.thumbnail_label.isHidden())
+        self.assertIs(self.win._ver_content_splitter.widget(1), self.win.thumbnail_label)
+        self.assertTrue(self.win._progress_container.isHidden())
+
+    def test_no_thumbnails_preloaded_when_toggle_off(self):
+        self._setup_source_with_version(thumbnails_enabled=True)
+        self.assertFalse(self.win._version_thumbs_enabled)
+
+        with patch("lvm.thumbnail.get_thumbnail", side_effect=AssertionError("must not preload")):
+            self.win._on_source_selected_by_name("shot")
+            item = self.win.version_tree.topLevelItem(0)
+            self.assertIsNotNone(item)
+            self.win.version_tree.setCurrentItem(item)
+            QApplication.processEvents()
+
+        self.assertIsNone(self.win._thumb_queue_worker)
+        self.assertIsNone(self.win._thumb_worker)
+
+    def test_project_setting_disabled_blocks_all_thumbnails_and_hides_controls(self):
+        self.win._version_thumbs_enabled = True
+        self._setup_source_with_version(thumbnails_enabled=False)
+
+        self.assertTrue(self.win._version_thumbs_toggle.isHidden())
+        self.assertTrue(self.win._preview_toggle.isHidden())
+        self.assertTrue(self.win.thumbnail_label.isHidden())
+
+        with patch("lvm.thumbnail.get_thumbnail", side_effect=AssertionError("must not preload")):
+            self.win._on_source_selected_by_name("shot")
+            item = self.win.version_tree.topLevelItem(0)
+            self.assertIsNotNone(item)
+            self.win.version_tree.setCurrentItem(item)
+            self.win._toggle_preview_panel(True)
+            self.win._queue_version_thumbnails()
+            QApplication.processEvents()
+
+        self.assertFalse(self.win._preview_toggle.isChecked())
+        self.assertTrue(self.win.thumbnail_label.isHidden())
+        self.assertIsNone(self.win._thumb_queue_worker)
+        self.assertIsNone(self.win._thumb_worker)
+
+    def test_disabling_project_setting_clears_active_icons_and_preview(self):
+        cfg = self._setup_source_with_version(thumbnails_enabled=True)
+        with patch("lvm.thumbnail.get_thumbnail", return_value=None):
+            self.win._on_source_selected_by_name("shot")
+            item = self.win.version_tree.topLevelItem(0)
+            self.win.version_tree.setCurrentItem(item)
+            self.win._version_thumbs_toggle.setChecked(True)
+            self.win._preview_toggle.setChecked(True)
+            QApplication.processEvents()
+
+        self.assertFalse(self.win.thumbnail_label.isHidden())
+        self.assertTrue(self.win._preview_toggle.isChecked())
+        self.assertFalse(self.win.version_tree.iconSize().isEmpty())
+
+        cfg.thumbnails_enabled = False
+        self.win._sync_thumbnail_controls()
+
+        self.assertTrue(self.win._version_thumbs_toggle.isHidden())
+        self.assertTrue(self.win._preview_toggle.isHidden())
+        self.assertFalse(self.win._preview_toggle.isChecked())
+        self.assertTrue(self.win.thumbnail_label.isHidden())
+        self.assertTrue(self.win.version_tree.iconSize().isEmpty())
+
+    def test_settings_dialog_round_trips_thumbnails_enabled(self):
+        from app.dialogs.settings import ProjectSettingsDialog
+        from lvm.models import ProjectConfig
+
+        cfg = ProjectConfig(project_name="P", thumbnails_enabled=False)
+        dlg = ProjectSettingsDialog(cfg)
+        self.addCleanup(dlg.deleteLater)
+        self.assertFalse(dlg.thumbnails_enabled_cb.isChecked())
+        dlg.thumbnails_enabled_cb.setChecked(True)
+        dlg.apply_to_config(cfg)
+        self.assertTrue(cfg.thumbnails_enabled)
+        dlg.thumbnails_enabled_cb.setChecked(False)
+        dlg.apply_to_config(cfg)
+        self.assertFalse(cfg.thumbnails_enabled)
+
+    def test_thumbnails_enabled_config_and_template_round_trip(self):
+        from lvm import templates
+        from lvm.models import ProjectConfig
+
+        default_cfg = ProjectConfig(project_name="P")
+        self.assertNotIn("thumbnails_enabled", default_cfg.to_dict())
+        self.assertTrue(ProjectConfig.from_dict({}).thumbnails_enabled)
+
+        disabled_cfg = ProjectConfig(project_name="P", thumbnails_enabled=False)
+        raw = disabled_cfg.to_dict()
+        self.assertEqual(raw.get("thumbnails_enabled"), False)
+        self.assertFalse(ProjectConfig.from_dict(raw).thumbnails_enabled)
+
+        user_tpls = self.tmp / "user_tpls"
+        with patch.object(templates, "get_user_templates_dir", return_value=user_tpls):
+            path = templates.save_template(disabled_cfg, "NoThumbs", location="user")
+            data = templates.load_template(path)
+        target = ProjectConfig(project_name="Q")
+        templates.apply_template(target, data)
+        self.assertFalse(target.thumbnails_enabled)
+        templates.apply_template(target, {})
+        self.assertTrue(target.thumbnails_enabled)
 
 
 if __name__ == "__main__":

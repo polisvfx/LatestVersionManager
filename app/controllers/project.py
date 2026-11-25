@@ -131,6 +131,7 @@ class ProjectControllerMixin:
         self._auto_settle.clear()
         self._render_wait_sources.clear()
         self._auto_check_rerun.clear()
+        self._clear_thumbnail_work()
 
         self.statusBar().showMessage(f"Loading: {path}…")
         w = ProjectLoadWorker(path, self)
@@ -368,6 +369,7 @@ class ProjectControllerMixin:
         dlg.nle_state_changed.connect(self._refresh_sync_names_state)
         if dlg.exec() == QDialog.Accepted:
             dlg.apply_to_config(self.config)
+            self._sync_thumbnail_controls()
             # Hooks explicitly saved by the user in Settings are trusted automatically
             self._trust_hook_commands(self.config.pre_promote_cmd, self.config.post_promote_cmd)
             self._mark_dirty()

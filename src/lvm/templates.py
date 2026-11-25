@@ -52,6 +52,7 @@ _TEMPLATE_FIELDS: tuple[str, ...] = (
     "nle_resolve_metadata_field",
     "discover_and_promote_enabled",
     "auto_promote_notifications",
+    "thumbnails_enabled",
 )
 
 

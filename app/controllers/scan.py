@@ -54,6 +54,7 @@ class ScanControllerMixin:
         self.btn_promote_all.setEnabled(False)
         self.btn_promote_all.setText("Promote All to Latest")
         self.btn_promote_split_all.setVisible(False)
+        self._sync_thumbnail_controls()
 
         if not self.config:
             self.current_label.setText("No project loaded")
